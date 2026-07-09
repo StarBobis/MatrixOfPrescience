@@ -147,7 +147,9 @@
     "reasoningPanel": "Reasoning",
     "reasoningLines": "{count} lines",
     "execution": {
+      "collapse": "Collapse execution",
       "detail": "Details",
+      "expand": "Expand execution",
       "kind": {
         "reasoning": "Reasoning",
         "status": "Status",

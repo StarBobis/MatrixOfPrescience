@@ -147,7 +147,9 @@
     "reasoningPanel": "推理过程",
     "reasoningLines": "{count} 行",
     "execution": {
+      "collapse": "收起执行过程",
       "detail": "详情",
+      "expand": "展开执行过程",
       "kind": {
         "reasoning": "推理",
         "status": "状态",

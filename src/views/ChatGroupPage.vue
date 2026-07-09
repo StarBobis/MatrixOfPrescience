@@ -138,7 +138,12 @@ const DEEPSEEK_STANDARD_CONTEXT_LIMIT = 128_000;
 const DEFAULT_CONTEXT_LIMIT = 128_000;
 const CACHE_PREFIX_MESSAGE_COUNT = 4;
 const RECENT_CONVERSATION_MESSAGE_COUNT = 14;
-const MAX_MESSAGE_EXECUTION_ITEMS = 160;
+const MAX_MESSAGE_EXECUTION_ITEMS = 80;
+const MAX_MESSAGE_THOUGHT_STEPS = 80;
+const MAX_TRACE_TEXT_CHARS = 1200;
+const MAX_TRACE_DETAIL_CHARS = 6000;
+const MAX_STREAMING_TRACE_CHUNK_CHARS = 8000;
+const TRACE_TRUNCATED_MARKER = "\n[trace truncated]";
 
 const { t } = useI18n();
 const settingsStore = useSettingsStore();
@@ -841,13 +846,29 @@ function addThoughtSteps(messageId: string, steps: string[]) {
 }
 
 function formatReasoningStep(step: ChatTraceStep) {
-  const text = step.text.trim();
+  const text = limitRuntimeText(step.text.trim(), MAX_TRACE_TEXT_CHARS);
 
   if (!text) {
     return "";
   }
 
   return text;
+}
+
+function limitRuntimeText(value: string, maxLength: number) {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return `${value.slice(0, maxLength)}${TRACE_TRUNCATED_MARKER}`;
+}
+
+function appendRuntimeText(current: string, next: string, maxLength: number) {
+  if (current.includes(TRACE_TRUNCATED_MARKER.trim())) {
+    return current;
+  }
+
+  return limitRuntimeText(`${current}${next}`, maxLength);
 }
 
 function addResponseTraceSteps(messageId: string, response: ChatCompletionResponse) {
@@ -875,8 +896,8 @@ function createActivityItem(
     id: crypto.randomUUID(),
     kind,
     status,
-    text,
-    detail: detail.trim() || undefined,
+    text: limitRuntimeText(text, MAX_TRACE_TEXT_CHARS),
+    detail: detail.trim() ? limitRuntimeText(detail.trim(), MAX_TRACE_DETAIL_CHARS) : undefined,
   };
 }
 
@@ -890,8 +911,8 @@ function createExecutionItem(
     id: crypto.randomUUID(),
     kind,
     status,
-    text,
-    detail: detail.trim() || undefined,
+    text: limitRuntimeText(text, MAX_TRACE_TEXT_CHARS),
+    detail: detail.trim() ? limitRuntimeText(detail.trim(), MAX_TRACE_DETAIL_CHARS) : undefined,
     createdAt: Date.now(),
   };
 }
@@ -966,14 +987,19 @@ function inferToolActivityStatus(text: string): ChatMessageActivityStatus {
 function updateThoughtStepAt(messageId: string, index: number, step: string) {
   const message = activeMessages.value.find((item) => item.id === messageId);
   const thoughtSteps = [...(message?.thoughtSteps ?? [])];
+  const cappedStep = limitRuntimeText(step.trim(), MAX_TRACE_TEXT_CHARS);
 
-  if (index < thoughtSteps.length) {
-    thoughtSteps[index] = step;
-  } else {
-    thoughtSteps.push(step);
+  if (!cappedStep) {
+    return;
   }
 
-  settingsStore.updateMessage(messageId, { thoughtSteps });
+  if (index < thoughtSteps.length) {
+    thoughtSteps[index] = cappedStep;
+  } else {
+    thoughtSteps.push(cappedStep);
+  }
+
+  settingsStore.updateMessage(messageId, { thoughtSteps: thoughtSteps.slice(-MAX_MESSAGE_THOUGHT_STEPS) });
 }
 
 function updateExecutionItem(messageId: string, itemId: string, patch: Partial<ChatMessageExecutionItem>) {
@@ -983,6 +1009,8 @@ function updateExecutionItem(messageId: string, itemId: string, patch: Partial<C
       ? {
           ...item,
           ...patch,
+          text: patch.text ? limitRuntimeText(patch.text, MAX_TRACE_TEXT_CHARS) : item.text,
+          detail: patch.detail ? limitRuntimeText(patch.detail, MAX_TRACE_DETAIL_CHARS) : item.detail,
         }
       : item,
   );
@@ -1025,7 +1053,7 @@ function appendStreamingTraceText(
           text: "",
         };
 
-  next.text += text;
+  next.text = appendRuntimeText(next.text, text, MAX_TRACE_TEXT_CHARS);
   streamingTraceLines.set(messageId, next);
   const formatted = formatReasoningStep({ kind, text: next.text });
   updateThoughtStepAt(messageId, next.index, formatted);
@@ -1043,7 +1071,11 @@ function appendStreamingTraceChunk(
   kind: ChatTraceStep["kind"],
   chunk: string,
 ) {
-  const lines = chunk.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  const normalizedChunk = limitRuntimeText(
+    chunk.replace(/\r\n/g, "\n").replace(/\r/g, "\n"),
+    MAX_STREAMING_TRACE_CHUNK_CHARS,
+  );
+  const lines = normalizedChunk.split("\n");
 
   lines.forEach((line, index) => {
     if (line) {

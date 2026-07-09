@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { CirclePlus, EditPen } from "@element-plus/icons-vue";
 import { useI18n } from "vue-i18n";
 import { chooseLocalAvatar, getAvatarSrc } from "../utils/avatar";
@@ -30,6 +30,10 @@ const editingMemberCardId = ref("");
 const memberNameDrafts = ref<Record<string, string>>({});
 const { t } = useI18n();
 let memberCardCloseTimer: number | undefined;
+let memberCardWatchTimer: number | undefined;
+let lastPointerPosition: { x: number; y: number } | null = null;
+const memberCardHideDelayMs = 140;
+const memberCardWatchIntervalMs = 360;
 
 const sortedMembers = computed(() =>
   props.members
@@ -48,9 +52,83 @@ function getInitial(name: string) {
 function showMemberCard(memberId: string) {
   if (memberCardCloseTimer) {
     window.clearTimeout(memberCardCloseTimer);
+    memberCardCloseTimer = undefined;
   }
 
   activeMemberCardId.value = memberId;
+  startMemberCardWatchdog();
+}
+
+function hideMemberCard(memberId = activeMemberCardId.value, force = false) {
+  if (!memberId || (!force && editingMemberCardId.value === memberId)) {
+    return;
+  }
+
+  if (memberCardCloseTimer) {
+    window.clearTimeout(memberCardCloseTimer);
+    memberCardCloseTimer = undefined;
+  }
+
+  if (activeMemberCardId.value === memberId) {
+    activeMemberCardId.value = "";
+  }
+
+  if (editingMemberCardId.value === memberId) {
+    editingMemberCardId.value = "";
+  }
+
+  hideActiveMemberCardIfPointerAway();
+}
+
+function isInsideActiveMemberCardTarget(target: EventTarget | null) {
+  const activeId = activeMemberCardId.value;
+
+  if (!activeId || !(target instanceof Element)) {
+    return false;
+  }
+
+  const card = target.closest<HTMLElement>("[data-member-card-id]");
+  const popover = target.closest<HTMLElement>("[data-member-popover-id]");
+
+  return card?.dataset.memberCardId === activeId || popover?.dataset.memberPopoverId === activeId;
+}
+
+function isPointerInsideActiveMemberCard() {
+  if (!lastPointerPosition) {
+    return false;
+  }
+
+  return isInsideActiveMemberCardTarget(
+    document.elementFromPoint(lastPointerPosition.x, lastPointerPosition.y),
+  );
+}
+
+function hideActiveMemberCardIfPointerAway() {
+  const activeId = activeMemberCardId.value;
+
+  if (!activeId || editingMemberCardId.value === activeId || isPointerInsideActiveMemberCard()) {
+    return;
+  }
+
+  scheduleHideMemberCard(activeId);
+}
+
+function startMemberCardWatchdog() {
+  if (memberCardWatchTimer) {
+    return;
+  }
+
+  memberCardWatchTimer = window.setInterval(
+    hideActiveMemberCardIfPointerAway,
+    memberCardWatchIntervalMs,
+  );
+}
+
+function stopMemberCardWatchdog() {
+  if (memberCardWatchTimer) {
+    window.clearInterval(memberCardWatchTimer);
+    memberCardWatchTimer = undefined;
+  }
 }
 
 function scheduleHideMemberCard(memberId: string) {
@@ -60,13 +138,14 @@ function scheduleHideMemberCard(memberId: string) {
 
   if (memberCardCloseTimer) {
     window.clearTimeout(memberCardCloseTimer);
+    memberCardCloseTimer = undefined;
   }
 
   memberCardCloseTimer = window.setTimeout(() => {
     if (activeMemberCardId.value === memberId && editingMemberCardId.value !== memberId) {
-      activeMemberCardId.value = "";
+      hideMemberCard(memberId);
     }
-  }, 160);
+  }, memberCardHideDelayMs);
 }
 
 function startMemberCardEdit(memberId: string) {
@@ -131,6 +210,67 @@ async function assignOwnerAvatar() {
     });
   }
 }
+
+function handleGlobalPointerMove(event: PointerEvent) {
+  lastPointerPosition = {
+    x: event.clientX,
+    y: event.clientY,
+  };
+
+  if (activeMemberCardId.value && !isInsideActiveMemberCardTarget(event.target)) {
+    hideActiveMemberCardIfPointerAway();
+  }
+}
+
+function handleGlobalPointerLeave() {
+  hideMemberCard(activeMemberCardId.value, true);
+}
+
+function handleGlobalVisibilityChange() {
+  if (document.hidden) {
+    hideMemberCard(activeMemberCardId.value, true);
+  }
+}
+
+watch(
+  () => props.members.map((member) => member.id).join("|"),
+  () => {
+    if (activeMemberCardId.value && !props.members.some((member) => member.id === activeMemberCardId.value)) {
+      hideMemberCard(activeMemberCardId.value, true);
+    }
+  },
+);
+
+watch(activeMemberCardId, (memberId) => {
+  if (memberId) {
+    startMemberCardWatchdog();
+    return;
+  }
+
+  stopMemberCardWatchdog();
+});
+
+onMounted(() => {
+  window.addEventListener("pointermove", handleGlobalPointerMove, true);
+  window.addEventListener("pointerleave", handleGlobalPointerLeave);
+  window.addEventListener("blur", handleGlobalPointerLeave);
+  window.addEventListener("scroll", hideActiveMemberCardIfPointerAway, true);
+  document.addEventListener("visibilitychange", handleGlobalVisibilityChange);
+});
+
+onBeforeUnmount(() => {
+  if (memberCardCloseTimer) {
+    window.clearTimeout(memberCardCloseTimer);
+    memberCardCloseTimer = undefined;
+  }
+
+  stopMemberCardWatchdog();
+  window.removeEventListener("pointermove", handleGlobalPointerMove, true);
+  window.removeEventListener("pointerleave", handleGlobalPointerLeave);
+  window.removeEventListener("blur", handleGlobalPointerLeave);
+  window.removeEventListener("scroll", hideActiveMemberCardIfPointerAway, true);
+  document.removeEventListener("visibilitychange", handleGlobalVisibilityChange);
+});
 </script>
 
 <template>
@@ -216,6 +356,7 @@ async function assignOwnerAvatar() {
             class="right-member-card"
             :class="{ admin: member.isAdmin, muted: !member.enabled }"
             :style="{ '--member-accent': member.color }"
+            :data-member-card-id="member.id"
             @mouseenter="showMemberCard(member.id)"
             @mouseleave="scheduleHideMemberCard(member.id)"
           >
@@ -249,6 +390,7 @@ async function assignOwnerAvatar() {
 
         <div
           class="member-profile-card"
+          :data-member-popover-id="member.id"
           @mouseenter="showMemberCard(member.id)"
           @mouseleave="scheduleHideMemberCard(member.id)"
         >

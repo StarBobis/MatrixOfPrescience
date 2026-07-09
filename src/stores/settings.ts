@@ -164,6 +164,8 @@ const ACTIVITY_ITEM_DETAIL_LIMIT = 6000;
 const EXECUTION_ITEM_LIMIT = 160;
 const EXECUTION_ITEM_TEXT_LIMIT = 1200;
 const EXECUTION_ITEM_DETAIL_LIMIT = 6000;
+const PERSIST_DEBOUNCE_MS = 800;
+let pendingPersistTimer: number | undefined;
 
 type PersistenceMode = "normal" | "compact" | "minimal";
 
@@ -740,9 +742,16 @@ export const useSettingsStore = defineStore("settings", {
     startPersistence() {
       this.$subscribe(
         () => {
-          void this.persist().catch((error) => {
-            console.warn("Failed to persist settings.", error);
-          });
+          if (pendingPersistTimer) {
+            window.clearTimeout(pendingPersistTimer);
+          }
+
+          pendingPersistTimer = window.setTimeout(() => {
+            pendingPersistTimer = undefined;
+            void this.persist().catch((error) => {
+              console.warn("Failed to persist settings.", error);
+            });
+          }, PERSIST_DEBOUNCE_MS);
         },
         { detached: true },
       );
