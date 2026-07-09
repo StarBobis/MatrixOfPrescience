@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { nextTick, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
-import { FolderOpened, Promotion, Setting } from "@element-plus/icons-vue";
+import { FolderOpened, Promotion } from "@element-plus/icons-vue";
 import type { ChatGroup, ChatMessage } from "../stores/settings";
 
 defineProps<{
@@ -20,7 +20,6 @@ const emit = defineEmits<{
   "update:composer": [value: string];
   "update:workspacePath": [value: string];
   sendMessage: [];
-  openSettings: [];
 }>();
 
 const messagesPanel = ref<HTMLElement | null>(null);
@@ -53,14 +52,29 @@ defineExpose({
 <template>
   <main class="chat-workspace">
     <header class="chat-header">
-      <div>
-        <p class="eyebrow">Group Conversation</p>
-        <h2>{{ activeGroup?.name }}</h2>
-        <p class="group-description">{{ activeGroup?.description }}</p>
+      <div class="chat-header-main">
+        <div class="chat-header-info">
+          <h2 class="chat-group-name">{{ activeGroup?.name }}</h2>
+          <p v-if="activeGroup?.description" class="chat-group-desc">{{ activeGroup?.description }}</p>
+        </div>
+        <div class="chat-header-meta">
+          <el-tag type="info" size="small">{{ activeMemberCount }} 群友在线</el-tag>
+        </div>
       </div>
-      <div class="header-actions">
-        <el-tag type="info">{{ activeMemberCount }} 个未禁言群友</el-tag>
-        <el-button :icon="Setting" @click="emit('openSettings')">设置</el-button>
+      <div class="chat-header-tools">
+        <span class="workspace-label">工作文件夹</span>
+        <el-input
+          class="workspace-input"
+          :model-value="workspacePath"
+          placeholder="选择或输入路径…"
+          size="small"
+          clearable
+          @update:model-value="emit('update:workspacePath', String($event))"
+        >
+          <template #append>
+            <el-button :icon="FolderOpened" size="small" title="选择工作文件夹" @click="chooseWorkspacePath" />
+          </template>
+        </el-input>
       </div>
     </header>
 
@@ -96,20 +110,6 @@ defineExpose({
         </div>
       </article>
     </section>
-
-    <div class="workspace-bar">
-      <span>当前群工作文件夹</span>
-      <el-input
-        :model-value="workspacePath"
-        placeholder="选择或输入当前群工作文件夹路径"
-        clearable
-        @update:model-value="emit('update:workspacePath', String($event))"
-      >
-        <template #append>
-          <el-button :icon="FolderOpened" title="选择工作文件夹" @click="chooseWorkspacePath" />
-        </template>
-      </el-input>
-    </div>
 
     <footer class="composer">
       <el-input

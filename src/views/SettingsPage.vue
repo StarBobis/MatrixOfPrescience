@@ -2,6 +2,7 @@
 import { storeToRefs } from "pinia";
 import { Setting, UserFilled } from "@element-plus/icons-vue";
 import { type ProviderId, useSettingsStore } from "../stores/settings";
+import { chooseLocalAvatar, getAvatarSrc } from "../utils/avatar";
 
 const settingsStore = useSettingsStore();
 const { providers, ownerProfile } = storeToRefs(settingsStore);
@@ -21,6 +22,14 @@ const modelPresets: Record<ProviderId, string[]> = {
   openai: ["gpt-4.1", "gpt-4.1-mini", "gpt-4o", "gpt-4o-mini"],
   deepseek: ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"],
 };
+
+async function chooseOwnerAvatar() {
+  const avatar = await chooseLocalAvatar();
+
+  if (avatar) {
+    ownerProfile.value.avatar = avatar;
+  }
+}
 </script>
 
 <template>
@@ -46,7 +55,7 @@ const modelPresets: Record<ProviderId, string[]> = {
 
         <div class="owner-preview">
           <span class="owner-avatar" :style="{ background: ownerProfile.color }">
-            <img v-if="ownerProfile.avatar" :src="ownerProfile.avatar" alt="" />
+            <img v-if="ownerProfile.avatar" :src="getAvatarSrc(ownerProfile.avatar)" alt="" />
             <el-icon v-else>
               <UserFilled />
             </el-icon>
@@ -61,8 +70,12 @@ const modelPresets: Record<ProviderId, string[]> = {
           <el-form-item label="名称">
             <el-input v-model="ownerProfile.name" placeholder="我" />
           </el-form-item>
-          <el-form-item label="头像 URL">
-            <el-input v-model="ownerProfile.avatar" placeholder="https://..." />
+          <el-form-item label="头像">
+            <el-input v-model="ownerProfile.avatar" placeholder="选择本地图片或输入图片路径">
+              <template #append>
+                <el-button @click="chooseOwnerAvatar">选择</el-button>
+              </template>
+            </el-input>
           </el-form-item>
           <el-form-item label="头像底色">
             <el-color-picker v-model="ownerProfile.color" />

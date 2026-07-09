@@ -221,24 +221,64 @@ h2 {
 
 .chat-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  padding: 18px;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 18px 14px;
   border-bottom: 1px solid #e2e6e1;
   background: #ffffff;
 }
 
-.group-description {
-  margin-top: 6px;
-  color: #68746d;
-  font-size: 13px;
+.chat-header-main {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
 }
 
-.header-actions {
+.chat-header-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.chat-group-name {
+  margin: 0;
+  color: #18221d;
+  font-size: 20px;
+  line-height: 1.25;
+}
+
+.chat-group-desc {
+  margin-top: 5px;
+  color: #78857d;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.chat-header-meta {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+  padding-top: 2px;
+}
+
+.chat-header-tools {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
+}
+
+.workspace-label {
+  flex-shrink: 0;
+  color: #8d968f;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.workspace-input {
+  min-width: 0;
+  flex: 1;
+  max-width: 520px;
 }
 
 .messages-panel {
@@ -457,25 +497,11 @@ h2 {
   background: #ffffff;
 }
 
-.workspace-bar {
-  display: grid;
-  gap: 6px;
-  padding: 12px 18px 0;
-  border-top: 1px solid #e2e6e1;
-  background: #ffffff;
-}
-
-.workspace-bar span {
-  color: #66726b;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.workspace-bar .el-input-group__append {
+.workspace-input .el-input-group__append {
   padding: 0;
 }
 
-.workspace-bar .el-input-group__append .el-button {
+.workspace-input .el-input-group__append .el-button {
   margin: 0;
   border-radius: 0 4px 4px 0;
 }
@@ -573,8 +599,8 @@ h2 {
     padding: 12px;
   }
 
-  .chat-header,
-  .header-actions,
+  .chat-header-main,
+  .chat-header-tools,
   .composer,
   .settings-toolbar,
   .member-grid {

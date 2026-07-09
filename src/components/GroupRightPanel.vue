@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
-import { CirclePlus, Close } from "@element-plus/icons-vue";
+import GroupMemberPanel from "./GroupMemberPanel.vue";
 import type {
   AgentCollaborationConfig,
   AgentMode,
@@ -54,7 +54,6 @@ const props = defineProps<{
 const emit = defineEmits<{
   addMember: [provider: ProviderId];
   removeMember: [memberId: string];
-  assignAvatar: [member: AgentModel];
   updatePatchStatus: [proposalId: string, status: PatchApprovalStatus];
   removePatchProposal: [proposalId: string];
 }>();
@@ -97,10 +96,6 @@ const safetyVerdictText: Record<AgentPatchProposal["safetyCheck"]["verdict"], st
   "needs-confirmation": "需确认",
   blocked: "已阻止",
 };
-
-function getInitial(name: string) {
-  return name.trim().slice(0, 1) || "?";
-}
 
 function syncEditBeforeAsk(value: boolean) {
   if (value) {
@@ -336,133 +331,13 @@ function finishAnnouncementEdit() {
       </div>
     </section>
 
-    <section class="member-panel">
-      <div class="section-heading">
-        <span>群友列表</span>
-        <div class="member-heading-actions">
-          <el-tag size="small" type="success">{{ members.length + 1 }}</el-tag>
-          <el-popover trigger="click" placement="left-start" :width="220">
-            <template #reference>
-              <el-button class="member-add-btn" circle type="primary" :icon="CirclePlus" />
-            </template>
-
-            <div class="add-member-card">
-              <strong>添加群友</strong>
-              <el-button type="primary" plain @click="emit('addMember', 'openai')">
-                ChatGPT 群友
-              </el-button>
-              <el-button plain @click="emit('addMember', 'deepseek')">
-                DeepSeek 群友
-              </el-button>
-            </div>
-          </el-popover>
-        </div>
-      </div>
-
-      <div class="right-member-list">
-          <article class="owner-card">
-            <span class="member-avatar owner-avatar" :style="{ background: ownerProfile.color }">
-              <img v-if="ownerProfile.avatar" :src="ownerProfile.avatar" alt="" />
-              <span v-else>{{ getInitial(ownerProfile.name) }}</span>
-            </span>
-            <div class="member-card-copy">
-              <strong>{{ ownerProfile.name || "我" }}</strong>
-              <span>群主</span>
-            </div>
-          </article>
-
-          <el-popover
-            v-for="member in members"
-            :key="member.id"
-            trigger="hover"
-            placement="left-start"
-            :width="292"
-            popper-class="member-popover"
-          >
-            <template #reference>
-              <div
-                class="right-member-card"
-                :class="{ muted: !member.enabled }"
-              >
-                <span class="member-avatar" :style="{ background: member.color }">
-                  <img v-if="member.avatar" :src="member.avatar" alt="" />
-                  <span v-else>{{ getInitial(member.name) }}</span>
-                </span>
-                <div class="member-card-copy">
-                  <strong>{{ member.name }}</strong>
-                  <span>{{ member.enabled ? "未禁言" : "已禁言" }}</span>
-                </div>
-                <button
-                  class="member-remove-btn"
-                  type="button"
-                  title="踢出群友"
-                  @click.stop="emit('removeMember', member.id)"
-                >
-                  <el-icon><Close /></el-icon>
-                </button>
-              </div>
-            </template>
-
-            <div class="member-profile-card">
-              <div class="profile-head">
-                <span class="profile-avatar" :style="{ background: member.color }">
-                  <img v-if="member.avatar" :src="member.avatar" alt="" />
-                  <span v-else>{{ getInitial(member.name) }}</span>
-                </span>
-                <div class="profile-title">
-                  <strong>{{ member.name }}</strong>
-                  <span>{{ member.enabled ? "未禁言" : "已禁言" }}</span>
-                </div>
-              </div>
-
-              <dl class="profile-details">
-                <div>
-                  <dt>API</dt>
-                  <dd>{{ getProviderLabel(member.provider) }}</dd>
-                </div>
-                <div>
-                  <dt>模型</dt>
-                  <dd>{{ member.model }}</dd>
-                </div>
-                <div>
-                  <dt>温度</dt>
-                  <dd>{{ member.temperature.toFixed(1) }}</dd>
-                </div>
-              </dl>
-
-              <div class="profile-muted-row">
-                <span>是否禁言</span>
-                <el-switch
-                  v-model="member.enabled"
-                  size="small"
-                  inline-prompt
-                  active-text="是"
-                  inactive-text="否"
-                  active-color="#c45656"
-                  :active-value="false"
-                  :inactive-value="true"
-                />
-              </div>
-
-              <div class="profile-prompt">
-                <span>角色身份</span>
-                <el-input
-                  v-model="member.systemPrompt"
-                  type="textarea"
-                  :autosize="{ minRows: 3, maxRows: 7 }"
-                  resize="none"
-                  placeholder="描述这个群友的分工、立场和回答边界"
-                />
-              </div>
-
-              <div class="profile-actions">
-                <el-button size="small" @click="emit('assignAvatar', member)">分配头像</el-button>
-                <el-button size="small" type="danger" plain @click="emit('removeMember', member.id)">踢出群友</el-button>
-              </div>
-            </div>
-          </el-popover>
-      </div>
-    </section>
+    <GroupMemberPanel
+      :members="members"
+      :owner-profile="ownerProfile"
+      :get-provider-label="getProviderLabel"
+      @add-member="(provider) => emit('addMember', provider)"
+      @remove-member="(memberId) => emit('removeMember', memberId)"
+    />
   </aside>
 </template>
 
@@ -484,16 +359,9 @@ function finishAnnouncementEdit() {
 
 .announcement-panel,
 .agent-panel,
-.patch-panel,
-.member-panel {
+.patch-panel {
   display: grid;
   gap: 12px;
-}
-
-.member-panel {
-  flex: 1;
-  min-height: 160px;
-  grid-template-rows: auto minmax(0, 1fr);
 }
 
 .section-heading {

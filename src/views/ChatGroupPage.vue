@@ -208,18 +208,6 @@ function removeMember(memberId: string) {
   settingsStore.removeMember(memberId);
 }
 
-function assignMemberAvatar(member: AgentModel) {
-  ElMessageBox.prompt("输入头像图片 URL；留空会使用名称首字。", `设置 ${member.name} 的头像`, {
-    confirmButtonText: "保存",
-    cancelButtonText: "取消",
-    inputValue: member.avatar ?? "",
-  })
-    .then(({ value }) => {
-      member.avatar = value.trim();
-    })
-    .catch(() => undefined);
-}
-
 function buildConversation(): ApiChatMessage[] {
   return activeMessages.value
     .filter((message) => message.modelName !== "系统")
@@ -824,7 +812,6 @@ onMounted(() => {
           :status-text="statusText"
           :render-markdown="renderMarkdown"
           @send-message="sendMessage"
-          @open-settings="emit('openSettings')"
         />
       </template>
 
@@ -839,7 +826,6 @@ onMounted(() => {
           :get-provider-label="getProviderLabel"
           @add-member="addMember"
           @remove-member="removeMember"
-          @assign-avatar="assignMemberAvatar"
           @update-patch-status="updatePatchProposalStatus"
           @remove-patch-proposal="settingsStore.removePatchProposal"
         />
