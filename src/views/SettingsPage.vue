@@ -180,7 +180,9 @@ async function chooseCacheDirectory() {
 
 <style scoped>
 .settings-page {
+  width: 100%;
   flex: 1;
+  min-width: 0;
   min-height: 0;
   overflow: auto;
   padding: 16px;
@@ -190,12 +192,17 @@ async function chooseCacheDirectory() {
   display: flex;
   align-items: center;
   gap: 12px;
+  min-width: 0;
   margin-bottom: 16px;
   padding: 18px;
   border: 1px solid #d9ded8;
   border-radius: 8px;
   background: #fbfcfb;
   box-shadow: 0 14px 34px rgba(31, 43, 36, 0.08);
+}
+
+.settings-hero > div {
+  min-width: 0;
 }
 
 .settings-hero-icon {
@@ -227,8 +234,11 @@ h1 {
 
 .settings-layout {
   display: grid;
-  grid-template-columns: 360px minmax(0, 1fr);
+  width: 100%;
+  min-width: 0;
+  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
   gap: 16px;
+  align-items: start;
 }
 
 .settings-panel,
@@ -242,6 +252,7 @@ h1 {
   display: grid;
   align-content: start;
   gap: 14px;
+  min-width: 0;
   padding: 16px;
 }
 
@@ -259,6 +270,7 @@ h1 {
 }
 
 .owner-preview {
+  min-width: 0;
   padding: 12px;
   border: 1px solid #e0e5df;
   border-radius: 8px;
@@ -286,6 +298,9 @@ h1 {
 .owner-preview strong,
 .owner-preview span {
   display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .owner-preview strong {
@@ -300,18 +315,50 @@ h1 {
 
 .provider-stack {
   display: grid;
+  min-width: 0;
   gap: 12px;
 }
 
 .settings-help {
   margin: 6px 0 0;
+  overflow-wrap: anywhere;
   color: #7b857e;
   font-size: 12px;
   line-height: 1.45;
 }
 
 .provider-card {
+  min-width: 0;
   padding: 14px;
+}
+
+.provider-card-head {
+  min-width: 0;
+}
+
+.provider-card-head strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:deep(.el-form),
+:deep(.el-form-item),
+:deep(.el-select),
+:deep(.el-input) {
+  min-width: 0;
+  max-width: 100%;
+}
+
+:deep(.el-select),
+:deep(.el-input) {
+  width: 100%;
+}
+
+:deep(.el-input__inner) {
+  min-width: 0;
+  text-overflow: ellipsis;
 }
 
 @media (max-width: 900px) {

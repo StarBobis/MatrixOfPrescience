@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref } from "vue";
-import { CirclePlus, Close } from "@element-plus/icons-vue";
+import { CirclePlus } from "@element-plus/icons-vue";
 import { useI18n } from "vue-i18n";
 import { chooseLocalAvatar, getAvatarSrc } from "../utils/avatar";
 import type { AgentModel, AgentReasoningEffort, OwnerProfile, ProviderId } from "../stores/settings";
@@ -162,7 +162,7 @@ async function assignLocalAvatar(member: AgentModel) {
         </span>
         <div class="member-card-copy">
           <strong>{{ ownerProfile.name || t("common.ownerName") }}</strong>
-          <span>{{ t("common.ownerRole") }}</span>
+          <span class="member-sub">· {{ t("common.ownerRole") }}</span>
         </div>
       </article>
 
@@ -179,6 +179,7 @@ async function assignLocalAvatar(member: AgentModel) {
           <div
             class="right-member-card"
             :class="{ muted: !member.enabled }"
+            :style="{ '--member-accent': member.color }"
             @mouseenter="showMemberCard(member.id)"
             @mouseleave="scheduleHideMemberCard(member.id)"
           >
@@ -188,16 +189,9 @@ async function assignLocalAvatar(member: AgentModel) {
             </span>
             <div class="member-card-copy">
               <strong>{{ member.name }}</strong>
-              <span v-if="!member.enabled">{{ t("members.muted") }}</span>
+              <span v-if="!member.enabled" class="member-sub">{{ t("members.muted") }}</span>
+              <span v-else class="member-sub">· {{ member.model }}</span>
             </div>
-            <button
-              class="member-remove-btn"
-              type="button"
-              :title="t('members.removeTitle')"
-              @click.stop="emit('removeMember', member.id)"
-            >
-              <el-icon><Close /></el-icon>
-            </button>
           </div>
         </template>
 
@@ -358,14 +352,16 @@ async function assignLocalAvatar(member: AgentModel) {
 </template>
 
 <style scoped>
+/* ===== 面板容器 ===== */
 .member-panel {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   flex: 1;
   min-height: 160px;
   gap: 12px;
-  grid-template-rows: auto minmax(0, 1fr);
 }
 
+/* ===== 标题栏 ===== */
 .section-heading {
   display: flex;
   align-items: center;
@@ -383,13 +379,15 @@ async function assignLocalAvatar(member: AgentModel) {
 }
 
 .member-add-btn {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   padding: 0;
+  box-shadow: 0 2px 8px rgba(46, 111, 91, 0.22);
 }
 
 .add-member-card {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
 }
 
@@ -403,84 +401,88 @@ async function assignLocalAvatar(member: AgentModel) {
   margin-left: 0;
 }
 
+/* ===== 成员列表 ===== */
 .right-member-list {
-  display: grid;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
   min-height: 0;
-  gap: 10px;
+  gap: 6px;
   overflow-y: auto;
   scrollbar-gutter: stable;
 }
 
 .right-member-list :deep(.el-tooltip__trigger) {
+  display: block;
   width: 100%;
 }
 
+/* ===== 卡片通用 ===== */
 .owner-card,
 .right-member-card {
-  display: flex;
-  width: 100%;
-  min-height: 60px;
+  display: flex !important;
+  flex-direction: row !important;
+  flex-wrap: nowrap !important;
   align-items: center;
   gap: 10px;
-  padding: 9px 10px;
-  border: 1px solid #e0e5df;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
   border-radius: 8px;
-  color: inherit;
+  border: 1px solid #e8ede9;
   background: #ffffff;
-  text-align: left;
+  transition: border-color 0.18s, background 0.18s, box-shadow 0.18s;
 }
 
+/* ===== 群主卡片 ===== */
 .owner-card {
-  border-color: #b8d3c5;
-  background: #f3faf6;
+  border-color: #c4dbcf;
+  background: linear-gradient(135deg, #f6fbf8, #edf5f0);
 }
 
+/* ===== 成员卡片 ===== */
 .right-member-card {
   cursor: pointer;
-  position: relative;
 }
 
 .right-member-card:hover {
-  border-color: #a8c7b8;
-  background: #f5faf7;
+  border-color: #b8cdc1;
+  background: #f8fbf9;
+  box-shadow: 0 2px 8px rgba(31, 43, 36, 0.06);
 }
 
 .right-member-card.muted {
-  opacity: 0.62;
+  border-color: #e8ede9;
+  background: #fafbfa;
 }
 
-.member-remove-btn {
-  display: grid;
-  flex: 0 0 auto;
-  width: 24px;
-  height: 24px;
-  place-items: center;
-  border: none;
-  border-radius: 6px;
-  color: #a0a8a2;
-  background: transparent;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.15s, color 0.15s, background 0.15s;
+.right-member-card.muted:hover {
+  box-shadow: none;
 }
 
-.right-member-card:hover .member-remove-btn {
-  opacity: 1;
+.right-member-card.muted .member-avatar {
+  filter: grayscale(0.5);
+  opacity: 0.55;
 }
 
-.member-remove-btn:hover {
-  color: #c45656;
-  background: #fef0f0;
+.right-member-card.muted .member-card-copy strong {
+  color: #a0a9a3;
 }
 
+.right-member-card.muted .member-card-copy .member-sub {
+  color: #c0c7c2;
+}
+
+/* ===== 头像 ===== */
 .member-avatar,
 .profile-avatar {
-  display: grid;
-  flex: 0 0 auto;
-  place-items: center;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   overflow: hidden;
   border-radius: 50%;
-  color: #ffffff;
+  color: #fff;
   font-weight: 800;
 }
 
@@ -492,46 +494,52 @@ async function assignLocalAvatar(member: AgentModel) {
 }
 
 .member-avatar {
-  width: 38px;
-  height: 38px;
-  font-size: 16px;
+  width: 36px;
+  height: 36px;
+  font-size: 14px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
 .owner-avatar {
-  box-shadow: 0 0 0 2px #ffffff, 0 0 0 3px #8fbda8;
+  box-shadow: 0 0 0 2px #fff, 0 0 0 3px rgba(90, 158, 130, 0.5);
 }
 
+/* ===== 文案区域 ===== */
 .member-card-copy {
-  min-width: 0;
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: hidden;
 }
 
-.member-card-copy strong,
-.member-card-copy span {
-  display: block;
+.member-card-copy strong {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1a2620;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.member-card-copy strong {
-  color: #202b25;
-  font-size: 14px;
-}
-
-.member-card-copy span {
-  margin-top: 4px;
-  color: #727c74;
+.member-card-copy .member-sub {
   font-size: 12px;
+  color: #8a958e;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
+/* ===== Popover 弹出卡片 ===== */
 :global(.member-popover.el-popover) {
   border-radius: 8px;
   padding: 0;
 }
 
 .member-profile-card {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 12px;
   padding: 14px;
 }
@@ -549,6 +557,7 @@ async function assignLocalAvatar(member: AgentModel) {
 }
 
 .profile-title {
+  flex: 1;
   min-width: 0;
 }
 
@@ -563,7 +572,8 @@ async function assignLocalAvatar(member: AgentModel) {
 }
 
 .profile-details {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 8px;
   margin: 0;
 }
@@ -595,12 +605,14 @@ async function assignLocalAvatar(member: AgentModel) {
 }
 
 .profile-settings {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 10px;
 }
 
 .profile-settings label {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 6px;
 }
 
@@ -616,18 +628,19 @@ async function assignLocalAvatar(member: AgentModel) {
 }
 
 .temperature-control {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 58px;
+  display: flex;
   align-items: center;
   gap: 10px;
 }
 
 .temperature-control :deep(.el-slider) {
+  flex: 1;
   --el-slider-main-bg-color: #2f7a61;
 }
 
 .profile-prompt {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   gap: 6px;
 }
 
