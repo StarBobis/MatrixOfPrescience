@@ -9,8 +9,10 @@ use std::{
 };
 use tauri::{AppHandle, Emitter, Manager};
 
+mod dsml;
 mod tools;
 
+use dsml::normalize_dsml_tool_calls_in_message;
 use tools::{
     code_tools_schema, execute_code_tool_call, tool_call_trace_step, tool_result_trace_step,
     validate_workspace,
@@ -477,6 +479,7 @@ async fn chat_completion(
             .and_then(|choice| choice.get("message"))
             .cloned()
             .ok_or_else(|| format!("{} returned no message.", request.provider_name))?;
+        let message = normalize_dsml_tool_calls_in_message(message);
         append_reasoning_trace_steps(&mut trace_steps, &message);
 
         if let (Some(workspace), Some(tool_calls)) = (
