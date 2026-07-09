@@ -231,6 +231,15 @@ function removeFriend(friendId: string) {
             />
           </span>
           <span>
+            {{ t("members.writePermission") }}
+            <el-switch
+              v-model="friend.canWrite"
+              size="small"
+              active-color="#2f7a61"
+              @change="settingsStore.updateFriendProfile(friend)"
+            />
+          </span>
+          <span>
             {{ t("members.muteQuestion") }}
             <el-switch
               v-model="friend.enabled"

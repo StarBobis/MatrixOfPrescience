@@ -1315,6 +1315,16 @@ defineExpose({
               >
                 <el-icon><CopyDocument /></el-icon>
               </button>
+              <button
+                v-if="sending && message.status === 'thinking'"
+                class="message-stop-button"
+                type="button"
+                :title="t('chat.stop')"
+                :aria-label="t('chat.stop')"
+                @click="emit('stopGeneration')"
+              >
+                <el-icon><CircleClose /></el-icon>
+              </button>
             </div>
           </div>
 
@@ -1548,6 +1558,7 @@ defineExpose({
 }
 
 .message-copy-button,
+.message-stop-button,
 .execution-copy-button {
   display: inline-grid;
   flex: 0 0 auto;
@@ -1559,7 +1570,8 @@ defineExpose({
   transition: border-color 0.16s, color 0.16s, background 0.16s, box-shadow 0.16s;
 }
 
-.message-copy-button {
+.message-copy-button,
+.message-stop-button {
   width: 28px;
   height: 28px;
   border-radius: 999px;
@@ -1579,7 +1591,20 @@ defineExpose({
   box-shadow: 0 4px 10px rgba(47, 122, 97, 0.16);
 }
 
+.message-stop-button {
+  border-color: #f0c9c9;
+  color: #b04545;
+}
+
+.message-stop-button:hover {
+  border-color: #d66a6a;
+  color: #ffffff;
+  background: #c45656;
+  box-shadow: 0 4px 10px rgba(196, 86, 86, 0.16);
+}
+
 .message-copy-button .el-icon,
+.message-stop-button .el-icon,
 .execution-copy-button .el-icon {
   font-size: 13px;
 }

@@ -43,6 +43,7 @@ struct ChatCompletionRequest {
     system_prompt: Option<String>,
     workspace_path: Option<String>,
     code_tools_enabled: Option<bool>,
+    can_write: Option<bool>,
     stream_id: Option<String>,
     messages: Vec<ChatMessage>,
 }
@@ -394,6 +395,7 @@ async fn chat_completion(
     );
     let client = reqwest::Client::new();
     let is_deepseek = is_deepseek_provider(&request.provider_name, &request.base_url);
+    let can_write = request.can_write.unwrap_or(false);
     let mut code_tool_called = false;
     let mut code_tool_rounds = 0usize;
     let mut final_answer_requested = false;
@@ -423,7 +425,7 @@ async fn chat_completion(
         );
 
         if code_workspace.is_some() && !final_answer_requested {
-            payload["tools"] = code_tools_schema(is_deepseek);
+            payload["tools"] = code_tools_schema(is_deepseek, can_write);
             payload["tool_choice"] = if is_deepseek && !code_tool_called {
                 json!("required")
             } else {
@@ -444,7 +446,7 @@ async fn chat_completion(
         {
             Ok(parsed) => parsed,
             Err(error) if strict_tool_schema => {
-                payload["tools"] = code_tools_schema(false);
+                payload["tools"] = code_tools_schema(false, can_write);
                 payload["tool_choice"] = json!("auto");
                 send_chat_completion_request_maybe_stream(
                     &app,
@@ -490,8 +492,12 @@ async fn chat_completion(
                     let mut stream_tool_output = |step: ChatTraceStep| {
                         emit_tool_chunk(&app, stream_id.as_deref(), &step);
                     };
-                    let tool_result =
-                        execute_code_tool_call(workspace, tool_call, Some(&mut stream_tool_output));
+                    let tool_result = execute_code_tool_call(
+                        workspace,
+                        tool_call,
+                        can_write,
+                        Some(&mut stream_tool_output),
+                    );
                     let result_step = tool_result_trace_step(tool_call, &tool_result);
                     emit_trace_step(&app, stream_id.as_deref(), &result_step);
                     append_trace_steps(&mut trace_steps, vec![result_step]);
@@ -1218,7 +1224,7 @@ mod tests {
 
     #[test]
     fn code_tools_schema_includes_file_search_tools() {
-        let schema = code_tools_schema(true);
+        let schema = code_tools_schema(true, true);
         let names = schema
             .as_array()
             .unwrap()
@@ -1237,6 +1243,53 @@ mod tests {
         assert!(names.contains(&"move_path"));
         assert!(names.contains(&"apply_patch"));
         assert!(names.contains(&"run_command"));
+    }
+
+    #[test]
+    fn code_tools_schema_hides_write_tools_without_permission() {
+        let schema = code_tools_schema(true, false);
+        let names = schema
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool.get("function")?.get("name")?.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"codegraph_explore"));
+        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"list_files"));
+        assert!(names.contains(&"search_files"));
+        assert!(names.contains(&"glob_files"));
+        assert!(!names.contains(&"write_file"));
+        assert!(!names.contains(&"create_directory"));
+        assert!(!names.contains(&"delete_path"));
+        assert!(!names.contains(&"move_path"));
+        assert!(!names.contains(&"apply_patch"));
+        assert!(!names.contains(&"run_command"));
+    }
+
+    #[test]
+    fn execute_code_tool_call_blocks_write_tools_without_permission() {
+        let tool_result = execute_code_tool_call(
+            Path::new("."),
+            &json!({
+                "id": "call-run",
+                "function": {
+                    "name": "run_command",
+                    "arguments": "{\"command\":\"echo\",\"args\":[\"should-not-run\"]}"
+                }
+            }),
+            false,
+            None,
+        );
+
+        let content = tool_result
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+
+        assert!(content.contains("write permission is disabled"));
+        assert!(!content.contains("should-not-run"));
     }
 
     #[test]

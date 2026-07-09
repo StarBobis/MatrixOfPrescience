@@ -202,8 +202,8 @@ fn finalize_tool_function(mut function: Value, strict: bool) -> Value {
     })
 }
 
-pub(crate) fn code_tools_schema(strict: bool) -> Value {
-    json!([
+pub(crate) fn code_tools_schema(strict: bool, allow_writes: bool) -> Value {
+    let mut tools = vec![
         finalize_tool_function(
             json!({
                 "name": "codegraph_explore",
@@ -225,7 +225,7 @@ pub(crate) fn code_tools_schema(strict: bool) -> Value {
                     "required": ["query"]
                 }
             }),
-            strict
+            strict,
         ),
         finalize_tool_function(
             json!({
@@ -253,7 +253,7 @@ pub(crate) fn code_tools_schema(strict: bool) -> Value {
                     "required": ["file"]
                 }
             }),
-            strict
+            strict,
         ),
         finalize_tool_function(
             json!({
@@ -280,7 +280,7 @@ pub(crate) fn code_tools_schema(strict: bool) -> Value {
                     "required": []
                 }
             }),
-            strict
+            strict,
         ),
         finalize_tool_function(
             json!({
@@ -315,7 +315,7 @@ pub(crate) fn code_tools_schema(strict: bool) -> Value {
                     "required": ["query"]
                 }
             }),
-            strict
+            strict,
         ),
         finalize_tool_function(
             json!({
@@ -342,8 +342,12 @@ pub(crate) fn code_tools_schema(strict: bool) -> Value {
                     "required": ["pattern"]
                 }
             }),
-            strict
+            strict,
         ),
+    ];
+
+    if allow_writes {
+        tools.extend([
         finalize_tool_function(
             json!({
                 "name": "write_file",
@@ -495,12 +499,28 @@ pub(crate) fn code_tools_schema(strict: bool) -> Value {
             }),
             strict
         )
-    ])
+        ]);
+    }
+
+    json!(tools)
+}
+
+fn is_write_code_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "write_file"
+            | "create_directory"
+            | "delete_path"
+            | "move_path"
+            | "apply_patch"
+            | "run_command"
+    )
 }
 
 pub(crate) fn execute_code_tool_call(
     workspace: &Path,
     tool_call: &Value,
+    allow_writes: bool,
     stream_sink: Option<&mut ToolStreamSink<'_>>,
 ) -> Value {
     let tool_call_id = tool_call
@@ -511,19 +531,26 @@ pub(crate) fn execute_code_tool_call(
     let name = function.get("name").and_then(Value::as_str).unwrap_or("");
     let arguments = parsed_tool_arguments(function);
 
-    let content = match name {
-        "codegraph_explore" => execute_codegraph_explore_tool(workspace, &arguments),
-        "read_file" => read_workspace_file_tool(workspace, &arguments),
-        "list_files" => list_workspace_files_tool(workspace, &arguments),
-        "search_files" => search_workspace_files_tool(workspace, &arguments),
-        "glob_files" => glob_workspace_files_tool(workspace, &arguments),
-        "write_file" => write_workspace_file_tool(workspace, &arguments),
-        "create_directory" => create_workspace_directory_tool(workspace, &arguments),
-        "delete_path" => delete_workspace_path_tool(workspace, &arguments),
-        "move_path" => move_workspace_path_tool(workspace, &arguments),
-        "apply_patch" => apply_patch_tool(workspace, &arguments),
-        "run_command" => run_workspace_command_tool(workspace, &arguments, stream_sink),
-        _ => Err(format!("Unknown tool: {}", name)),
+    let content = if !allow_writes && is_write_code_tool(name) {
+        Err(
+            "This member's write permission is disabled. Only read-only code tools are available."
+                .to_string(),
+        )
+    } else {
+        match name {
+            "codegraph_explore" => execute_codegraph_explore_tool(workspace, &arguments),
+            "read_file" => read_workspace_file_tool(workspace, &arguments),
+            "list_files" => list_workspace_files_tool(workspace, &arguments),
+            "search_files" => search_workspace_files_tool(workspace, &arguments),
+            "glob_files" => glob_workspace_files_tool(workspace, &arguments),
+            "write_file" => write_workspace_file_tool(workspace, &arguments),
+            "create_directory" => create_workspace_directory_tool(workspace, &arguments),
+            "delete_path" => delete_workspace_path_tool(workspace, &arguments),
+            "move_path" => move_workspace_path_tool(workspace, &arguments),
+            "apply_patch" => apply_patch_tool(workspace, &arguments),
+            "run_command" => run_workspace_command_tool(workspace, &arguments, stream_sink),
+            _ => Err(format!("Unknown tool: {}", name)),
+        }
     };
 
     json!({
@@ -605,7 +632,9 @@ fn tool_arg_string_map(arguments: &Value, key: &str) -> Vec<(String, String)> {
                         return None;
                     }
 
-                    value.as_str().map(|value| (name.to_string(), value.to_string()))
+                    value
+                        .as_str()
+                        .map(|value| (name.to_string(), value.to_string()))
                 })
                 .collect()
         })
@@ -1307,7 +1336,8 @@ fn run_workspace_command_tool(
     let (sender, receiver) = mpsc::channel();
     let stdout_reader =
         spawn_command_output_reader(stdout_pipe, CommandOutputStream::Stdout, sender.clone());
-    let stderr_reader = spawn_command_output_reader(stderr_pipe, CommandOutputStream::Stderr, sender);
+    let stderr_reader =
+        spawn_command_output_reader(stderr_pipe, CommandOutputStream::Stderr, sender);
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     let mut stdout = String::new();
     let mut stderr = String::new();
@@ -1990,11 +2020,9 @@ mod tests {
 
         assert!(result.contains("stdout:"));
         assert!(result.contains("first"));
-        assert!(
-            chunks
-                .iter()
-                .any(|(stream, text)| stream == "stdout" && text.contains("first"))
-        );
+        assert!(chunks
+            .iter()
+            .any(|(stream, text)| stream == "stdout" && text.contains("first")));
         assert!(
             returned_at.duration_since(first_chunk_at.expect("expected a streamed chunk"))
                 >= Duration::from_millis(250)

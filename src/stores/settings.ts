@@ -38,6 +38,7 @@ export interface AgentModel {
   temperature: number;
   enabled: boolean;
   isAdmin: boolean;
+  canWrite: boolean;
   deepSeekLongContext?: boolean;
   color: string;
   avatar?: string;
@@ -303,6 +304,7 @@ function normalizeMember(member: AgentModel): AgentModel {
     reasoningEffort: normalizeReasoningEffort(member.reasoningEffort),
     temperature: Number.isFinite(member.temperature) ? member.temperature : 0.7,
     isAdmin: Boolean(member.isAdmin),
+    canWrite: Boolean(member.canWrite),
     deepSeekLongContext: member.provider === "deepseek" ? member.deepSeekLongContext ?? true : false,
   };
 }
@@ -356,6 +358,7 @@ function createMember(
     temperature: 0.7,
     enabled: true,
     isAdmin: false,
+    canWrite: false,
     deepSeekLongContext: provider === "deepseek",
     color: getModelColor(provider),
   };
@@ -425,6 +428,7 @@ function toPlainMember(member: AgentModel): AgentModel {
     temperature: member.temperature,
     enabled: member.enabled,
     isAdmin: Boolean(member.isAdmin),
+    canWrite: Boolean(member.canWrite),
     deepSeekLongContext: member.provider === "deepseek" ? member.deepSeekLongContext ?? true : false,
     color: member.color,
     avatar: member.avatar,

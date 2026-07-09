@@ -103,6 +103,7 @@ interface ChatCompletionInvokeRequest {
   temperature: number;
   workspacePath?: string;
   codeToolsEnabled?: boolean;
+  canWrite?: boolean;
   streamId?: string;
   systemPrompt: string;
   messages: ApiChatMessage[];
@@ -1663,6 +1664,7 @@ async function decideMemberResponse(
         temperature: 0,
         workspacePath: activeGroup.value?.workspacePath ?? "",
         codeToolsEnabled,
+        canWrite: Boolean(member.canWrite),
         systemPrompt,
         messages: conversation,
       },
@@ -1799,6 +1801,7 @@ async function askMember(
         temperature: member.temperature,
         workspacePath: activeGroup.value?.workspacePath ?? "",
         codeToolsEnabled,
+        canWrite: Boolean(member.canWrite),
         systemPrompt,
         messages: conversation,
       },

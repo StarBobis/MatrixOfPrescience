@@ -89,6 +89,10 @@ const { t } = useI18n();
               <span>{{ t("members.adminRole") }}</span>
               <el-switch v-model="member.isAdmin" active-color="#2f7a61" />
             </span>
+            <span class="draft-toggle">
+              <span>{{ t("members.writePermission") }}</span>
+              <el-switch v-model="member.canWrite" active-color="#2f7a61" />
+            </span>
             <el-switch v-model="member.enabled" />
           </div>
         </div>

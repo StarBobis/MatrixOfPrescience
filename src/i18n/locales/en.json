@@ -82,6 +82,7 @@
     "adminRole": "Admin",
     "changeAvatar": "Change avatar",
     "deepSeekLongContext": "1M context",
+    "writePermission": "Write access",
     "listTitle": "Members",
     "localAvatar": "Local avatar",
     "muted": "Muted",

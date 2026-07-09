@@ -550,6 +550,19 @@ onBeforeUnmount(() => {
             />
           </div>
 
+          <div class="profile-write-row">
+            <span>{{ t("members.writePermission") }}</span>
+            <el-switch
+              v-model="member.canWrite"
+              size="small"
+              inline-prompt
+              :active-text="t('common.yes')"
+              :inactive-text="t('common.no')"
+              active-color="#2f7a61"
+              @change="emit('updateMemberProfile', member)"
+            />
+          </div>
+
           <div class="profile-prompt">
             <span>{{ t("members.roleIdentity") }}</span>
             <el-input
@@ -895,6 +908,7 @@ onBeforeUnmount(() => {
 .profile-details div,
 .profile-muted-row,
 .profile-admin-row,
+.profile-write-row,
 .profile-switch-row {
   display: flex;
   align-items: center;
@@ -905,6 +919,7 @@ onBeforeUnmount(() => {
 .profile-details dt,
 .profile-muted-row span,
 .profile-admin-row span,
+.profile-write-row span,
 .profile-switch-row span,
 .profile-prompt span {
   color: #778179;

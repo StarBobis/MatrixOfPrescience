@@ -82,6 +82,7 @@
     "adminRole": "管理员",
     "changeAvatar": "更换头像",
     "deepSeekLongContext": "1M 上下文",
+    "writePermission": "写权限",
     "listTitle": "群友列表",
     "localAvatar": "本地头像",
     "muted": "已禁言",
