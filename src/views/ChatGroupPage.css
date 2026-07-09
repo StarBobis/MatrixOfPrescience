@@ -281,6 +281,10 @@ h2 {
   max-width: 520px;
 }
 
+.reset-session-button {
+  flex-shrink: 0;
+}
+
 .messages-panel {
   display: flex;
   flex: 1;

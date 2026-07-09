@@ -620,6 +620,38 @@ function stopGeneration() {
   speakerQueue.value = [];
 }
 
+async function resetCurrentSession() {
+  if (!activeGroup.value) {
+    return;
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      t("chat.resetSession.confirmMessage"),
+      t("chat.resetSession.confirmTitle"),
+      {
+        confirmButtonText: t("chat.resetSession.confirm"),
+        cancelButtonText: t("common.cancel"),
+        type: "warning",
+      },
+    );
+  } catch {
+    return;
+  }
+
+  for (const timer of speakingTimers.values()) {
+    window.clearInterval(timer);
+  }
+  speakingTimers.clear();
+
+  activeRunId.value = "";
+  sending.value = false;
+  pendingMessageIds.value = [];
+  speakerQueue.value = [];
+  settingsStore.clearActiveGroupMessages();
+  ElMessage.success(t("chat.resetSession.success"));
+}
+
 async function decideMemberResponse(
   member: AgentModel,
   phase: "first" | "afterPeers",
@@ -1027,6 +1059,7 @@ async function sendMessage() {
           @remove-patch-proposal="settingsStore.removePatchProposal"
           @send-message="sendMessage"
           @stop-generation="stopGeneration"
+          @reset-session="resetCurrentSession"
         />
       </template>
 

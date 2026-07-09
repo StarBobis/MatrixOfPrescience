@@ -856,6 +856,11 @@ export const useSettingsStore = defineStore("settings", {
       }
     },
 
+    clearActiveGroupMessages() {
+      this.activeGroup.messages = [];
+      this.activeGroup.updatedAt = new Date().toISOString();
+    },
+
     addPatchProposal(proposal: Omit<AgentPatchProposal, "id" | "createdAt" | "status">) {
       const group = this.activeGroup;
 

@@ -119,7 +119,8 @@
         "speaking": "Speaking",
         "waiting": "Watching"
       },
-      "title": "Speaking queue"
+      "title": "Speaking queue",
+      "stopAll": "Stop all speaking and queued members"
     },
     "sendToMembers": "Send to {count} members",
     "status": {
@@ -139,6 +140,13 @@
       "model": "Model: {model}",
       "reasoning": "Reasoning: {effort}",
       "duration": "Elapsed: {duration}"
+    },
+    "resetSession": {
+      "label": "Reset session",
+      "confirmTitle": "Reset this session?",
+      "confirmMessage": "This will stop the current conversation and clear all chat history in this group. Members and workspace stay unchanged.",
+      "confirm": "Reset",
+      "success": "Session reset"
     }
   },
   "patch": {

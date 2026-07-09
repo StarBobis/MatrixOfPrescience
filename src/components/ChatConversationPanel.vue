@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
-import { FolderOpened, Promotion } from "@element-plus/icons-vue";
+import { CircleClose, FolderOpened, Promotion, RefreshLeft } from "@element-plus/icons-vue";
 import { useI18n } from "vue-i18n";
 import PatchApprovalPanel from "./PatchApprovalPanel.vue";
 import { getAvatarSrc } from "../utils/avatar";
@@ -38,6 +38,7 @@ const emit = defineEmits<{
   removePatchProposal: [proposalId: string];
   sendMessage: [];
   stopGeneration: [];
+  resetSession: [];
 }>();
 
 const messagesPanel = ref<HTMLElement | null>(null);
@@ -179,11 +180,34 @@ defineExpose({
             />
           </template>
         </el-input>
+        <el-button
+          class="reset-session-button"
+          :icon="RefreshLeft"
+          size="small"
+          plain
+          :disabled="messages.length === 0 && !sending"
+          @click="emit('resetSession')"
+        >
+          {{ t("chat.resetSession.label") }}
+        </el-button>
       </div>
     </header>
 
     <section v-if="speakerQueue.length > 0" class="speaker-queue">
-      <span class="speaker-queue-title">{{ t("chat.queue.title") }}</span>
+      <div class="speaker-queue-head">
+        <span class="speaker-queue-title">{{ t("chat.queue.title") }}</span>
+        <el-button
+          class="speaker-queue-stop"
+          :icon="CircleClose"
+          circle
+          plain
+          type="danger"
+          size="small"
+          :title="t('chat.queue.stopAll')"
+          :aria-label="t('chat.queue.stopAll')"
+          @click="emit('stopGeneration')"
+        />
+      </div>
       <div class="speaker-queue-list">
         <span
           v-for="member in speakerQueue"
@@ -347,11 +371,22 @@ defineExpose({
   background: #f8fbf9;
 }
 
+.speaker-queue-head {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
 .speaker-queue-title {
   flex: 0 0 auto;
   color: #647169;
   font-size: 12px;
   font-weight: 700;
+}
+
+.speaker-queue-stop {
+  flex: 0 0 auto;
 }
 
 .speaker-queue-list {

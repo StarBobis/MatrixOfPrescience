@@ -119,7 +119,8 @@
         "speaking": "发言中",
         "waiting": "观望中"
       },
-      "title": "发言队列"
+      "title": "发言队列",
+      "stopAll": "停止所有发言和排队"
     },
     "sendToMembers": "发给 {count} 个群友",
     "status": {
@@ -139,6 +140,13 @@
       "model": "模型：{model}",
       "reasoning": "推理：{effort}",
       "duration": "耗时：{duration}"
+    },
+    "resetSession": {
+      "label": "重置会话",
+      "confirmTitle": "重置此会话？",
+      "confirmMessage": "这会结束当前对话并清空此群聊的全部聊天记录，群聊、群友和工作文件夹会保持不变。",
+      "confirm": "重置",
+      "success": "会话已重置"
     }
   },
   "patch": {
