@@ -9,6 +9,7 @@ import type {
   AgentApprovalMode,
   AgentSafetyModel,
   AgentModel,
+  AgentReasoningEffort,
   OwnerProfile,
   ProviderId,
 } from "../stores/settings";
@@ -44,11 +45,22 @@ const safetyModelOptions: Array<{ label: string; value: AgentSafetyModel }> = [
   { label: "Sandbox YOLO", value: "sandbox-yolo" },
 ];
 
+const reasoningEffortOptions = computed<Array<{ label: string; value: AgentReasoningEffort }>>(
+  () => [
+    { label: t("members.reasoningEffortOptions.off"), value: "off" },
+    { label: t("members.reasoningEffortOptions.low"), value: "low" },
+    { label: t("members.reasoningEffortOptions.medium"), value: "medium" },
+    { label: t("members.reasoningEffortOptions.high"), value: "high" },
+  ],
+);
+
 defineProps<{
   members: AgentModel[];
   historicalMembers: AgentModel[];
   ownerProfile: OwnerProfile;
   getProviderLabel: (provider: ProviderId) => string;
+  providerOptions: Array<{ label: string; value: ProviderId }>;
+  modelPresets: Record<ProviderId, string[]>;
 }>();
 
 const emit = defineEmits<{
@@ -57,6 +69,7 @@ const emit = defineEmits<{
   removeMember: [memberId: string];
   renameMember: [memberId: string, name: string];
   updateMemberProfile: [member: AgentModel];
+  updateMemberProvider: [member: AgentModel];
 }>();
 
 function syncEditBeforeAsk(value: boolean) {
@@ -207,11 +220,15 @@ function finishAnnouncementEdit() {
       :historical-members="historicalMembers"
       :owner-profile="ownerProfile"
       :get-provider-label="getProviderLabel"
+      :provider-options="providerOptions"
+      :model-presets="modelPresets"
+      :reasoning-effort-options="reasoningEffortOptions"
       @add-member="(provider) => emit('addMember', provider)"
       @add-historical-member="(memberId) => emit('addHistoricalMember', memberId)"
       @remove-member="(memberId) => emit('removeMember', memberId)"
       @rename-member="(memberId, name) => emit('renameMember', memberId, name)"
       @update-member-profile="(member) => emit('updateMemberProfile', member)"
+      @update-member-provider="(member) => emit('updateMemberProvider', member)"
     />
   </aside>
 </template>

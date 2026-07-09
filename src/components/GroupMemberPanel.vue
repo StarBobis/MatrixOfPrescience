@@ -3,13 +3,16 @@ import { ref } from "vue";
 import { CirclePlus, Close } from "@element-plus/icons-vue";
 import { useI18n } from "vue-i18n";
 import { chooseLocalAvatar, getAvatarSrc } from "../utils/avatar";
-import type { AgentModel, OwnerProfile, ProviderId } from "../stores/settings";
+import type { AgentModel, AgentReasoningEffort, OwnerProfile, ProviderId } from "../stores/settings";
 
 defineProps<{
   members: AgentModel[];
   historicalMembers: AgentModel[];
   ownerProfile: OwnerProfile;
   getProviderLabel: (provider: ProviderId) => string;
+  providerOptions: Array<{ label: string; value: ProviderId }>;
+  modelPresets: Record<ProviderId, string[]>;
+  reasoningEffortOptions: Array<{ label: string; value: AgentReasoningEffort }>;
 }>();
 
 const emit = defineEmits<{
@@ -18,6 +21,7 @@ const emit = defineEmits<{
   removeMember: [memberId: string];
   renameMember: [memberId: string, name: string];
   updateMemberProfile: [member: AgentModel];
+  updateMemberProvider: [member: AgentModel];
 }>();
 
 const activeMemberCardId = ref("");
@@ -62,6 +66,10 @@ function finishMemberCardEdit(memberId: string) {
   if (editingMemberCardId.value === memberId) {
     editingMemberCardId.value = "";
   }
+}
+
+function updateMemberSetting(member: AgentModel) {
+  emit("updateMemberProfile", member);
 }
 
 async function assignLocalAvatar(member: AgentModel) {
@@ -191,15 +199,90 @@ async function assignLocalAvatar(member: AgentModel) {
               <dt>API</dt>
               <dd>{{ getProviderLabel(member.provider) }}</dd>
             </div>
-            <div>
-              <dt>{{ t("common.model") }}</dt>
-              <dd>{{ member.model }}</dd>
-            </div>
-            <div>
-              <dt>{{ t("common.temperature") }}</dt>
-              <dd>{{ member.temperature.toFixed(1) }}</dd>
-            </div>
           </dl>
+
+          <div class="profile-settings">
+            <label>
+              <span>{{ t("common.api") }}</span>
+              <el-select
+                v-model="member.provider"
+                size="small"
+                @focus="startMemberCardEdit(member.id)"
+                @change="emit('updateMemberProvider', member)"
+                @blur="finishMemberCardEdit(member.id)"
+              >
+                <el-option
+                  v-for="option in providerOptions"
+                  :key="option.value"
+                  :label="option.label"
+                  :value="option.value"
+                />
+              </el-select>
+            </label>
+
+            <label>
+              <span>{{ t("common.model") }}</span>
+              <el-select
+                v-model="member.model"
+                size="small"
+                filterable
+                allow-create
+                default-first-option
+                @focus="startMemberCardEdit(member.id)"
+                @change="updateMemberSetting(member)"
+                @blur="finishMemberCardEdit(member.id)"
+              >
+                <el-option
+                  v-for="preset in modelPresets[member.provider]"
+                  :key="preset"
+                  :label="preset"
+                  :value="preset"
+                />
+              </el-select>
+            </label>
+
+            <label>
+              <span>{{ t("members.reasoningEffort") }}</span>
+              <el-select
+                v-model="member.reasoningEffort"
+                size="small"
+                @focus="startMemberCardEdit(member.id)"
+                @change="updateMemberSetting(member)"
+                @blur="finishMemberCardEdit(member.id)"
+              >
+                <el-option
+                  v-for="option in reasoningEffortOptions"
+                  :key="option.value"
+                  :label="option.label"
+                  :value="option.value"
+                />
+              </el-select>
+            </label>
+
+            <label>
+              <span>{{ t("common.temperature") }}</span>
+              <div class="temperature-control">
+                <el-slider
+                  v-model="member.temperature"
+                  :min="0"
+                  :max="2"
+                  :step="0.1"
+                  @change="updateMemberSetting(member)"
+                />
+                <el-input-number
+                  v-model="member.temperature"
+                  size="small"
+                  :min="0"
+                  :max="2"
+                  :step="0.1"
+                  :controls="false"
+                  @focus="startMemberCardEdit(member.id)"
+                  @change="updateMemberSetting(member)"
+                  @blur="finishMemberCardEdit(member.id)"
+                />
+              </div>
+            </label>
+          </div>
 
           <div class="profile-muted-row">
             <span>{{ t("members.muteQuestion") }}</span>
@@ -479,6 +562,38 @@ async function assignLocalAvatar(member: AgentModel) {
   font-weight: 700;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.profile-settings {
+  display: grid;
+  gap: 10px;
+}
+
+.profile-settings label {
+  display: grid;
+  gap: 6px;
+}
+
+.profile-settings label > span {
+  color: #78817a;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.profile-settings :deep(.el-select),
+.profile-settings :deep(.el-input-number) {
+  width: 100%;
+}
+
+.temperature-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 58px;
+  align-items: center;
+  gap: 10px;
+}
+
+.temperature-control :deep(.el-slider) {
+  --el-slider-main-bg-color: #2f7a61;
 }
 
 .profile-prompt {

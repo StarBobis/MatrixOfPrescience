@@ -23,6 +23,12 @@
   },
   "settings": {
     "title": "全局设置",
+    "cache": {
+      "chooseTitle": "选择缓存文件夹",
+      "defaultPlaceholder": "默认 AppData 文件夹",
+      "description": "设置、历史群友和缓存头像会以 JSON 与文件形式保存到：{path}",
+      "title": "缓存文件夹"
+    },
     "profile": {
       "avatar": "头像",
       "avatarColor": "头像底色",
@@ -60,11 +66,17 @@
     "addFromHistory": "从历史群友添加",
     "addOpenAIMember": "新建 ChatGPT 群友",
     "addTitle": "添加群友",
-    "enabled": "未禁言",
     "listTitle": "群友列表",
     "localAvatar": "本地头像",
     "muted": "已禁言",
     "muteQuestion": "是否禁言",
+    "reasoningEffort": "推理强度",
+    "reasoningEffortOptions": {
+      "off": "关闭",
+      "low": "低",
+      "medium": "中",
+      "high": "高"
+    },
     "removeTitle": "踢出群友",
     "roleIdentity": "角色身份",
     "rolePlaceholder": "描述这个群友的分工、立场和回答边界"
@@ -173,7 +185,7 @@
       "description": "多模型协作讨论群",
       "migratedName": "迁移的模型群",
       "name": "默认 Agent 群",
-      "welcome": "这是一个 Agent 聊天群。每个虚拟群友都有自己的 API、模型和核心角色；你发出一条消息后，未禁言的群友会共享同一个上下文并分别回复。"
+      "welcome": "这是一个 Agent 聊天群。每个虚拟群友都有自己的 API、模型和核心角色；你发出一条消息后，可发言的群友会共享同一个上下文并分别回复。"
     },
     "member": {
       "copyName": "{name} 副本",
@@ -278,8 +290,8 @@
     "stepWaitingModel": "等待模型返回。",
     "voteAgreeRule": "如果结论、方案或关键依据可以接受，且你没有重要补充，只回复 AGREE。",
     "voteDisagreeRule": "如果你认为存在需要继续讨论的分歧，只回复 DISAGREE。",
-    "voteQuestion": "请判断你是否同意 {name} 的上一条发言。"
-    ,"voteSupplementRule": "如果你整体同意，但有重要上下文需要补充，只回复 SUPPLEMENT。"
+    "voteQuestion": "请判断你是否同意 {name} 的上一条发言。",
+    "voteSupplementRule": "如果你整体同意，但有重要上下文需要补充，只回复 SUPPLEMENT。"
   },
   "patchRuntime": {
     "appliedContent": "补丁「{title}」已应用。",

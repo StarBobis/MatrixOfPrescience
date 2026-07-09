@@ -1,4 +1,4 @@
-import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke, isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
 import { translate as t } from "../i18n";
@@ -12,6 +12,10 @@ const avatarMimeTypes: Record<string, string> = {
   svg: "image/svg+xml",
   webp: "image/webp",
 };
+
+interface AvatarCacheResponse {
+  path: string;
+}
 
 export function getAvatarSrc(avatar?: string) {
   const value = avatar?.trim();
@@ -46,6 +50,18 @@ export async function chooseLocalAvatar() {
 
   if (typeof selected !== "string") {
     return "";
+  }
+
+  if (isTauri()) {
+    try {
+      const cached = await invoke<AvatarCacheResponse>("copy_avatar_to_cache", {
+        sourcePath: selected,
+      });
+
+      return cached.path;
+    } catch {
+      return selected;
+    }
   }
 
   try {

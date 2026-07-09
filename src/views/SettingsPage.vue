@@ -2,13 +2,15 @@
 import { computed } from "vue";
 import { storeToRefs } from "pinia";
 import { Setting, UserFilled } from "@element-plus/icons-vue";
+import { open } from "@tauri-apps/plugin-dialog";
 import { type ProviderId, useSettingsStore } from "../stores/settings";
 import { chooseLocalAvatar, getAvatarSrc } from "../utils/avatar";
 import { useI18n } from "vue-i18n";
 import type { AppLocale } from "../i18n/locales";
 
 const settingsStore = useSettingsStore();
-const { providers, ownerProfile, locale } = storeToRefs(settingsStore);
+const { providers, ownerProfile, locale, cacheDirectory, defaultCacheDirectory } =
+  storeToRefs(settingsStore);
 const { t } = useI18n();
 
 const languageOptions = computed<Array<{ label: string; value: AppLocale }>>(() => [
@@ -37,6 +39,18 @@ async function chooseOwnerAvatar() {
 
   if (avatar) {
     ownerProfile.value.avatar = avatar;
+  }
+}
+
+async function chooseCacheDirectory() {
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    title: t("settings.cache.chooseTitle"),
+  });
+
+  if (typeof selected === "string") {
+    await settingsStore.setCacheDirectory(selected);
   }
 }
 </script>
@@ -85,6 +99,20 @@ async function chooseOwnerAvatar() {
                 :value="option.value"
               />
             </el-select>
+          </el-form-item>
+          <el-form-item :label="t('settings.cache.title')">
+            <el-input
+              v-model="cacheDirectory"
+              :placeholder="defaultCacheDirectory || t('settings.cache.defaultPlaceholder')"
+              readonly
+            >
+              <template #append>
+                <el-button @click="chooseCacheDirectory">{{ t("common.choose") }}</el-button>
+              </template>
+            </el-input>
+            <p class="settings-help">
+              {{ t("settings.cache.description", { path: defaultCacheDirectory }) }}
+            </p>
           </el-form-item>
           <el-form-item :label="t('settings.profile.name')">
             <el-input v-model="ownerProfile.name" :placeholder="t('common.ownerName')" />
@@ -273,6 +301,13 @@ h1 {
 .provider-stack {
   display: grid;
   gap: 12px;
+}
+
+.settings-help {
+  margin: 6px 0 0;
+  color: #7b857e;
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .provider-card {

@@ -1,4 +1,5 @@
 import { defineStore } from "pinia";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getI18nLocale, translate as t } from "../i18n";
 import { defaultLocale, normalizeLocale, type AppLocale } from "../i18n/locales";
 
@@ -9,6 +10,7 @@ export type AgentMode = "chat" | "local-agent" | "architect";
 export type AgentWorkflowMode = "ask" | "edit-before-ask" | "code" | "yolo";
 export type AgentApprovalMode = "manual" | "confirm-risky" | "auto";
 export type AgentSafetyModel = "strict" | "balanced" | "security-analyzer" | "sandbox-yolo";
+export type AgentReasoningEffort = "off" | "low" | "medium" | "high";
 export type PatchRiskLevel = "low" | "medium" | "high";
 export type PatchApprovalStatus = "pending" | "approved" | "rejected" | "discarded";
 export type PatchSafetyVerdict = "allow" | "needs-confirmation" | "blocked";
@@ -27,6 +29,7 @@ export interface AgentModel {
   name: string;
   provider: ProviderId;
   model: string;
+  reasoningEffort: AgentReasoningEffort;
   systemPrompt: string;
   temperature: number;
   enabled: boolean;
@@ -99,6 +102,7 @@ export interface PatchSafetyCheck {
 
 interface PersistedSettings {
   locale?: unknown;
+  cacheDirectory?: string;
   providers?: Partial<Record<ProviderId, ProviderConfig>>;
   agentModels?: AgentModel[];
   memberLibrary?: AgentModel[];
@@ -120,6 +124,13 @@ const THOUGHT_STEP_LIMIT = 12;
 const THOUGHT_STEP_TEXT_LIMIT = 500;
 
 type PersistenceMode = "normal" | "compact" | "minimal";
+
+interface AppCacheState {
+  defaultCacheDirectory: string;
+  cacheDirectory: string;
+  settings?: PersistedSettings;
+  memberLibrary?: AgentModel[];
+}
 
 const providerDefaults: Record<ProviderId, ProviderConfig> = {
   openai: {
@@ -200,10 +211,7 @@ function normalizeGroup(group: ChatGroup): ChatGroup {
         warnings: [t("patchSafety.legacyWarning")],
       },
     })),
-    members: group.members.map((member) => ({
-      ...member,
-      libraryId: member.libraryId ?? crypto.randomUUID(),
-    })),
+    members: group.members.map(normalizeMember),
     messages: group.messages.map((message) => ({
       ...message,
       agreeMemberIds: message.agreeMemberIds ?? [],
@@ -211,6 +219,19 @@ function normalizeGroup(group: ChatGroup): ChatGroup {
       disagreeMemberIds: message.disagreeMemberIds ?? [],
       thoughtSteps: message.thoughtSteps ?? [],
     })),
+  };
+}
+
+function normalizeReasoningEffort(value: unknown): AgentReasoningEffort {
+  return value === "low" || value === "medium" || value === "high" ? value : "off";
+}
+
+function normalizeMember(member: AgentModel): AgentModel {
+  return {
+    ...member,
+    libraryId: member.libraryId ?? crypto.randomUUID(),
+    reasoningEffort: normalizeReasoningEffort(member.reasoningEffort),
+    temperature: Number.isFinite(member.temperature) ? member.temperature : 0.7,
   };
 }
 
@@ -253,6 +274,7 @@ function createMember(
     name,
     provider,
     model,
+    reasoningEffort: "off",
     systemPrompt,
     temperature: 0.7,
     enabled: true,
@@ -302,6 +324,7 @@ function toPlainMember(member: AgentModel): AgentModel {
     name: member.name,
     provider: member.provider,
     model: member.model,
+    reasoningEffort: normalizeReasoningEffort(member.reasoningEffort),
     systemPrompt: member.systemPrompt,
     temperature: member.temperature,
     enabled: member.enabled,
@@ -386,6 +409,8 @@ export const useSettingsStore = defineStore("settings", {
       activeGroupId: defaultGroup.id,
       ownerProfile: createDefaultOwnerProfile(),
       locale: defaultLocale as AppLocale,
+      cacheDirectory: "",
+      defaultCacheDirectory: "",
     };
   },
 
@@ -419,14 +444,8 @@ export const useSettingsStore = defineStore("settings", {
   },
 
   actions: {
-    hydrate() {
-      const raw = localStorage.getItem(STORAGE_KEY);
-
-      if (!raw) {
-        return;
-      }
-
-      const parsed = JSON.parse(raw) as PersistedSettings;
+    applyPersistedSettings(parsed: PersistedSettings, memberLibrary?: AgentModel[]) {
+      this.cacheDirectory = parsed.cacheDirectory ?? this.cacheDirectory;
       this.locale = normalizeLocale(parsed.locale);
 
       if (parsed.providers) {
@@ -445,7 +464,7 @@ export const useSettingsStore = defineStore("settings", {
 
       if (Array.isArray(parsed.groups) && parsed.groups.length > 0) {
         this.groups = parsed.groups.map((group) => normalizeGroup(group));
-        this.memberLibrary = this.buildMemberLibrary(parsed.memberLibrary ?? []);
+        this.memberLibrary = this.buildMemberLibrary(memberLibrary ?? parsed.memberLibrary ?? []);
         this.activeGroupId = parsed.activeGroupId ?? parsed.groups[0].id;
         return;
       }
@@ -453,10 +472,54 @@ export const useSettingsStore = defineStore("settings", {
       if (Array.isArray(parsed.agentModels) && parsed.agentModels.length > 0) {
         const migratedGroup = createDefaultGroup();
         migratedGroup.name = t("defaults.group.migratedName");
-        migratedGroup.members = parsed.agentModels;
+        migratedGroup.members = parsed.agentModels.map(normalizeMember);
         this.groups = [migratedGroup];
-        this.memberLibrary = this.buildMemberLibrary(parsed.agentModels);
+        this.memberLibrary = this.buildMemberLibrary(memberLibrary ?? parsed.agentModels);
         this.activeGroupId = migratedGroup.id;
+      }
+    },
+
+    async hydrate() {
+      let loadedFromCache = false;
+
+      if (isTauri()) {
+        try {
+          const cacheState = await invoke<AppCacheState>("load_app_cache");
+          this.defaultCacheDirectory = cacheState.defaultCacheDirectory;
+          this.cacheDirectory = cacheState.cacheDirectory;
+
+          if (cacheState.settings) {
+            this.applyPersistedSettings(
+              {
+                ...cacheState.settings,
+                cacheDirectory: cacheState.cacheDirectory,
+              },
+              cacheState.memberLibrary,
+            );
+            loadedFromCache = true;
+          }
+        } catch (error) {
+          console.warn("Failed to load cache directory settings.", error);
+        }
+      }
+
+      if (loadedFromCache) {
+        return;
+      }
+
+      const raw = localStorage.getItem(STORAGE_KEY);
+
+      if (!raw) {
+        if (isTauri()) {
+          await this.persist();
+        }
+        return;
+      }
+
+      this.applyPersistedSettings(JSON.parse(raw) as PersistedSettings);
+
+      if (isTauri()) {
+        await this.persist();
       }
     },
 
@@ -475,6 +538,7 @@ export const useSettingsStore = defineStore("settings", {
             : 0;
 
       return {
+        cacheDirectory: this.cacheDirectory,
         providers: this.providers,
         memberLibrary: this.buildMemberLibrary(this.memberLibrary),
         groups: this.groups.slice(0, MAX_PERSISTED_GROUPS).map((group) => ({
@@ -499,7 +563,20 @@ export const useSettingsStore = defineStore("settings", {
       };
     },
 
-    persist() {
+    async persist() {
+      if (isTauri()) {
+        const payload = this.buildPersistencePayload("normal");
+
+        await invoke("save_app_cache", {
+          request: {
+            cacheDirectory: this.cacheDirectory,
+            settings: payload,
+            memberLibrary: payload.memberLibrary ?? [],
+          },
+        });
+        return;
+      }
+
       const modes: PersistenceMode[] = ["normal", "compact", "minimal"];
 
       for (const mode of modes) {
@@ -581,10 +658,17 @@ export const useSettingsStore = defineStore("settings", {
     startPersistence() {
       this.$subscribe(
         () => {
-          this.persist();
+          void this.persist().catch((error) => {
+            console.warn("Failed to persist settings.", error);
+          });
         },
         { detached: true },
       );
+    },
+
+    async setCacheDirectory(cacheDirectory: string) {
+      this.cacheDirectory = cacheDirectory;
+      await this.persist();
     },
 
     selectGroup(groupId: string) {
@@ -717,6 +801,7 @@ export const useSettingsStore = defineStore("settings", {
     updateMemberProvider(member: AgentModel) {
       member.model = this.providers[member.provider].defaultModel;
       member.color = getModelColor(member.provider);
+      this.rememberMember(member);
       this.activeGroup.updatedAt = new Date().toISOString();
     },
 

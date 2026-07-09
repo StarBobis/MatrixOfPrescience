@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -7,6 +8,7 @@ use std::{
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
+use tauri::{AppHandle, Manager};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "lowercase")]
@@ -22,6 +24,7 @@ struct ChatCompletionRequest {
     base_url: String,
     api_key: String,
     model: String,
+    reasoning_effort: Option<String>,
     temperature: Option<f32>,
     system_prompt: Option<String>,
     messages: Vec<ChatMessage>,
@@ -63,6 +66,254 @@ struct InspectCodeWorkspaceResponse {
     content: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveAppCacheRequest {
+    cache_directory: Option<String>,
+    settings: Value,
+    member_library: Value,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppCacheState {
+    default_cache_directory: String,
+    cache_directory: String,
+    settings: Option<Value>,
+    member_library: Option<Value>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AvatarCacheResponse {
+    path: String,
+}
+
+const CACHE_LOCATION_FILE: &str = "cache-location.json";
+const SETTINGS_FILE: &str = "settings.json";
+const MEMBER_LIBRARY_FILE: &str = "member-library.json";
+const AVATAR_DIR: &str = "avatars";
+
+fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map_err(|error| format!("Failed to resolve app data directory: {}", error))
+}
+
+fn read_json_file(path: &Path) -> Result<Option<Value>, String> {
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let content = fs::read_to_string(path)
+        .map_err(|error| format!("Failed to read {:?}: {}", path, error))?;
+
+    serde_json::from_str(&content)
+        .map(Some)
+        .map_err(|error| format!("Failed to parse {:?}: {}", path, error))
+}
+
+fn write_json_file(path: &Path, value: &Value) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("Failed to create {:?}: {}", parent, error))?;
+    }
+
+    let content = serde_json::to_string_pretty(value)
+        .map_err(|error| format!("Failed to serialize {:?}: {}", path, error))?;
+
+    fs::write(path, content).map_err(|error| format!("Failed to write {:?}: {}", path, error))
+}
+
+fn read_cache_directory(app: &AppHandle) -> Result<PathBuf, String> {
+    let default_dir = app_data_dir(app)?;
+    let location_path = default_dir.join(CACHE_LOCATION_FILE);
+
+    let Some(config) = read_json_file(&location_path)? else {
+        return Ok(default_dir);
+    };
+
+    let configured = config
+        .get("cacheDirectory")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    Ok(configured.map(PathBuf::from).unwrap_or(default_dir))
+}
+
+fn write_cache_directory(app: &AppHandle, cache_directory: &Path) -> Result<(), String> {
+    let default_dir = app_data_dir(app)?;
+    fs::create_dir_all(&default_dir)
+        .map_err(|error| format!("Failed to create {:?}: {}", default_dir, error))?;
+    write_json_file(
+        &default_dir.join(CACHE_LOCATION_FILE),
+        &json!({ "cacheDirectory": cache_directory.to_string_lossy() }),
+    )
+}
+
+fn ensure_cache_tree(cache_directory: &Path) -> Result<(), String> {
+    fs::create_dir_all(cache_directory)
+        .map_err(|error| format!("Failed to create {:?}: {}", cache_directory, error))?;
+    fs::create_dir_all(cache_directory.join(AVATAR_DIR)).map_err(|error| {
+        format!(
+            "Failed to create {:?}: {}",
+            cache_directory.join(AVATAR_DIR),
+            error
+        )
+    })
+}
+
+#[tauri::command]
+async fn load_app_cache(app: AppHandle) -> Result<AppCacheState, String> {
+    let default_cache_directory = app_data_dir(&app)?;
+    let cache_directory = read_cache_directory(&app)?;
+    ensure_cache_tree(&cache_directory)?;
+
+    Ok(AppCacheState {
+        default_cache_directory: default_cache_directory.to_string_lossy().to_string(),
+        cache_directory: cache_directory.to_string_lossy().to_string(),
+        settings: read_json_file(&cache_directory.join(SETTINGS_FILE))?,
+        member_library: read_json_file(&cache_directory.join(MEMBER_LIBRARY_FILE))?,
+    })
+}
+
+#[tauri::command]
+async fn save_app_cache(app: AppHandle, mut request: SaveAppCacheRequest) -> Result<(), String> {
+    let cache_directory = request
+        .cache_directory
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or(read_cache_directory(&app)?);
+
+    ensure_cache_tree(&cache_directory)?;
+    write_cache_directory(&app, &cache_directory)?;
+    materialize_avatar_data_urls(&mut request.settings, &cache_directory)?;
+    materialize_avatar_data_urls(&mut request.member_library, &cache_directory)?;
+    write_json_file(&cache_directory.join(SETTINGS_FILE), &request.settings)?;
+    write_json_file(
+        &cache_directory.join(MEMBER_LIBRARY_FILE),
+        &request.member_library,
+    )?;
+    Ok(())
+}
+
+fn avatar_extension_from_mime(mime_type: &str) -> &str {
+    match mime_type {
+        "image/jpeg" => "jpg",
+        "image/svg+xml" => "svg",
+        "image/webp" => "webp",
+        "image/gif" => "gif",
+        "image/bmp" => "bmp",
+        _ => "png",
+    }
+}
+
+fn write_avatar_data_url(value: &str, cache_directory: &Path) -> Result<Option<String>, String> {
+    let Some(rest) = value.strip_prefix("data:") else {
+        return Ok(None);
+    };
+    let Some((mime_type, encoded)) = rest.split_once(";base64,") else {
+        return Ok(None);
+    };
+
+    if !mime_type.starts_with("image/") {
+        return Ok(None);
+    }
+
+    let bytes = general_purpose::STANDARD
+        .decode(encoded)
+        .map_err(|error| format!("Failed to decode cached avatar: {}", error))?;
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("Failed to create avatar name: {}", error))?
+        .as_nanos();
+    let extension = avatar_extension_from_mime(mime_type);
+    let target = cache_directory
+        .join(AVATAR_DIR)
+        .join(format!("avatar-{}.{}", stamp, extension));
+
+    fs::write(&target, bytes)
+        .map_err(|error| format!("Failed to write cached avatar {:?}: {}", target, error))?;
+    Ok(Some(target.to_string_lossy().to_string()))
+}
+
+fn materialize_avatar_data_urls(value: &mut Value, cache_directory: &Path) -> Result<(), String> {
+    match value {
+        Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if key == "avatar" {
+                    if let Some(avatar) = child.as_str() {
+                        if let Some(path) = write_avatar_data_url(avatar, cache_directory)? {
+                            *child = Value::String(path);
+                            continue;
+                        }
+                    }
+                }
+
+                materialize_avatar_data_urls(child, cache_directory)?;
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                materialize_avatar_data_urls(item, cache_directory)?;
+            }
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+fn is_supported_avatar(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg" | "webp" | "gif" | "bmp" | "svg")
+    )
+}
+
+#[tauri::command]
+async fn copy_avatar_to_cache(
+    app: AppHandle,
+    source_path: String,
+) -> Result<AvatarCacheResponse, String> {
+    let source = PathBuf::from(source_path.trim());
+
+    if !source.is_file() {
+        return Err("Avatar source file does not exist.".to_string());
+    }
+
+    if !is_supported_avatar(&source) {
+        return Err("Unsupported avatar image type.".to_string());
+    }
+
+    let cache_directory = read_cache_directory(&app)?;
+    let avatar_directory = cache_directory.join(AVATAR_DIR);
+    ensure_cache_tree(&cache_directory)?;
+
+    let extension = source
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("png");
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| format!("Failed to create avatar name: {}", error))?
+        .as_nanos();
+    let target = avatar_directory.join(format!("avatar-{}.{}", stamp, extension));
+
+    fs::copy(&source, &target)
+        .map_err(|error| format!("Failed to copy avatar into cache: {}", error))?;
+
+    Ok(AvatarCacheResponse {
+        path: target.to_string_lossy().to_string(),
+    })
+}
+
 #[tauri::command]
 async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletionResponse, String> {
     if request.api_key.trim().is_empty() {
@@ -96,15 +347,24 @@ async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletio
         request.base_url.trim().trim_end_matches('/')
     );
 
+    let mut payload = json!({
+        "model": request.model,
+        "messages": messages,
+        "temperature": request.temperature.unwrap_or(0.7),
+    });
+
+    if let Some(reasoning_effort) = request.reasoning_effort.as_deref() {
+        let trimmed = reasoning_effort.trim();
+        if !trimmed.is_empty() && trimmed != "off" {
+            payload["reasoning_effort"] = json!(trimmed);
+        }
+    }
+
     let client = reqwest::Client::new();
     let response = client
         .post(endpoint)
         .bearer_auth(request.api_key.trim())
-        .json(&json!({
-            "model": request.model,
-            "messages": messages,
-            "temperature": request.temperature.unwrap_or(0.7),
-        }))
+        .json(&payload)
         .send()
         .await
         .map_err(|error| format!("请求 {} 失败：{}", request.provider_name, error))?;
@@ -474,6 +734,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            load_app_cache,
+            save_app_cache,
+            copy_avatar_to_cache,
             chat_completion,
             inspect_code_workspace,
             apply_patch_proposal

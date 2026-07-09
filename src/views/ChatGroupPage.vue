@@ -257,6 +257,10 @@ function updateMemberProfile(member: AgentModel) {
   settingsStore.updateMemberProfile(member);
 }
 
+function updateMemberProvider(member: AgentModel) {
+  settingsStore.updateMemberProvider(member);
+}
+
 function setSpeakerQueue(members: AgentModel[], status: SpeakerQueueStatus) {
   speakerQueue.value = members.map((member) => ({
     id: member.id,
@@ -644,6 +648,7 @@ async function decideMemberResponse(
         baseUrl: provider.baseUrl,
         apiKey: provider.apiKey,
         model: member.model,
+        reasoningEffort: member.reasoningEffort,
         temperature: 0,
         systemPrompt: buildSystemPrompt(member, activeGroup.value, phaseRule),
         messages: buildConversation(),
@@ -712,6 +717,7 @@ async function askMember(
         baseUrl: provider.baseUrl,
         apiKey: provider.apiKey,
         model: member.model,
+        reasoningEffort: member.reasoningEffort,
         temperature: member.temperature,
         systemPrompt: buildSystemPrompt(member, activeGroup.value, responseRule, codeContext),
         messages: conversation,
@@ -765,6 +771,7 @@ async function voteOnAnswer(
         baseUrl: provider.baseUrl,
         apiKey: provider.apiKey,
         model: voter.model,
+        reasoningEffort: voter.reasoningEffort,
         temperature: 0,
         systemPrompt: buildSystemPrompt(
           voter,
@@ -1029,11 +1036,14 @@ async function sendMessage() {
           :historical-members="historicalMembers"
           :owner-profile="ownerProfile"
           :get-provider-label="getProviderLabel"
+          :provider-options="providerOptions"
+          :model-presets="modelPresets"
           @add-member="addMember"
           @add-historical-member="addHistoricalMember"
           @remove-member="removeMember"
           @rename-member="renameMember"
           @update-member-profile="updateMemberProfile"
+          @update-member-provider="updateMemberProvider"
         />
       </template>
     </ResizableGroupLayout>

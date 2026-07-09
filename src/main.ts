@@ -15,12 +15,16 @@ const settingsStore = useSettingsStore();
 
 bindI18nLocaleToSettings(settingsStore);
 
-try {
-  settingsStore.hydrate();
-} catch (error) {
-  console.warn("Failed to hydrate settings; defaults will be used.", error);
+async function bootstrap() {
+  try {
+    await settingsStore.hydrate();
+  } catch (error) {
+    console.warn("Failed to hydrate settings; defaults will be used.", error);
+  }
+
+  settingsStore.startPersistence();
+
+  app.use(i18n).use(ElementPlus).mount("#app");
 }
 
-settingsStore.startPersistence();
-
-app.use(i18n).use(ElementPlus).mount("#app");
+void bootstrap();

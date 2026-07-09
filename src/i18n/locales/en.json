@@ -23,6 +23,12 @@
   },
   "settings": {
     "title": "Global Settings",
+    "cache": {
+      "chooseTitle": "Choose cache folder",
+      "defaultPlaceholder": "Default app data folder",
+      "description": "Settings, member history, and cached avatars are saved as JSON and files under: {path}",
+      "title": "Cache folder"
+    },
     "profile": {
       "avatar": "Avatar",
       "avatarColor": "Avatar color",
@@ -60,11 +66,17 @@
     "addFromHistory": "Add from history",
     "addOpenAIMember": "New ChatGPT member",
     "addTitle": "Add member",
-    "enabled": "Active",
     "listTitle": "Members",
     "localAvatar": "Local avatar",
     "muted": "Muted",
     "muteQuestion": "Muted",
+    "reasoningEffort": "Reasoning",
+    "reasoningEffortOptions": {
+      "off": "Off",
+      "low": "Low",
+      "medium": "Medium",
+      "high": "High"
+    },
     "removeTitle": "Remove member",
     "roleIdentity": "Role identity",
     "rolePlaceholder": "Describe this member's responsibility, stance, and response boundaries"
@@ -173,7 +185,7 @@
       "description": "Multi-model collaboration group",
       "migratedName": "Migrated model group",
       "name": "Default Agent Group",
-      "welcome": "This is an Agent chat group. Each virtual member has its own API, model, and core role. After you send a message, unmuted members share the same context and reply separately."
+      "welcome": "This is an Agent chat group. Each virtual member has its own API, model, and core role. After you send a message, members who can speak share the same context and reply separately."
     },
     "member": {
       "copyName": "{name} copy",
@@ -278,8 +290,8 @@
     "stepWaitingModel": "Waiting for model response.",
     "voteAgreeRule": "If the conclusion, plan, or key evidence is acceptable and you have nothing important to add, reply AGREE only.",
     "voteDisagreeRule": "If you think there is a disagreement that needs more discussion, reply DISAGREE only.",
-    "voteQuestion": "Decide whether you agree with {name}'s previous response."
-    ,"voteSupplementRule": "If you agree overall but need to add important context, reply SUPPLEMENT only."
+    "voteQuestion": "Decide whether you agree with {name}'s previous response.",
+    "voteSupplementRule": "If you agree overall but need to add important context, reply SUPPLEMENT only."
   },
   "patchRuntime": {
     "appliedContent": "Patch \"{title}\" was applied.",
