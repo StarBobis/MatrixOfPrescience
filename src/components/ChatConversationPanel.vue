@@ -4,6 +4,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { FolderOpened, Promotion } from "@element-plus/icons-vue";
 import { useI18n } from "vue-i18n";
 import PatchApprovalPanel from "./PatchApprovalPanel.vue";
+import { getAvatarSrc } from "../utils/avatar";
 import type { AgentModel, ChatGroup, ChatMessage, PatchApprovalStatus } from "../stores/settings";
 
 export type SpeakerQueueStatus = "queued" | "checking" | "waiting" | "speaking";
@@ -92,6 +93,54 @@ function insertMention(member: AgentModel) {
   emit("update:composer", nextComposer);
 }
 
+function getInitial(name: string) {
+  return name.trim().slice(0, 1) || "?";
+}
+
+function findMessageMember(message: ChatMessage) {
+  return (props.activeGroup?.members ?? props.activeMembers).find(
+    (member) => member.name === message.modelName,
+  );
+}
+
+function getMessageAvatar(message: ChatMessage) {
+  return message.avatar || findMessageMember(message)?.avatar || "";
+}
+
+function getMessageAvatarSrc(message: ChatMessage) {
+  return getAvatarSrc(getMessageAvatar(message));
+}
+
+function getMessageApiModel(message: ChatMessage) {
+  return message.apiModel || findMessageMember(message)?.model || "";
+}
+
+function getMessageReasoningEffort(message: ChatMessage) {
+  return message.reasoningEffort || findMessageMember(message)?.reasoningEffort || "off";
+}
+
+function formatDuration(durationMs?: number) {
+  if (!Number.isFinite(durationMs)) {
+    return "";
+  }
+
+  const totalSeconds = Math.max(0, Math.round((durationMs ?? 0) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+
+  if (minutes <= 0) {
+    return `${seconds}s`;
+  }
+
+  return `${minutes}m ${seconds.toString().padStart(2, "0")}s`;
+}
+
+function getReasoningLabel(message: ChatMessage) {
+  const effort = getMessageReasoningEffort(message);
+
+  return t(`members.reasoningEffortOptions.${effort}`);
+}
+
 defineExpose({
   scrollToBottom,
 });
@@ -166,10 +215,26 @@ defineExpose({
         :style="{ '--accent': message.color }"
       >
         <div class="message-meta">
-          <span class="accent-line"></span>
-          <div class="message-title">
-            <strong>{{ message.modelName }}</strong>
-            <span v-if="message.providerName">{{ message.providerName }}</span>
+          <span class="message-avatar" :style="{ '--avatar-accent': message.color }">
+            <img v-if="getMessageAvatarSrc(message)" :src="getMessageAvatarSrc(message)" alt="" />
+            <span v-else>{{ getInitial(message.modelName) }}</span>
+          </span>
+          <div class="message-heading">
+            <div class="message-title">
+              <strong>{{ message.modelName }}</strong>
+              <span v-if="message.providerName">{{ message.providerName }}</span>
+            </div>
+            <div class="message-detail-list">
+              <span v-if="getMessageApiModel(message)">
+                {{ t("chat.messageMeta.model", { model: getMessageApiModel(message) }) }}
+              </span>
+              <span v-if="message.role === 'assistant'">
+                {{ t("chat.messageMeta.reasoning", { effort: getReasoningLabel(message) }) }}
+              </span>
+              <span v-if="formatDuration(message.durationMs)">
+                {{ t("chat.messageMeta.duration", { duration: formatDuration(message.durationMs) }) }}
+              </span>
+            </div>
           </div>
           <span class="status-pill" :class="message.status">
             {{ statusText[message.status] }}

@@ -134,6 +134,11 @@
       "label": "工作文件夹",
       "pickDialogTitle": "选择当前群工作文件夹",
       "placeholder": "选择或输入路径..."
+    },
+    "messageMeta": {
+      "model": "模型：{model}",
+      "reasoning": "推理：{effort}",
+      "duration": "耗时：{duration}"
     }
   },
   "patch": {

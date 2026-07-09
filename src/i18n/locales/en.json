@@ -134,6 +134,11 @@
       "label": "Workspace",
       "pickDialogTitle": "Choose current group workspace",
       "placeholder": "Choose or enter a path..."
+    },
+    "messageMeta": {
+      "model": "Model: {model}",
+      "reasoning": "Reasoning: {effort}",
+      "duration": "Elapsed: {duration}"
     }
   },
   "patch": {

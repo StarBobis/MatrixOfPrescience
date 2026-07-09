@@ -5,7 +5,7 @@ import { useI18n } from "vue-i18n";
 import { chooseLocalAvatar, getAvatarSrc } from "../utils/avatar";
 import type { AgentModel, AgentReasoningEffort, OwnerProfile, ProviderId } from "../stores/settings";
 
-defineProps<{
+const props = defineProps<{
   members: AgentModel[];
   historicalMembers: AgentModel[];
   ownerProfile: OwnerProfile;
@@ -26,6 +26,7 @@ const emit = defineEmits<{
 
 const activeMemberCardId = ref("");
 const editingMemberCardId = ref("");
+const memberNameDrafts = ref<Record<string, string>>({});
 const { t } = useI18n();
 let memberCardCloseTimer: number | undefined;
 
@@ -59,13 +60,41 @@ function scheduleHideMemberCard(memberId: string) {
 
 function startMemberCardEdit(memberId: string) {
   editingMemberCardId.value = memberId;
+  const member = props.members.find((item) => item.id === memberId);
+
+  if (member && !(memberId in memberNameDrafts.value)) {
+    memberNameDrafts.value[memberId] = member.name;
+  }
+
   showMemberCard(memberId);
 }
 
 function finishMemberCardEdit(memberId: string) {
+  const member = props.members.find((item) => item.id === memberId);
+  const draft = memberNameDrafts.value[memberId];
+
+  if (member && draft !== undefined) {
+    const nextName = draft.trim();
+
+    if (nextName) {
+      emit("renameMember", member.id, nextName);
+      memberNameDrafts.value[memberId] = member.name;
+    } else {
+      memberNameDrafts.value[memberId] = member.name;
+    }
+  }
+
   if (editingMemberCardId.value === memberId) {
     editingMemberCardId.value = "";
   }
+}
+
+function getMemberNameDraft(member: AgentModel) {
+  return memberNameDrafts.value[member.id] ?? member.name;
+}
+
+function updateMemberNameDraft(memberId: string, value: string | number) {
+  memberNameDrafts.value[memberId] = String(value);
 }
 
 function updateMemberSetting(member: AgentModel) {
@@ -184,11 +213,12 @@ async function assignLocalAvatar(member: AgentModel) {
             </span>
             <div class="profile-title">
             <el-input
-              v-model="member.name"
+              :model-value="getMemberNameDraft(member)"
               size="small"
               @focus="startMemberCardEdit(member.id)"
-              @input="emit('renameMember', member.id, member.name)"
+              @update:model-value="updateMemberNameDraft(member.id, $event)"
               @blur="finishMemberCardEdit(member.id)"
+              @keydown.enter.prevent="finishMemberCardEdit(member.id)"
             />
               <span v-if="!member.enabled">{{ t("members.muted") }}</span>
             </div>

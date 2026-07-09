@@ -92,6 +92,7 @@ const activeRunId = ref("");
 const pendingMessageIds = ref<string[]>([]);
 const speakerQueue = ref<SpeakerQueueItem[]>([]);
 const chatPanel = ref<InstanceType<typeof ChatConversationPanel> | null>(null);
+const speakingTimers = new Map<string, number>();
 
 const newGroupName = ref(t("defaults.newGroup.name"));
 const newGroupDescription = ref(t("defaults.newGroup.description"));
@@ -570,6 +571,33 @@ function addThoughtStep(messageId: string, step: string) {
   });
 }
 
+function updateSpeakingDuration(messageId: string, startedAt: number) {
+  settingsStore.updateMessage(messageId, {
+    durationMs: Math.max(0, Date.now() - startedAt),
+  });
+}
+
+function startSpeakingTimer(messageId: string, startedAt: number) {
+  updateSpeakingDuration(messageId, startedAt);
+  speakingTimers.set(
+    messageId,
+    window.setInterval(() => updateSpeakingDuration(messageId, startedAt), 1000),
+  );
+}
+
+function stopSpeakingTimer(messageId: string, startedAt?: number) {
+  const timer = speakingTimers.get(messageId);
+
+  if (timer) {
+    window.clearInterval(timer);
+    speakingTimers.delete(messageId);
+  }
+
+  if (startedAt) {
+    updateSpeakingDuration(messageId, startedAt);
+  }
+}
+
 function stopGeneration() {
   if (!sending.value) {
     return;
@@ -579,6 +607,8 @@ function stopGeneration() {
   sending.value = false;
 
   for (const messageId of pendingMessageIds.value) {
+    const message = activeMessages.value.find((item) => item.id === messageId);
+    stopSpeakingTimer(messageId, message?.startedAt);
     settingsStore.updateMessage(messageId, {
       status: "error",
       content: t("chatRuntime.interruptedContent"),
@@ -644,6 +674,7 @@ async function askMember(
 
   const provider = getProvider(member);
   const pendingId = crypto.randomUUID();
+  const startedAt = Date.now();
   const conversation = buildConversation();
   const responseRule =
     extraRule ||
@@ -655,11 +686,17 @@ async function askMember(
     role: "assistant",
     modelName: member.name,
     providerName: getProviderLabel(member.provider),
+    avatar: member.avatar,
+    apiModel: member.model,
+    reasoningEffort: member.reasoningEffort,
+    startedAt,
+    durationMs: 0,
     status: "thinking",
     content: t("chatRuntime.pendingContent"),
     color: member.color,
     thoughtSteps: [t("chatRuntime.stepQueued")],
   });
+  startSpeakingTimer(pendingId, startedAt);
   pendingMessageIds.value = [...pendingMessageIds.value, pendingId];
   await scrollToBottom();
 
@@ -693,6 +730,7 @@ async function askMember(
       status: "done",
       content: response.content,
     });
+    stopSpeakingTimer(pendingId, startedAt);
     addThoughtStep(pendingId, t("chatRuntime.stepDone"));
     await maybeCreatePatchProposal(member, response.content);
     return {
@@ -701,6 +739,7 @@ async function askMember(
       content: response.content,
     };
   } catch (error) {
+    stopSpeakingTimer(pendingId, startedAt);
     settingsStore.updateMessage(pendingId, {
       status: "error",
       content: t("chatRuntime.callFailedContent", { error: String(error) }),
@@ -708,6 +747,7 @@ async function askMember(
     addThoughtStep(pendingId, t("chatRuntime.stepFailed"));
     return null;
   } finally {
+    stopSpeakingTimer(pendingId, startedAt);
     removeSpeakerQueueMember(member.id);
     pendingMessageIds.value = pendingMessageIds.value.filter((id) => id !== pendingId);
     await scrollToBottom();
@@ -863,6 +903,8 @@ async function sendMessage() {
   appendMessage({
     role: "user",
     modelName: ownerProfile.value.name || t("common.ownerName"),
+    avatar: ownerProfile.value.avatar,
+    reasoningEffort: "off",
     status: "done",
     content: userText,
     color: ownerProfile.value.color,

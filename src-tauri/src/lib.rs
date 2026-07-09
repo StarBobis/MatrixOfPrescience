@@ -360,6 +360,8 @@ async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletio
         request.base_url.trim().trim_end_matches('/')
     );
     let client = reqwest::Client::new();
+    let is_deepseek = is_deepseek_provider(&request.provider_name, &request.base_url);
+    let mut code_tool_called = false;
 
     for _ in 0..4 {
         let mut payload = json!({
@@ -372,25 +374,51 @@ async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletio
             let trimmed = reasoning_effort.trim();
             if !trimmed.is_empty() && trimmed != "off" {
                 payload["reasoning_effort"] = json!(trimmed);
-                if is_deepseek_provider(&request.provider_name, &request.base_url) {
+                if is_deepseek {
                     payload["thinking"] = json!({ "type": "enabled" });
                 }
             }
         }
 
         if code_workspace.is_some() {
-            payload["tools"] = codegraph_tools_schema();
-            payload["tool_choice"] = json!("auto");
+            payload["tools"] = codegraph_tools_schema(is_deepseek);
+            payload["tool_choice"] = if is_deepseek && !code_tool_called {
+                json!("required")
+            } else {
+                json!("auto")
+            };
         }
 
-        let parsed = send_chat_completion_request(
+        let parsed = match send_chat_completion_request(
             &client,
             &endpoint,
             &request.api_key,
             &request.provider_name,
             &payload,
         )
-        .await?;
+        .await
+        {
+            Ok(parsed) => parsed,
+            Err(error) if is_deepseek && code_workspace.is_some() => {
+                payload["tools"] = codegraph_tools_schema(false);
+                payload["tool_choice"] = json!("auto");
+                send_chat_completion_request(
+                    &client,
+                    &endpoint,
+                    &request.api_key,
+                    &request.provider_name,
+                    &payload,
+                )
+                .await
+                .map_err(|fallback_error| {
+                    format!(
+                        "{}; fallback without strict tool schema also failed: {}",
+                        error, fallback_error
+                    )
+                })?
+            }
+            Err(error) => return Err(error),
+        };
         let message = parsed
             .get("choices")
             .and_then(|choices| choices.get(0))
@@ -407,6 +435,7 @@ async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletio
                 for tool_call in tool_calls {
                     messages.push(execute_code_tool_call(workspace, tool_call));
                 }
+                code_tool_called = true;
                 continue;
             }
         }
@@ -434,24 +463,31 @@ fn is_deepseek_provider(provider_name: &str, base_url: &str) -> bool {
         || base_url.to_ascii_lowercase().contains("deepseek")
 }
 
-fn codegraph_tools_schema() -> Value {
+fn codegraph_tools_schema(strict: bool) -> Value {
+    let mut function = json!({
+        "name": "codegraph_explore",
+        "description": "Read the current workspace with CodeGraph. Use it before answering questions about code, files, symbols, call paths, or implementation details.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "The symbols, files, call flow, or implementation question to inspect."
+                }
+            },
+            "required": ["query"]
+        }
+    });
+
+    if strict {
+        function["strict"] = json!(true);
+        function["parameters"]["additionalProperties"] = json!(false);
+    }
+
     json!([
         {
             "type": "function",
-            "function": {
-                "name": "codegraph_explore",
-                "description": "Read the current workspace with CodeGraph. Use it before answering questions about code, files, symbols, call paths, or implementation details.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "The symbols, files, call flow, or implementation question to inspect."
-                        }
-                    },
-                    "required": ["query"]
-                }
-            }
+            "function": function
         }
     ])
 }
@@ -519,7 +555,7 @@ fn execute_code_tool_call(workspace: &Path, tool_call: &Value) -> Value {
                 Err(codegraph_error) => {
                     read_local_code_context(workspace, &query).unwrap_or_else(|fallback_error| {
                         format!(
-                            "CodeGraph failed: {}\nLocal fallback failed: {}",
+                            "CodeGraph tool was called, but CodeGraph could not read this workspace: {}\nLocal fallback failed: {}",
                             codegraph_error, fallback_error
                         )
                     })
@@ -576,7 +612,10 @@ fn truncate_text(text: String, max_chars: usize) -> String {
 
 fn run_codegraph_explore(workspace: &Path, query: &str) -> Result<String, String> {
     if !has_codegraph_index(workspace) {
-        return Err("No .codegraph index was found for the current workspace.".to_string());
+        return Err(format!(
+            "No .codegraph index was found for {}. Select an indexed workspace or run `codegraph init` and `codegraph index` in that project.",
+            workspace.display()
+        ));
     }
 
     let output = Command::new("codegraph")
@@ -669,7 +708,7 @@ fn read_local_code_context(workspace: &Path, query: &str) -> Result<String, Stri
     }
 
     let mut sections = vec![
-        "CodeGraph is unavailable; using local command fallback.".to_string(),
+        "CodeGraph tool was called, but this query is using a local command fallback. If the target workspace has no .codegraph folder, initialize and index it before expecting full CodeGraph results.".to_string(),
         "File list:".to_string(),
         files
             .iter()

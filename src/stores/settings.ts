@@ -42,6 +42,11 @@ export interface ChatMessage {
   role: ChatRole;
   modelName: string;
   providerName?: string;
+  avatar?: string;
+  apiModel?: string;
+  reasoningEffort?: AgentReasoningEffort;
+  startedAt?: number;
+  durationMs?: number;
   status: MessageStatus;
   content: string;
   time: string;
@@ -214,6 +219,11 @@ function normalizeGroup(group: ChatGroup): ChatGroup {
     members: group.members.map(normalizeMember),
     messages: group.messages.map((message) => ({
       ...message,
+      avatar: message.avatar ?? "",
+      apiModel: message.apiModel ?? "",
+      reasoningEffort: normalizeReasoningEffort(message.reasoningEffort),
+      startedAt: Number.isFinite(message.startedAt) ? message.startedAt : undefined,
+      durationMs: Number.isFinite(message.durationMs) ? message.durationMs : undefined,
       agreeMemberIds: message.agreeMemberIds ?? [],
       supplementMemberIds: message.supplementMemberIds ?? [],
       disagreeMemberIds: message.disagreeMemberIds ?? [],
@@ -247,6 +257,9 @@ function createSystemMessage(content: string): ChatMessage {
     id: crypto.randomUUID(),
     role: "assistant",
     modelName: t("common.systemName"),
+    avatar: "",
+    apiModel: "",
+    reasoningEffort: "off",
     status: "done",
     content,
     time: nowText(),
