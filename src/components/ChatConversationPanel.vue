@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import { CircleClose, FolderOpened, Promotion, RefreshLeft, Tools } from "@element-plus/icons-vue";
 import { useI18n } from "vue-i18n";
@@ -49,8 +49,16 @@ const emit = defineEmits<{
 }>();
 
 const messagesPanel = ref<HTMLElement | null>(null);
+const messagesStack = ref<HTMLElement | null>(null);
+const messagesEnd = ref<HTMLElement | null>(null);
+const composerFooter = ref<HTMLElement | null>(null);
 const approvalPanelOpen = ref(false);
+const stickToBottom = ref(true);
 const { t } = useI18n();
+let pendingScrollFrame = 0;
+let layoutResizeObserver: ResizeObserver | null = null;
+const bottomStickyThreshold = 96;
+const followScrollFrames = 3;
 
 const mentionMatch = computed(() => {
   const match = props.composer.match(/(?:^|\s)@([^@\s]*)$/);
@@ -96,13 +104,137 @@ const pendingPatchCount = computed(
   () => actionablePatchProposals.value.filter((proposal) => proposal.status === "pending").length,
 );
 
+function getBottomDistance(panel: HTMLElement) {
+  return panel.scrollHeight - panel.scrollTop - panel.clientHeight;
+}
+
+function updateStickToBottom() {
+  const panel = messagesPanel.value;
+
+  if (!panel) {
+    stickToBottom.value = true;
+    return;
+  }
+
+  stickToBottom.value = getBottomDistance(panel) <= bottomStickyThreshold;
+}
+
+function settleAtBottom() {
+  const panel = messagesPanel.value;
+
+  if (!panel) {
+    return;
+  }
+
+  messagesEnd.value?.scrollIntoView({ block: "end" });
+  panel.scrollTop = panel.scrollHeight;
+}
+
+function runFollowScrollFrames(remainingFrames: number) {
+  if (pendingScrollFrame) {
+    window.cancelAnimationFrame(pendingScrollFrame);
+  }
+
+  pendingScrollFrame = window.requestAnimationFrame(() => {
+    pendingScrollFrame = 0;
+
+    if (!stickToBottom.value) {
+      return;
+    }
+
+    settleAtBottom();
+
+    if (remainingFrames > 1) {
+      runFollowScrollFrames(remainingFrames - 1);
+    }
+  });
+}
+
+function scheduleFollowScroll(force = false) {
+  if (!force && !stickToBottom.value) {
+    return;
+  }
+
+  void nextTick(() => {
+    if (!force && !stickToBottom.value) {
+      return;
+    }
+
+    runFollowScrollFrames(followScrollFrames);
+  });
+}
+
 async function scrollToBottom() {
+  stickToBottom.value = true;
   await nextTick();
 
-  if (messagesPanel.value) {
-    messagesPanel.value.scrollTop = messagesPanel.value.scrollHeight;
-  }
+  settleAtBottom();
+  runFollowScrollFrames(followScrollFrames);
 }
+
+const messageScrollSignature = computed(() =>
+  props.messages
+    .map((message) =>
+      [
+        message.id,
+        message.status,
+        message.content.length,
+        message.durationMs ?? 0,
+        message.contextUsedTokens ?? 0,
+        message.contextCacheHitTokens ?? 0,
+        message.contextCacheMissTokens ?? 0,
+        (message.thoughtSteps ?? []).join("\n").length,
+        (message.activityItems ?? [])
+          .map((item) => `${item.id}:${item.status}:${item.text.length}:${item.detail?.length ?? 0}`)
+          .join(","),
+      ].join(":"),
+    )
+    .join("|"),
+);
+
+watch(
+  messageScrollSignature,
+  () => {
+    scheduleFollowScroll();
+  },
+  { flush: "post" },
+);
+
+watch(
+  () => props.composer,
+  () => {
+    scheduleFollowScroll();
+  },
+  { flush: "post" },
+);
+
+onMounted(() => {
+  if (typeof ResizeObserver === "undefined") {
+    return;
+  }
+
+  layoutResizeObserver = new ResizeObserver(() => {
+    scheduleFollowScroll();
+  });
+
+  if (messagesStack.value) {
+    layoutResizeObserver.observe(messagesStack.value);
+  }
+
+  if (composerFooter.value) {
+    layoutResizeObserver.observe(composerFooter.value);
+  }
+});
+
+onBeforeUnmount(() => {
+  if (pendingScrollFrame) {
+    window.cancelAnimationFrame(pendingScrollFrame);
+    pendingScrollFrame = 0;
+  }
+
+  layoutResizeObserver?.disconnect();
+  layoutResizeObserver = null;
+});
 
 async function chooseWorkspacePath() {
   const selected = await open({
@@ -384,151 +516,155 @@ defineExpose({
       />
     </section>
 
-    <section ref="messagesPanel" class="messages-panel">
-      <article
-        v-for="message in messages"
-        :key="message.id"
-        class="message-row"
-        :class="[message.role, message.status]"
-        :style="{ '--accent': message.color }"
-      >
-        <div class="message-meta">
-          <span class="message-avatar" :style="{ '--avatar-accent': message.color }">
-            <img v-if="getMessageAvatarSrc(message)" :src="getMessageAvatarSrc(message)" alt="" />
-            <span v-else>{{ getInitial(message.modelName) }}</span>
-          </span>
-          <div class="message-heading">
-            <div class="message-title">
-              <strong>{{ message.modelName }}</strong>
-              <span v-if="message.role === 'user'" class="identity-badge owner">
-                {{ t("common.ownerRole") }}
-              </span>
-              <span v-else-if="isAdminMessage(message)" class="identity-badge admin">
-                {{ t("members.adminRole") }}
-              </span>
-              <span v-if="message.providerName">{{ message.providerName }}</span>
+    <section ref="messagesPanel" class="messages-panel" @scroll="updateStickToBottom">
+      <div ref="messagesStack" class="messages-stack">
+        <article
+          v-for="message in messages"
+          :key="message.id"
+          class="message-row"
+          :class="[message.role, message.status]"
+          :style="{ '--accent': message.color }"
+        >
+          <div class="message-meta">
+            <span class="message-avatar" :style="{ '--avatar-accent': message.color }">
+              <img v-if="getMessageAvatarSrc(message)" :src="getMessageAvatarSrc(message)" alt="" />
+              <span v-else>{{ getInitial(message.modelName) }}</span>
+            </span>
+            <div class="message-heading">
+              <div class="message-title">
+                <strong>{{ message.modelName }}</strong>
+                <span v-if="message.role === 'user'" class="identity-badge owner">
+                  {{ t("common.ownerRole") }}
+                </span>
+                <span v-else-if="isAdminMessage(message)" class="identity-badge admin">
+                  {{ t("members.adminRole") }}
+                </span>
+                <span v-if="message.providerName">{{ message.providerName }}</span>
+              </div>
+              <div class="message-detail-list">
+                <span v-if="getMessageApiModel(message)">
+                  {{ t("chat.messageMeta.model", { model: getMessageApiModel(message) }) }}
+                </span>
+                <span v-if="message.role === 'assistant'">
+                  {{ t("chat.messageMeta.reasoning", { effort: getReasoningLabel(message) }) }}
+                </span>
+                <span v-if="formatDuration(message.durationMs)">
+                  {{ t("chat.messageMeta.duration", { duration: formatDuration(message.durationMs) }) }}
+                </span>
+              </div>
             </div>
-            <div class="message-detail-list">
-              <span v-if="getMessageApiModel(message)">
-                {{ t("chat.messageMeta.model", { model: getMessageApiModel(message) }) }}
-              </span>
-              <span v-if="message.role === 'assistant'">
-                {{ t("chat.messageMeta.reasoning", { effort: getReasoningLabel(message) }) }}
-              </span>
-              <span v-if="formatDuration(message.durationMs)">
-                {{ t("chat.messageMeta.duration", { duration: formatDuration(message.durationMs) }) }}
-              </span>
-            </div>
+            <span class="status-pill" :class="message.status">
+              {{ statusText[message.status] }}
+            </span>
+            <time>{{ message.time }}</time>
           </div>
-          <span class="status-pill" :class="message.status">
-            {{ statusText[message.status] }}
-          </span>
-          <time>{{ message.time }}</time>
-        </div>
 
-        <div class="message-body" v-html="renderMarkdown(message.content)"></div>
+          <div class="message-body" v-html="renderMarkdown(message.content)"></div>
 
-        <div class="message-status-bar" :class="message.status">
-          <div class="message-activity-feed">
-            <template v-if="(message.activityItems ?? []).length > 0">
-              <template v-for="item in message.activityItems" :key="item.id">
-                <details
-                  v-if="item.kind === 'tool'"
-                  class="activity-chip activity-detail-chip"
-                  :class="[item.kind, item.status]"
-                >
-                  <summary :title="item.text">
+          <div class="message-status-bar" :class="message.status">
+            <div class="message-activity-feed">
+              <template v-if="(message.activityItems ?? []).length > 0">
+                <template v-for="item in message.activityItems" :key="item.id">
+                  <details
+                    v-if="item.kind === 'tool'"
+                    class="activity-chip activity-detail-chip"
+                    :class="[item.kind, item.status]"
+                    @toggle="scheduleFollowScroll()"
+                  >
+                    <summary :title="item.text">
+                      <el-icon>
+                        <component :is="getActivityIcon(item)" />
+                      </el-icon>
+                      <span>{{ item.text }}</span>
+                    </summary>
+                    <pre class="activity-detail">{{ item.detail || item.text }}</pre>
+                  </details>
+
+                  <span
+                    v-else
+                    class="activity-chip"
+                    :class="[item.kind, item.status]"
+                    :title="item.text"
+                  >
                     <el-icon>
                       <component :is="getActivityIcon(item)" />
                     </el-icon>
                     <span>{{ item.text }}</span>
-                  </summary>
-                  <pre class="activity-detail">{{ item.detail || item.text }}</pre>
-                </details>
-
-                <span
-                  v-else
-                  class="activity-chip"
-                  :class="[item.kind, item.status]"
-                  :title="item.text"
-                >
-                  <el-icon>
-                    <component :is="getActivityIcon(item)" />
-                  </el-icon>
-                  <span>{{ item.text }}</span>
-                </span>
+                  </span>
+                </template>
               </template>
-            </template>
-            <span v-else class="activity-empty">{{ statusText[message.status] }}</span>
+              <span v-else class="activity-empty">{{ statusText[message.status] }}</span>
+            </div>
+
+            <el-tooltip
+              v-if="hasContextUsage(message)"
+              placement="top"
+              effect="light"
+              :show-after="180"
+            >
+              <template #content>
+                <div class="context-tooltip">
+                  <strong>
+                    {{ t("chat.context.used", {
+                      used: formatTokenCount(message.contextUsedTokens),
+                      total: formatTokenCount(message.contextLimitTokens),
+                    }) }}
+                  </strong>
+                  <span>{{ t("chat.context.percent", { percent: getContextPercent(message) }) }}</span>
+                  <span v-if="Number.isFinite(message.contextPromptTokens)">
+                    {{ t("chat.context.prompt", { tokens: formatTokenCount(message.contextPromptTokens) }) }}
+                  </span>
+                  <span v-if="Number.isFinite(message.contextCompletionTokens)">
+                    {{ t("chat.context.completion", { tokens: formatTokenCount(message.contextCompletionTokens) }) }}
+                  </span>
+                  <span v-if="hasCacheUsage(message)">
+                    {{ t("chat.context.cache", {
+                      rate: getCacheHitRate(message),
+                      hit: formatTokenCount(message.contextCacheHitTokens),
+                      miss: formatTokenCount(message.contextCacheMissTokens),
+                    }) }}
+                  </span>
+                </div>
+              </template>
+              <span class="context-meter" :style="getContextRingStyle(message)">
+                <span class="context-ring"></span>
+                <span class="context-token-label">{{ formatTokenCount(message.contextUsedTokens) }}</span>
+                <span v-if="hasCacheUsage(message)" class="context-cache-label">
+                  {{ t("chat.context.cacheShort", { rate: getCacheHitRate(message) }) }}
+                </span>
+              </span>
+            </el-tooltip>
           </div>
 
-          <el-tooltip
-            v-if="hasContextUsage(message)"
-            placement="top"
-            effect="light"
-            :show-after="180"
+          <details
+            v-if="hasReasoning(message)"
+            class="reasoning-panel"
+            :open="message.status === 'thinking'"
           >
-            <template #content>
-              <div class="context-tooltip">
-                <strong>
-                  {{ t("chat.context.used", {
-                    used: formatTokenCount(message.contextUsedTokens),
-                    total: formatTokenCount(message.contextLimitTokens),
-                  }) }}
-                </strong>
-                <span>{{ t("chat.context.percent", { percent: getContextPercent(message) }) }}</span>
-                <span v-if="Number.isFinite(message.contextPromptTokens)">
-                  {{ t("chat.context.prompt", { tokens: formatTokenCount(message.contextPromptTokens) }) }}
-                </span>
-                <span v-if="Number.isFinite(message.contextCompletionTokens)">
-                  {{ t("chat.context.completion", { tokens: formatTokenCount(message.contextCompletionTokens) }) }}
-                </span>
-                <span v-if="hasCacheUsage(message)">
-                  {{ t("chat.context.cache", {
-                    rate: getCacheHitRate(message),
-                    hit: formatTokenCount(message.contextCacheHitTokens),
-                    miss: formatTokenCount(message.contextCacheMissTokens),
-                  }) }}
-                </span>
-              </div>
-            </template>
-            <span class="context-meter" :style="getContextRingStyle(message)">
-              <span class="context-ring"></span>
-              <span class="context-token-label">{{ formatTokenCount(message.contextUsedTokens) }}</span>
-              <span v-if="hasCacheUsage(message)" class="context-cache-label">
-                {{ t("chat.context.cacheShort", { rate: getCacheHitRate(message) }) }}
-              </span>
+            <summary>
+              <span>{{ t("chat.reasoningPanel") }}</span>
+              <span>{{ t("chat.reasoningLines", { count: message.thoughtSteps?.length ?? 0 }) }}</span>
+            </summary>
+            <div class="reasoning-markdown" v-html="renderReasoningMarkdown(message)"></div>
+          </details>
+
+          <div class="message-reactions">
+            <span class="reaction-pill agree" :class="{ complete: allPeersAgreed(message) }">
+              {{ getAgreeLabel(message) }}
             </span>
-          </el-tooltip>
-        </div>
-
-        <details
-          v-if="hasReasoning(message)"
-          class="reasoning-panel"
-          :open="message.status === 'thinking'"
-        >
-          <summary>
-            <span>{{ t("chat.reasoningPanel") }}</span>
-            <span>{{ t("chat.reasoningLines", { count: message.thoughtSteps?.length ?? 0 }) }}</span>
-          </summary>
-          <div class="reasoning-markdown" v-html="renderReasoningMarkdown(message)"></div>
-        </details>
-
-        <div class="message-reactions">
-          <span class="reaction-pill agree" :class="{ complete: allPeersAgreed(message) }">
-            {{ getAgreeLabel(message) }}
-          </span>
-          <span class="reaction-pill supplement">
-            {{ t("chat.supplement", { count: (message.supplementMemberIds ?? []).length }) }}
-          </span>
-          <span class="reaction-pill disagree">
-            {{ t("chat.disagree", { count: (message.disagreeMemberIds ?? []).length }) }}
-          </span>
-        </div>
-      </article>
+            <span class="reaction-pill supplement">
+              {{ t("chat.supplement", { count: (message.supplementMemberIds ?? []).length }) }}
+            </span>
+            <span class="reaction-pill disagree">
+              {{ t("chat.disagree", { count: (message.disagreeMemberIds ?? []).length }) }}
+            </span>
+          </div>
+        </article>
+        <div ref="messagesEnd" class="messages-end" aria-hidden="true"></div>
+      </div>
     </section>
 
-    <footer class="composer">
+    <footer ref="composerFooter" class="composer">
       <div v-if="mentionOpen && mentionCandidates.length > 0" class="mention-menu">
         <button
           v-for="member in mentionCandidates"
@@ -579,6 +715,28 @@ defineExpose({
 </template>
 
 <style scoped>
+.messages-panel {
+  display: block;
+  overflow-anchor: none;
+}
+
+.messages-stack {
+  display: flex;
+  min-height: 100%;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.message-row {
+  flex: 0 0 auto;
+}
+
+.messages-end {
+  width: 100%;
+  height: 1px;
+  flex: 0 0 1px;
+}
+
 .message-row.thinking {
   position: relative;
   overflow: hidden;
