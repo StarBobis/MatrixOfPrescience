@@ -111,7 +111,7 @@ const emit = defineEmits<{
           <el-input
             v-model="member.systemPrompt"
             type="textarea"
-            :autosize="{ minRows: 2, maxRows: 5 }"
+            :autosize="{ minRows: 2 }"
             resize="none"
           />
         </el-form-item>

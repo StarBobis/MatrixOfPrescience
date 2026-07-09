@@ -216,7 +216,7 @@ async function assignLocalAvatar(member: AgentModel) {
             <el-input
               v-model="member.systemPrompt"
               type="textarea"
-              :autosize="{ minRows: 3, maxRows: 7 }"
+              :autosize="{ minRows: 3 }"
               resize="none"
               placeholder="描述这个群友的分工、立场和回答边界"
               @focus="startMemberCardEdit(member.id)"

@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { nextTick, ref } from "vue";
+import { computed, nextTick, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FolderOpened, Promotion } from "@element-plus/icons-vue";
 import PatchApprovalPanel from "./PatchApprovalPanel.vue";
-import type { ChatGroup, ChatMessage, PatchApprovalStatus } from "../stores/settings";
+import type { AgentModel, ChatGroup, ChatMessage, PatchApprovalStatus } from "../stores/settings";
 
-defineProps<{
+const props = defineProps<{
   activeGroup?: ChatGroup;
   activeMemberCount: number;
+  activeMembers: AgentModel[];
   messages: ChatMessage[];
   patchProposals: ChatGroup["patchProposals"];
   composer: string;
@@ -24,9 +25,24 @@ const emit = defineEmits<{
   updatePatchStatus: [proposalId: string, status: PatchApprovalStatus];
   removePatchProposal: [proposalId: string];
   sendMessage: [];
+  stopGeneration: [];
 }>();
 
 const messagesPanel = ref<HTMLElement | null>(null);
+
+const mentionMatch = computed(() => {
+  const match = props.composer.match(/(?:^|\s)@([^@\s]*)$/);
+  return match ? match[1] : "";
+});
+
+const mentionOpen = computed(() => /(?:^|\s)@[^@\s]*$/.test(props.composer));
+
+const mentionCandidates = computed(() => {
+  const query = mentionMatch.value.trim().toLocaleLowerCase();
+  return props.activeMembers
+    .filter((member) => member.name.toLocaleLowerCase().includes(query))
+    .slice(0, 8);
+});
 
 async function scrollToBottom() {
   await nextTick();
@@ -46,6 +62,15 @@ async function chooseWorkspacePath() {
   if (typeof selected === "string") {
     emit("update:workspacePath", selected);
   }
+}
+
+function insertMention(member: AgentModel) {
+  const nextComposer = props.composer.replace(/(?:^|\s)@[^@\s]*$/, (match) => {
+    const prefix = match.startsWith(" ") ? " " : "";
+    return `${prefix}@${member.name} `;
+  });
+
+  emit("update:composer", nextComposer);
 }
 
 defineExpose({
@@ -110,6 +135,17 @@ defineExpose({
 
         <div class="message-body" v-html="renderMarkdown(message.content)"></div>
 
+        <details
+          v-if="(message.thoughtSteps ?? []).length > 0"
+          class="thought-steps"
+          :open="message.status === 'thinking'"
+        >
+          <summary>思考过程</summary>
+          <ol>
+            <li v-for="step in message.thoughtSteps" :key="step">{{ step }}</li>
+          </ol>
+        </details>
+
         <div class="message-reactions">
           <span class="reaction-pill agree">
             同意 {{ (message.agreeMemberIds ?? []).length }}
@@ -122,6 +158,20 @@ defineExpose({
     </section>
 
     <footer class="composer">
+      <div v-if="mentionOpen && mentionCandidates.length > 0" class="mention-menu">
+        <button
+          v-for="member in mentionCandidates"
+          :key="member.id"
+          type="button"
+          @click="insertMention(member)"
+        >
+          <span class="mention-avatar" :style="{ background: member.color }">
+            {{ member.name.trim().slice(0, 1) || "?" }}
+          </span>
+          <span>{{ member.name }}</span>
+        </button>
+      </div>
+
       <el-input
         :model-value="composer"
         type="textarea"
@@ -131,6 +181,15 @@ defineExpose({
         @update:model-value="emit('update:composer', String($event))"
         @keydown.enter.exact.prevent="emit('sendMessage')"
       />
+
+      <el-button
+        v-if="sending"
+        type="danger"
+        plain
+        @click="emit('stopGeneration')"
+      >
+        中断
+      </el-button>
 
       <el-button
         type="primary"
@@ -144,3 +203,68 @@ defineExpose({
     </footer>
   </main>
 </template>
+
+<style scoped>
+.thought-steps {
+  margin-top: 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: #53615a;
+  background: #f5f8f6;
+  font-size: 12px;
+}
+
+.thought-steps summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.thought-steps ol {
+  display: grid;
+  gap: 4px;
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.mention-menu {
+  display: flex;
+  max-height: 148px;
+  flex-direction: column;
+  gap: 4px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid #d9e2dc;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 10px 24px rgba(31, 43, 36, 0.12);
+}
+
+.mention-menu button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 6px;
+  color: #24312a;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.mention-menu button:hover {
+  background: #eef5f0;
+}
+
+.mention-avatar {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  place-items: center;
+  border-radius: 50%;
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 800;
+}
+</style>

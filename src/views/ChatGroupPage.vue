@@ -19,7 +19,9 @@ import CreateGroupDialog from "../components/CreateGroupDialog.vue";
 import GroupSidebar from "../components/GroupSidebar.vue";
 import GroupRightPanel from "../components/GroupRightPanel.vue";
 import ResizableGroupLayout from "../components/ResizableGroupLayout.vue";
+import { buildSystemPrompt } from "../utils/agentPrompt";
 import { makeMemberNameUnique } from "../utils/memberNames";
+import { parseMentionedMembers } from "../utils/mentions";
 import { evaluatePatchSafety } from "../utils/patchSafety";
 
 type ChatRole = "user" | "assistant";
@@ -30,9 +32,7 @@ interface ApiChatMessage {
   content: string;
 }
 
-interface ChatCompletionResponse {
-  content: string;
-}
+interface ChatCompletionResponse { content: string }
 
 interface ApplyPatchResponse {
   appliedFiles: string[];
@@ -40,19 +40,12 @@ interface ApplyPatchResponse {
   stderr: string;
 }
 
-interface InspectCodeWorkspaceResponse {
-  tool: string;
-  content: string;
-}
+interface InspectCodeWorkspaceResponse { tool: string; content: string }
 
 type MemberDecision = "speak" | "wait";
 type MemberVote = "agree" | "disagree";
 
-interface MemberAnswer {
-  messageId: string;
-  member: AgentModel;
-  content: string;
-}
+interface MemberAnswer { messageId: string; member: AgentModel; content: string }
 
 const maxConsensusRounds = 8;
 
@@ -79,11 +72,7 @@ const modelPresets: Record<ProviderId, string[]> = {
   deepseek: ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"],
 };
 
-const statusText: Record<MessageStatus, string> = {
-  done: "完成",
-  thinking: "生成中",
-  error: "错误",
-};
+const statusText: Record<MessageStatus, string> = { done: "完成", thinking: "生成中", error: "错误" };
 
 const settingsStore = useSettingsStore();
 const { providers, groups, activeGroup, activeMembers, ownerProfile, historicalMembers } =
@@ -92,6 +81,8 @@ const { providers, groups, activeGroup, activeMembers, ownerProfile, historicalM
 const composer = ref("");
 const groupDialogOpen = ref(false);
 const sending = ref(false);
+const activeRunId = ref("");
+const pendingMessageIds = ref<string[]>([]);
 const chatPanel = ref<InstanceType<typeof ChatConversationPanel> | null>(null);
 
 const newGroupName = ref("新 Agent 群");
@@ -127,9 +118,7 @@ const activeGroupAgentConfig = computed({
     }
   },
 });
-const canSend = computed(
-  () => composer.value.trim().length > 0 && activeMembers.value.length > 0 && !sending.value,
-);
+const canSend = computed(() => composer.value.trim().length > 0 && activeMembers.value.length > 0 && !sending.value);
 
 const emit = defineEmits<{
   openSettings: [];
@@ -279,42 +268,6 @@ function buildConversation(): ApiChatMessage[] {
     }));
 }
 
-function buildSystemPrompt(member: AgentModel, extraRules = "", codeContext = "") {
-  const group = activeGroup.value;
-  const config = group?.agentConfig;
-  const workspacePath = group?.workspacePath?.trim();
-
-  return [
-    activeGroup.value?.announcement.trim(),
-    "群聊协作规则：你能看到用户和其它群友已经发出的消息。不要只各说各话；需要回应、补充、质疑或修正其它群友观点时，请明确指出。若你的专业分工暂时不该发言，可以等待其它群友先说。",
-    workspacePath ? `当前聊天群工作文件夹：${workspacePath}` : "当前聊天群尚未设置工作文件夹。涉及代码编辑时，请先要求设置工作文件夹。",
-    config
-      ? [
-          "本地 Agent 协作模式：",
-          `- Agent 模式：${config.agentMode}`,
-          `- 工作流：${config.workflowMode}`,
-          `- 审批模式：${config.approvalMode}`,
-          `- 安全模型：${config.safetyModel}`,
-          `- EditBeforeAsk：${config.editBeforeAsk ? "开启" : "关闭"}`,
-          `- YOLO 模式：${config.yoloMode ? "开启" : "关闭"}`,
-        ].join("\n")
-      : "",
-    buildSafetyPolicy(),
-    "你的核心角色：",
-    member.systemPrompt.trim(),
-    codeContext
-      ? [
-          "代码阅读工具结果：",
-          "你可以基于以下工具输出讨论代码。优先信任 CodeGraph；如果结果来自 LocalCommands，需要说明这是降级读取。",
-          codeContext,
-        ].join("\n")
-      : "",
-    extraRules,
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-}
-
 function shouldInspectWorkspace(extraRule: string) {
   const group = activeGroup.value;
 
@@ -366,56 +319,6 @@ async function inspectWorkspaceForMember(member: AgentModel, extraRule: string) 
   } catch (error) {
     return `代码阅读工具调用失败：${String(error)}`;
   }
-}
-
-function buildSafetyPolicy() {
-  const config = activeGroup.value?.agentConfig;
-
-  if (!config) {
-    return "";
-  }
-
-  const commonRules = [
-    "代码协作安全边界：",
-    "- 涉及代码阅读时，软件会优先调用 CodeGraph；CodeGraph 不可用时才降级为本地命令。你必须基于“代码阅读工具结果”回答，不能声称只能看到路径。",
-    "- 只能围绕当前聊天群工作文件夹进行分析和编辑计划。",
-    "- 涉及删除、覆盖、迁移、大范围重命名、运行外部命令、网络请求、密钥或权限变更时，必须显式标记风险。",
-    "- 不要编造已执行的文件修改；只有审批队列显示补丁已应用后，才可以声称文件已写入。",
-    "- 输出 diff 或补丁会进入审批队列；批准并应用前不得声称已经写入文件。",
-  ];
-
-  const safetyRules: Record<string, string> = {
-    strict: "- Strict：所有文件写入、命令执行和依赖安装都必须先给出计划并等待确认。",
-    balanced: "- Balanced：低风险阅读/小补丁可先建议，高风险操作必须确认。",
-    "security-analyzer":
-      "- Security Analyzer：先进行风险分类，输出允许/需确认/禁止三类结论，再给出编辑建议。",
-    "sandbox-yolo":
-      "- Sandbox YOLO：可自动推进低中风险改动计划，但必须假设运行在隔离工作区；禁止越过工作文件夹、删除用户数据或处理密钥。",
-  };
-
-  const workflowRules: Record<string, string> = {
-    ask: "- Ask：默认解释、诊断、提问，不主动写补丁。",
-    "edit-before-ask": "- EditBeforeAsk：先给出最小可行补丁方案，再列出需要用户确认的问题。",
-    code: "- Code：优先给出可执行的代码修改计划和补丁。",
-    yolo: "- YOLO：尽量减少打断，但仍必须遵守安全模型和工作文件夹边界。",
-  };
-
-  return [
-    ...commonRules,
-    workflowRules[config.workflowMode],
-    safetyRules[config.safetyModel],
-    config.approvalMode === "manual"
-      ? "- 审批：每个编辑或命令步骤都需要用户确认。"
-      : "",
-    config.approvalMode === "confirm-risky"
-      ? "- 审批：低风险步骤可合并建议，高风险步骤必须用户确认。"
-      : "",
-    config.approvalMode === "auto"
-      ? "- 审批：自动推进前仍要在回复中记录将要改动的文件和风险。"
-      : "",
-  ]
-    .filter(Boolean)
-    .join("\n");
 }
 
 function extractPatchText(content: string) {
@@ -632,21 +535,45 @@ function parseMemberVote(content: string): MemberVote {
   return "agree";
 }
 
-function escapeRegExp(source: string) {
-  return source.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+function isRunInterrupted(runId: string) {
+  return !runId || activeRunId.value !== runId;
 }
 
-function parseMentionedMembers(content: string, members: AgentModel[]) {
-  return members.filter((member) => {
-    const pattern = new RegExp(`@${escapeRegExp(member.name)}(?=\\s|$|[，。,.、:：])`);
-    return pattern.test(content);
+function addThoughtStep(messageId: string, step: string) {
+  const message = activeMessages.value.find((item) => item.id === messageId);
+  settingsStore.updateMessage(messageId, {
+    thoughtSteps: [...(message?.thoughtSteps ?? []), step],
   });
+}
+
+function stopGeneration() {
+  if (!sending.value) {
+    return;
+  }
+
+  activeRunId.value = "";
+  sending.value = false;
+
+  for (const messageId of pendingMessageIds.value) {
+    settingsStore.updateMessage(messageId, {
+      status: "error",
+      content: "已中断生成。",
+    });
+    addThoughtStep(messageId, "用户中断，本轮停止。");
+  }
+
+  pendingMessageIds.value = [];
 }
 
 async function decideMemberResponse(
   member: AgentModel,
   phase: "first" | "afterPeers",
+  runId: string,
 ): Promise<MemberDecision> {
+  if (isRunInterrupted(runId)) {
+    return "wait";
+  }
+
   const provider = getProvider(member);
   const phaseRule =
     phase === "first"
@@ -661,10 +588,14 @@ async function decideMemberResponse(
         apiKey: provider.apiKey,
         model: member.model,
         temperature: 0,
-        systemPrompt: buildSystemPrompt(member, phaseRule),
+        systemPrompt: buildSystemPrompt(member, activeGroup.value, phaseRule),
         messages: buildConversation(),
       },
     });
+
+    if (isRunInterrupted(runId)) {
+      return "wait";
+    }
 
     return parseMemberDecision(response.content);
   } catch {
@@ -672,7 +603,15 @@ async function decideMemberResponse(
   }
 }
 
-async function askMember(member: AgentModel, extraRule = ""): Promise<MemberAnswer | null> {
+async function askMember(
+  member: AgentModel,
+  extraRule = "",
+  runId: string,
+): Promise<MemberAnswer | null> {
+  if (isRunInterrupted(runId)) {
+    return null;
+  }
+
   const provider = getProvider(member);
   const pendingId = crypto.randomUUID();
   const conversation = buildConversation();
@@ -688,11 +627,24 @@ async function askMember(member: AgentModel, extraRule = ""): Promise<MemberAnsw
     status: "thinking",
     content: "正在生成回复...",
     color: member.color,
+    thoughtSteps: ["进入发言队列。"],
   });
+  pendingMessageIds.value = [...pendingMessageIds.value, pendingId];
   await scrollToBottom();
 
   try {
+    addThoughtStep(pendingId, "检查是否需要读取代码上下文。");
     const codeContext = await inspectWorkspaceForMember(member, responseRule);
+
+    if (isRunInterrupted(runId)) {
+      return null;
+    }
+
+    addThoughtStep(
+      pendingId,
+      codeContext ? "已获取代码阅读工具结果。" : "本轮不需要读取代码上下文。",
+    );
+    addThoughtStep(pendingId, "等待模型返回。");
     const response = await invoke<ChatCompletionResponse>("chat_completion", {
       request: {
         providerName: provider.name,
@@ -700,15 +652,20 @@ async function askMember(member: AgentModel, extraRule = ""): Promise<MemberAnsw
         apiKey: provider.apiKey,
         model: member.model,
         temperature: member.temperature,
-        systemPrompt: buildSystemPrompt(member, responseRule, codeContext),
+        systemPrompt: buildSystemPrompt(member, activeGroup.value, responseRule, codeContext),
         messages: conversation,
       },
     });
+
+    if (isRunInterrupted(runId)) {
+      return null;
+    }
 
     settingsStore.updateMessage(pendingId, {
       status: "done",
       content: response.content,
     });
+    addThoughtStep(pendingId, "生成完成。");
     await maybeCreatePatchProposal(member, response.content);
     return {
       messageId: pendingId,
@@ -720,13 +677,23 @@ async function askMember(member: AgentModel, extraRule = ""): Promise<MemberAnsw
       status: "error",
       content: `调用失败：${String(error)}`,
     });
+    addThoughtStep(pendingId, "调用失败。");
     return null;
   } finally {
+    pendingMessageIds.value = pendingMessageIds.value.filter((id) => id !== pendingId);
     await scrollToBottom();
   }
 }
 
-async function voteOnAnswer(answer: MemberAnswer, voter: AgentModel): Promise<MemberVote> {
+async function voteOnAnswer(
+  answer: MemberAnswer,
+  voter: AgentModel,
+  runId: string,
+): Promise<MemberVote> {
+  if (isRunInterrupted(runId)) {
+    return "agree";
+  }
+
   const provider = getProvider(voter);
 
   try {
@@ -739,6 +706,7 @@ async function voteOnAnswer(answer: MemberAnswer, voter: AgentModel): Promise<Me
         temperature: 0,
         systemPrompt: buildSystemPrompt(
           voter,
+          activeGroup.value,
           [
             `请判断你是否同意 ${answer.member.name} 的上一条发言。`,
             "如果结论、方案或关键依据可以接受，只回复 AGREE。",
@@ -749,19 +717,27 @@ async function voteOnAnswer(answer: MemberAnswer, voter: AgentModel): Promise<Me
       },
     });
 
+    if (isRunInterrupted(runId)) {
+      return "agree";
+    }
+
     return parseMemberVote(response.content);
   } catch {
     return "agree";
   }
 }
 
-async function collectMemberVotes(answer: MemberAnswer) {
+async function collectMemberVotes(answer: MemberAnswer, runId: string) {
   const voters = activeMembers.value.filter((member) => member.id !== answer.member.id);
   const agreeMemberIds: string[] = [];
   const disagreeMemberIds: string[] = [];
 
   for (const voter of voters) {
-    const vote = await voteOnAnswer(answer, voter);
+    if (isRunInterrupted(runId)) {
+      return [];
+    }
+
+    const vote = await voteOnAnswer(answer, voter, runId);
 
     if (vote === "disagree") {
       disagreeMemberIds.push(voter.id);
@@ -778,12 +754,16 @@ async function collectMemberVotes(answer: MemberAnswer) {
   return voters.filter((member) => disagreeMemberIds.includes(member.id));
 }
 
-async function resolveConsensus(initialAnswer: MemberAnswer | null) {
+async function resolveConsensus(initialAnswer: MemberAnswer | null, runId: string) {
   let currentAnswer = initialAnswer;
   let round = 0;
 
   while (currentAnswer && round < maxConsensusRounds) {
-    const disagreeingMembers = await collectMemberVotes(currentAnswer);
+    if (isRunInterrupted(runId)) {
+      return;
+    }
+
+    const disagreeingMembers = await collectMemberVotes(currentAnswer, runId);
 
     if (disagreeingMembers.length === 0) {
       return;
@@ -802,6 +782,7 @@ async function resolveConsensus(initialAnswer: MemberAnswer | null) {
           "你刚才不同意上一条发言。请明确指出分歧点，并给出能推动集体达成一致的修正方案。",
           "不要重复已经说过的内容；优先提出可被其它群友同意的结论。",
         ].join("\n"),
+        runId,
       );
     }
   }
@@ -838,6 +819,9 @@ async function sendMessage() {
 
   composer.value = "";
   sending.value = true;
+  const runId = crypto.randomUUID();
+  activeRunId.value = runId;
+  pendingMessageIds.value = [];
 
   appendMessage({
     role: "user",
@@ -854,11 +838,16 @@ async function sendMessage() {
   try {
     if (mentionedMembers.length > 0) {
       for (const member of mentionedMembers) {
+        if (isRunInterrupted(runId)) {
+          return;
+        }
+
         const answer = await askMember(
           member,
           "用户明确 @ 了你。请你先回答；其它群友会先观望，等你回答完再判断是否需要补充。",
+          runId,
         );
-        await resolveConsensus(answer);
+        await resolveConsensus(answer, runId);
       }
 
       const observerMembers = members.filter(
@@ -866,14 +855,19 @@ async function sendMessage() {
       );
 
       for (const member of observerMembers) {
-        const decision = await decideMemberResponse(member, "afterPeers");
+        if (isRunInterrupted(runId)) {
+          return;
+        }
+
+        const decision = await decideMemberResponse(member, "afterPeers", runId);
 
         if (decision === "speak") {
           const answer = await askMember(
             member,
             "你刚才处于观望状态。现在被 @ 的群友已经回答，请判断是否需要补充、反驳或帮助收束共识。",
+            runId,
           );
-          await resolveConsensus(answer);
+          await resolveConsensus(answer, runId);
         }
       }
 
@@ -881,27 +875,39 @@ async function sendMessage() {
     }
 
     for (const member of members) {
-      const decision = await decideMemberResponse(member, "first");
+      if (isRunInterrupted(runId)) {
+        return;
+      }
+
+      const decision = await decideMemberResponse(member, "first", runId);
 
       if (decision === "wait") {
         waitingMembers.push(member);
         continue;
       }
 
-      const answer = await askMember(member);
-      await resolveConsensus(answer);
+      const answer = await askMember(member, "", runId);
+      await resolveConsensus(answer, runId);
     }
 
     for (const member of waitingMembers) {
-      const decision = await decideMemberResponse(member, "afterPeers");
+      if (isRunInterrupted(runId)) {
+        return;
+      }
+
+      const decision = await decideMemberResponse(member, "afterPeers", runId);
 
       if (decision === "speak") {
-        const answer = await askMember(member);
-        await resolveConsensus(answer);
+        const answer = await askMember(member, "", runId);
+        await resolveConsensus(answer, runId);
       }
     }
   } finally {
-    sending.value = false;
+    if (activeRunId.value === runId) {
+      activeRunId.value = "";
+      sending.value = false;
+      pendingMessageIds.value = [];
+    }
   }
 }
 
@@ -934,6 +940,7 @@ onMounted(() => {
           v-model:composer="composer"
           :active-group="activeGroup"
           :active-member-count="activeMembers.length"
+          :active-members="activeMembers"
           :messages="activeMessages"
           :patch-proposals="activeGroup?.patchProposals ?? []"
           v-model:workspace-path="activeGroupWorkspacePath"
@@ -944,6 +951,7 @@ onMounted(() => {
           @update-patch-status="updatePatchProposalStatus"
           @remove-patch-proposal="settingsStore.removePatchProposal"
           @send-message="sendMessage"
+          @stop-generation="stopGeneration"
         />
       </template>
 

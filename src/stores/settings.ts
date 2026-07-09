@@ -42,6 +42,7 @@ export interface ChatMessage {
   color: string;
   agreeMemberIds?: string[];
   disagreeMemberIds?: string[];
+  thoughtSteps?: string[];
 }
 
 export interface ChatGroup {
@@ -183,6 +184,7 @@ function normalizeGroup(group: ChatGroup): ChatGroup {
       ...message,
       agreeMemberIds: message.agreeMemberIds ?? [],
       disagreeMemberIds: message.disagreeMemberIds ?? [],
+      thoughtSteps: message.thoughtSteps ?? [],
     })),
   };
 }
@@ -205,6 +207,7 @@ function createSystemMessage(content: string): ChatMessage {
     color: "#6c6f75",
     agreeMemberIds: [],
     disagreeMemberIds: [],
+    thoughtSteps: [],
   };
 }
 
@@ -259,9 +262,23 @@ function makeUniqueMemberName(name: string, members: AgentModel[], exceptId = ""
 
 function cloneMember(member: AgentModel, members: AgentModel[] = []) {
   return {
-    ...structuredClone(member),
+    ...toPlainMember(member),
     id: crypto.randomUUID(),
     name: makeUniqueMemberName(member.name, members),
+  };
+}
+
+function toPlainMember(member: AgentModel): AgentModel {
+  return {
+    id: member.id,
+    name: member.name,
+    provider: member.provider,
+    model: member.model,
+    systemPrompt: member.systemPrompt,
+    temperature: member.temperature,
+    enabled: member.enabled,
+    color: member.color,
+    avatar: member.avatar,
   };
 }
 
@@ -384,7 +401,10 @@ export const useSettingsStore = defineStore("settings", {
         JSON.stringify({
           providers: this.providers,
           memberLibrary: this.buildMemberLibrary(this.memberLibrary),
-          groups: this.groups,
+          groups: this.groups.map((group) => ({
+            ...group,
+            members: group.members.map((member) => toPlainMember(member)),
+          })),
           activeGroupId: this.activeGroupId,
           ownerProfile: this.ownerProfile,
         }),
@@ -397,7 +417,7 @@ export const useSettingsStore = defineStore("settings", {
       for (const member of [...seed, ...this.groups.flatMap((group) => group.members)]) {
         const name = makeUniqueMemberName(member.name, members);
         members.push({
-          ...structuredClone(member),
+          ...toPlainMember(member),
           id: member.id,
           name,
         });
@@ -422,12 +442,12 @@ export const useSettingsStore = defineStore("settings", {
       );
 
       if (existing) {
-        Object.assign(existing, structuredClone(member), { id: existing.id });
+        Object.assign(existing, toPlainMember(member), { id: existing.id });
         return existing;
       }
 
       const libraryMember = {
-        ...structuredClone(member),
+        ...toPlainMember(member),
         id: crypto.randomUUID(),
         name: makeUniqueMemberName(member.name, this.memberLibrary),
       };
@@ -578,6 +598,7 @@ export const useSettingsStore = defineStore("settings", {
         time: nowText(),
         agreeMemberIds: message.agreeMemberIds ?? [],
         disagreeMemberIds: message.disagreeMemberIds ?? [],
+        thoughtSteps: message.thoughtSteps ?? [],
       });
       group.updatedAt = new Date().toISOString();
     },
@@ -590,6 +611,7 @@ export const useSettingsStore = defineStore("settings", {
         time: nowText(),
         agreeMemberIds: message.agreeMemberIds ?? [],
         disagreeMemberIds: message.disagreeMemberIds ?? [],
+        thoughtSteps: message.thoughtSteps ?? [],
       });
       group.updatedAt = new Date().toISOString();
     },
