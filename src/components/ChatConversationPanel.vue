@@ -1,11 +1,17 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
-import { CircleClose, FolderOpened, Promotion, RefreshLeft } from "@element-plus/icons-vue";
+import { CircleClose, FolderOpened, Promotion, RefreshLeft, Tools } from "@element-plus/icons-vue";
 import { useI18n } from "vue-i18n";
 import PatchApprovalPanel from "./PatchApprovalPanel.vue";
 import { getAvatarSrc } from "../utils/avatar";
-import type { AgentModel, ChatGroup, ChatMessage, PatchApprovalStatus } from "../stores/settings";
+import type {
+  AgentModel,
+  ChatGroup,
+  ChatMessage,
+  ChatMessageActivityItem,
+  PatchApprovalStatus,
+} from "../stores/settings";
 
 export type SpeakerQueueStatus = "queued" | "checking" | "waiting" | "speaking";
 
@@ -203,6 +209,10 @@ function getAgreeLabel(message: ChatMessage) {
   return t("chat.agree", { count: (message.agreeMemberIds ?? []).length });
 }
 
+function getActivityIcon(item: ChatMessageActivityItem) {
+  return item.kind === "tool" ? Tools : RefreshLeft;
+}
+
 defineExpose({
   scrollToBottom,
 });
@@ -356,6 +366,25 @@ defineExpose({
 
         <div class="message-body" v-html="renderMarkdown(message.content)"></div>
 
+        <div
+          v-if="(message.activityItems ?? []).length > 0"
+          class="message-activity-bar"
+          :class="message.status"
+        >
+          <span
+            v-for="item in message.activityItems"
+            :key="item.id"
+            class="activity-chip"
+            :class="[item.kind, item.status]"
+            :title="item.text"
+          >
+            <el-icon>
+              <component :is="getActivityIcon(item)" />
+            </el-icon>
+            <span>{{ item.text }}</span>
+          </span>
+        </div>
+
         <details
           v-if="(message.thoughtSteps ?? []).length > 0"
           class="thought-steps"
@@ -439,6 +468,68 @@ defineExpose({
   color: #53615a;
   background: #f5f8f6;
   font-size: 12px;
+}
+
+.message-activity-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 30px;
+  margin-top: 10px;
+  padding: 6px 0 0;
+  border-top: 1px solid #edf1ee;
+}
+
+.activity-chip {
+  display: inline-flex;
+  max-width: min(100%, 520px);
+  min-height: 24px;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  border: 1px solid #dfe8e2;
+  border-radius: 999px;
+  padding: 3px 8px;
+  color: #526058;
+  background: #f8faf8;
+  font-size: 12px;
+  line-height: 1.2;
+}
+
+.activity-chip .el-icon {
+  flex: 0 0 auto;
+  font-size: 13px;
+}
+
+.activity-chip span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-chip.tool {
+  border-color: #bed9cb;
+  color: #24634f;
+  background: #eef8f2;
+}
+
+.activity-chip.status.running {
+  border-color: #efd7ad;
+  color: #9a650c;
+  background: #fff8ea;
+}
+
+.activity-chip.done {
+  border-color: #cfe3d7;
+  color: #2b7359;
+  background: #f0faf4;
+}
+
+.activity-chip.error {
+  border-color: #f0c7c7;
+  color: #a33d3d;
+  background: #fff0f0;
 }
 
 .thought-steps summary {

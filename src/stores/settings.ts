@@ -6,6 +6,8 @@ import { defaultLocale, normalizeLocale, type AppLocale } from "../i18n/locales"
 export type ProviderId = "openai" | "deepseek";
 export type ChatRole = "user" | "assistant";
 export type MessageStatus = "done" | "thinking" | "error";
+export type ChatMessageActivityKind = "status" | "tool";
+export type ChatMessageActivityStatus = "running" | "done" | "error" | "info";
 export type AgentMode = "chat" | "local-agent" | "architect";
 export type AgentWorkflowMode = "ask" | "edit-before-ask" | "code" | "yolo";
 export type AgentApprovalMode = "manual" | "confirm-risky" | "auto";
@@ -38,6 +40,13 @@ export interface AgentModel {
   avatar?: string;
 }
 
+export interface ChatMessageActivityItem {
+  id: string;
+  kind: ChatMessageActivityKind;
+  status: ChatMessageActivityStatus;
+  text: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: ChatRole;
@@ -56,6 +65,7 @@ export interface ChatMessage {
   supplementMemberIds?: string[];
   disagreeMemberIds?: string[];
   thoughtSteps?: string[];
+  activityItems?: ChatMessageActivityItem[];
 }
 
 export interface ChatGroup {
@@ -128,6 +138,8 @@ const NORMAL_PATCH_TEXT_LIMIT = 20000;
 const COMPACT_PATCH_LIMIT = 3;
 const THOUGHT_STEP_LIMIT = 96;
 const THOUGHT_STEP_TEXT_LIMIT = 1200;
+const ACTIVITY_ITEM_LIMIT = 36;
+const ACTIVITY_ITEM_TEXT_LIMIT = 360;
 
 type PersistenceMode = "normal" | "compact" | "minimal";
 
@@ -229,6 +241,7 @@ function normalizeGroup(group: ChatGroup): ChatGroup {
       supplementMemberIds: message.supplementMemberIds ?? [],
       disagreeMemberIds: message.disagreeMemberIds ?? [],
       thoughtSteps: message.thoughtSteps ?? [],
+      activityItems: message.activityItems ?? [],
     })),
   };
 }
@@ -270,6 +283,7 @@ function createSystemMessage(content: string): ChatMessage {
     supplementMemberIds: [],
     disagreeMemberIds: [],
     thoughtSteps: [],
+    activityItems: [],
   };
 }
 
@@ -364,6 +378,10 @@ function toPersistedMessage(message: ChatMessage, mode: Exclude<PersistenceMode,
     thoughtSteps: (message.thoughtSteps ?? [])
       .slice(-THOUGHT_STEP_LIMIT)
       .map((step) => truncateText(step, THOUGHT_STEP_TEXT_LIMIT)),
+    activityItems: (message.activityItems ?? []).slice(-ACTIVITY_ITEM_LIMIT).map((item) => ({
+      ...item,
+      text: truncateText(item.text, ACTIVITY_ITEM_TEXT_LIMIT),
+    })),
   };
 }
 
@@ -833,6 +851,7 @@ export const useSettingsStore = defineStore("settings", {
         supplementMemberIds: message.supplementMemberIds ?? [],
         disagreeMemberIds: message.disagreeMemberIds ?? [],
         thoughtSteps: message.thoughtSteps ?? [],
+        activityItems: message.activityItems ?? [],
       });
       group.updatedAt = new Date().toISOString();
     },
@@ -847,6 +866,7 @@ export const useSettingsStore = defineStore("settings", {
         supplementMemberIds: message.supplementMemberIds ?? [],
         disagreeMemberIds: message.disagreeMemberIds ?? [],
         thoughtSteps: message.thoughtSteps ?? [],
+        activityItems: message.activityItems ?? [],
       });
       group.updatedAt = new Date().toISOString();
     },

@@ -2,7 +2,7 @@
 import "./ChatGroupPage.css";
 import { computed, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { listen } from "@tauri-apps/api/event";
 import MarkdownIt from "markdown-it";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { storeToRefs } from "pinia";
@@ -11,6 +11,9 @@ import {
   type AgentModel,
   type AgentPatchProposal,
   type ChatMessage,
+  type ChatMessageActivityItem,
+  type ChatMessageActivityKind,
+  type ChatMessageActivityStatus,
   type PatchApprovalStatus,
   type PatchRiskLevel,
   type ProviderId,
@@ -64,6 +67,30 @@ type MemberDecision = "speak" | "wait";
 type MemberVote = "agree" | "supplement" | "disagree";
 
 interface MemberAnswer { messageId: string; member: AgentModel; content: string }
+
+interface PendingMemberMessage {
+  id: string;
+  startedAt: number;
+}
+
+interface MemberDecisionResult {
+  decision: MemberDecision;
+  pendingMessage?: PendingMemberMessage;
+}
+
+interface ChatCompletionInvokeRequest {
+  providerName: string;
+  baseUrl: string;
+  apiKey: string;
+  model: string;
+  reasoningEffort: AgentModel["reasoningEffort"];
+  temperature: number;
+  workspacePath?: string;
+  codeToolsEnabled?: boolean;
+  streamId?: string;
+  systemPrompt: string;
+  messages: ApiChatMessage[];
+}
 
 const maxConsensusRounds = 8;
 
@@ -335,11 +362,15 @@ function removeMember(memberId: string) {
   settingsStore.removeMember(memberId);
 }
 
-function buildConversation(): ApiChatMessage[] {
+function buildConversation(excludeMessageIds: string[] = []): ApiChatMessage[] {
+  const excludedIds = new Set(excludeMessageIds);
+
   return activeMessages.value
     .filter(
       (message) =>
-        message.modelName !== t("common.systemName") && message.modelName !== legacySystemModelName,
+        !excludedIds.has(message.id) &&
+        message.modelName !== t("common.systemName") &&
+        message.modelName !== legacySystemModelName,
     )
     .slice(-12)
     .map<ApiChatMessage>((message) => ({
@@ -671,10 +702,66 @@ function formatTraceStep(step: ChatTraceStep) {
 }
 
 function addResponseTraceSteps(messageId: string, response: ChatCompletionResponse) {
+  for (const step of response.traceSteps ?? []) {
+    if (step.kind === "tool") {
+      addActivityItem(messageId, "tool", step.text, inferToolActivityStatus(step.text));
+    }
+  }
+
   addThoughtSteps(
     messageId,
-    (response.traceSteps ?? []).map(formatTraceStep),
+    (response.traceSteps ?? [])
+      .filter((step) => step.kind !== "tool")
+      .map(formatTraceStep),
   );
+}
+
+function createActivityItem(
+  kind: ChatMessageActivityKind,
+  text: string,
+  status: ChatMessageActivityStatus = "info",
+): ChatMessageActivityItem {
+  return {
+    id: crypto.randomUUID(),
+    kind,
+    status,
+    text,
+  };
+}
+
+function addActivityItem(
+  messageId: string,
+  kind: ChatMessageActivityKind,
+  text: string,
+  status: ChatMessageActivityStatus = "info",
+) {
+  const trimmed = text.trim();
+
+  if (!trimmed) {
+    return;
+  }
+
+  const message = activeMessages.value.find((item) => item.id === messageId);
+  settingsStore.updateMessage(messageId, {
+    activityItems: [
+      ...(message?.activityItems ?? []),
+      createActivityItem(kind, trimmed, status),
+    ].slice(-36),
+  });
+}
+
+function inferToolActivityStatus(text: string): ChatMessageActivityStatus {
+  const normalized = text.toLowerCase();
+
+  if (normalized.includes("failed") || normalized.includes("error") || normalized.includes("could not")) {
+    return "error";
+  }
+
+  if (normalized.includes("returned") || normalized.includes("result")) {
+    return "done";
+  }
+
+  return "running";
 }
 
 function updateThoughtStepAt(messageId: string, index: number, step: string) {
@@ -753,6 +840,12 @@ function applyCompletionStreamEvent(messageId: string, payload: ChatCompletionSt
 
   const traceKind = payload.traceKind ?? "reasoning";
 
+  if (traceKind === "tool") {
+    flushStreamingTraceLine(messageId);
+    addActivityItem(messageId, "tool", payload.text, inferToolActivityStatus(payload.text));
+    return;
+  }
+
   if (payload.eventType === "traceChunk") {
     appendStreamingTraceChunk(messageId, traceKind, payload.text);
     return;
@@ -760,6 +853,57 @@ function applyCompletionStreamEvent(messageId: string, payload: ChatCompletionSt
 
   flushStreamingTraceLine(messageId);
   addThoughtStep(messageId, formatTraceStep({ kind: traceKind, text: payload.text }));
+}
+
+async function invokeStreamingCompletion(
+  messageId: string,
+  runId: string,
+  request: ChatCompletionInvokeRequest,
+  options: { showContent?: boolean } = {},
+) {
+  let sawStreamTrace = false;
+  const showContent = options.showContent ?? true;
+  const unlisten = await listen<ChatCompletionStreamEvent>(
+    "chat-completion-stream",
+    (event) => {
+      const payload = event.payload;
+
+      if (payload.streamId !== messageId || isRunInterrupted(runId)) {
+        return;
+      }
+
+      if (payload.eventType === "traceChunk" || payload.eventType === "traceStep") {
+        sawStreamTrace = true;
+      }
+
+      if (!showContent && payload.eventType === "contentChunk") {
+        return;
+      }
+
+      applyCompletionStreamEvent(messageId, payload);
+    },
+  );
+
+  try {
+    const response = await invoke<ChatCompletionResponse>("chat_completion", {
+      request: {
+        ...request,
+        streamId: messageId,
+      },
+    });
+
+    return { response, sawStreamTrace };
+  } finally {
+    unlisten();
+    flushStreamingTraceLine(messageId);
+  }
+}
+
+function releasePendingMessage(messageId: string, startedAt?: number) {
+  flushStreamingTraceLine(messageId);
+  streamingContent.delete(messageId);
+  stopSpeakingTimer(messageId, startedAt);
+  pendingMessageIds.value = pendingMessageIds.value.filter((id) => id !== messageId);
 }
 
 function updateSpeakingDuration(messageId: string, startedAt: number) {
@@ -799,17 +943,15 @@ function stopGeneration() {
 
   for (const messageId of pendingMessageIds.value) {
     const message = activeMessages.value.find((item) => item.id === messageId);
-    stopSpeakingTimer(messageId, message?.startedAt);
-    flushStreamingTraceLine(messageId);
-    streamingContent.delete(messageId);
+    releasePendingMessage(messageId, message?.startedAt);
     settingsStore.updateMessage(messageId, {
       status: "error",
       content: t("chatRuntime.interruptedContent"),
     });
     addThoughtStep(messageId, t("chatRuntime.interruptedStep"));
+    addActivityItem(messageId, "status", t("chatRuntime.interruptedStep"), "error");
   }
 
-  pendingMessageIds.value = [];
   speakerQueue.value = [];
 }
 
@@ -851,63 +993,22 @@ async function decideMemberResponse(
   member: AgentModel,
   phase: "first" | "afterPeers",
   runId: string,
-): Promise<MemberDecision> {
+): Promise<MemberDecisionResult> {
   if (isRunInterrupted(runId)) {
-    return "wait";
+    return { decision: "wait" };
   }
 
   upsertSpeakerQueueMember(member, "checking");
   const provider = getProvider(member);
+  const pendingId = crypto.randomUUID();
+  const startedAt = Date.now();
   const phaseRule =
     phase === "first"
       ? t("chatRuntime.phaseFirst")
       : t("chatRuntime.phaseAfterPeers");
-
-  try {
-    const response = await invoke<ChatCompletionResponse>("chat_completion", {
-      request: {
-        providerName: provider.name,
-        baseUrl: provider.baseUrl,
-        apiKey: provider.apiKey,
-        model: member.model,
-        reasoningEffort: member.reasoningEffort,
-        temperature: 0,
-        systemPrompt: buildSystemPrompt(member, activeGroup.value, phaseRule),
-        messages: buildConversation(),
-      },
-    });
-
-    if (isRunInterrupted(runId)) {
-      return "wait";
-    }
-
-    const decision = parseMemberDecision(response.content);
-    upsertSpeakerQueueMember(member, decision === "wait" ? "waiting" : "queued");
-    return decision;
-  } catch {
-    upsertSpeakerQueueMember(member, "queued");
-    return "speak";
-  }
-}
-
-async function askMember(
-  member: AgentModel,
-  extraRule = "",
-  runId: string,
-): Promise<MemberAnswer | null> {
-  if (isRunInterrupted(runId)) {
-    return null;
-  }
-
-  const provider = getProvider(member);
-  const pendingId = crypto.randomUUID();
-  const startedAt = Date.now();
   const conversation = buildConversation();
-  const responseRule =
-    extraRule ||
-    t("chatRuntime.responseRule");
+  const codeToolsEnabled = shouldInspectWorkspace(phaseRule);
 
-  upsertSpeakerQueueMember(member, "speaking");
   settingsStore.appendPendingMessage({
     id: pendingId,
     role: "assistant",
@@ -919,16 +1020,152 @@ async function askMember(
     startedAt,
     durationMs: 0,
     status: "thinking",
-    content: t("chatRuntime.pendingContent"),
+    content: t("chatRuntime.decisionPendingContent"),
     color: member.color,
-    thoughtSteps: [t("chatRuntime.stepQueued")],
+    thoughtSteps: [t("chatRuntime.stepCheckingDecision")],
+    activityItems: [
+      createActivityItem("status", t("chatRuntime.stepCheckingDecision"), "running"),
+    ],
   });
   startSpeakingTimer(pendingId, startedAt);
   pendingMessageIds.value = [...pendingMessageIds.value, pendingId];
   await scrollToBottom();
 
-  let unlistenStream: UnlistenFn | undefined;
-  let sawStreamTrace = false;
+  try {
+    addThoughtStep(
+      pendingId,
+      codeToolsEnabled ? t("chatRuntime.stepGotContext") : t("chatRuntime.stepNoContext"),
+    );
+    addThoughtStep(pendingId, t("chatRuntime.stepWaitingModel"));
+    addActivityItem(
+      pendingId,
+      "status",
+      codeToolsEnabled ? t("chatRuntime.stepGotContext") : t("chatRuntime.stepNoContext"),
+      codeToolsEnabled ? "running" : "info",
+    );
+    addActivityItem(pendingId, "status", t("chatRuntime.stepWaitingModel"), "running");
+
+    const { response, sawStreamTrace } = await invokeStreamingCompletion(
+      pendingId,
+      runId,
+      {
+        providerName: provider.name,
+        baseUrl: provider.baseUrl,
+        apiKey: provider.apiKey,
+        model: member.model,
+        reasoningEffort: member.reasoningEffort,
+        temperature: 0,
+        workspacePath: activeGroup.value?.workspacePath ?? "",
+        codeToolsEnabled,
+        systemPrompt: buildSystemPrompt(member, activeGroup.value, phaseRule),
+        messages: conversation,
+      },
+      { showContent: false },
+    );
+
+    if (isRunInterrupted(runId)) {
+      releasePendingMessage(pendingId, startedAt);
+      return { decision: "wait" };
+    }
+
+    if (!sawStreamTrace) {
+      addResponseTraceSteps(pendingId, response);
+    }
+
+    const decision = parseMemberDecision(response.content);
+
+    if (decision === "wait") {
+      settingsStore.updateMessage(pendingId, {
+        status: "done",
+        content: t("chatRuntime.decisionWaitContent"),
+      });
+      addThoughtStep(pendingId, t("chatRuntime.stepDecisionWait"));
+      addActivityItem(pendingId, "status", t("chatRuntime.stepDecisionWait"), "done");
+      releasePendingMessage(pendingId, startedAt);
+      upsertSpeakerQueueMember(member, "waiting");
+      return { decision };
+    }
+
+    streamingContent.delete(pendingId);
+    settingsStore.updateMessage(pendingId, {
+      status: "thinking",
+      content: t("chatRuntime.pendingContent"),
+    });
+    addThoughtStep(pendingId, t("chatRuntime.stepDecisionSpeak"));
+    addActivityItem(pendingId, "status", t("chatRuntime.stepDecisionSpeak"), "done");
+    upsertSpeakerQueueMember(member, "queued");
+    return { decision, pendingMessage: { id: pendingId, startedAt } };
+  } catch {
+    if (isRunInterrupted(runId)) {
+      releasePendingMessage(pendingId, startedAt);
+      return { decision: "wait" };
+    }
+
+    streamingContent.delete(pendingId);
+    settingsStore.updateMessage(pendingId, {
+      status: "thinking",
+      content: t("chatRuntime.pendingContent"),
+    });
+    addThoughtStep(pendingId, t("chatRuntime.stepDecisionFallbackSpeak"));
+    addActivityItem(pendingId, "status", t("chatRuntime.stepDecisionFallbackSpeak"), "error");
+    upsertSpeakerQueueMember(member, "queued");
+    return { decision: "speak", pendingMessage: { id: pendingId, startedAt } };
+  }
+}
+
+async function askMember(
+  member: AgentModel,
+  extraRule = "",
+  runId: string,
+  pendingMessage?: PendingMemberMessage,
+): Promise<MemberAnswer | null> {
+  if (isRunInterrupted(runId)) {
+    return null;
+  }
+
+  const provider = getProvider(member);
+  const pendingId = pendingMessage?.id ?? crypto.randomUUID();
+  const startedAt = pendingMessage?.startedAt ?? Date.now();
+  const conversation = buildConversation(pendingMessage ? [pendingId] : []);
+  const responseRule =
+    extraRule ||
+    t("chatRuntime.responseRule");
+
+  upsertSpeakerQueueMember(member, "speaking");
+
+  if (pendingMessage) {
+    settingsStore.updateMessage(pendingId, {
+      status: "thinking",
+      content: t("chatRuntime.pendingContent"),
+      startedAt,
+      durationMs: Math.max(0, Date.now() - startedAt),
+    });
+    addThoughtStep(pendingId, t("chatRuntime.stepGeneratingAnswer"));
+    addActivityItem(pendingId, "status", t("chatRuntime.stepGeneratingAnswer"), "running");
+  } else {
+    settingsStore.appendPendingMessage({
+      id: pendingId,
+      role: "assistant",
+      modelName: member.name,
+      providerName: getProviderLabel(member.provider),
+      avatar: member.avatar,
+      apiModel: member.model,
+      reasoningEffort: member.reasoningEffort,
+      startedAt,
+      durationMs: 0,
+      status: "thinking",
+      content: t("chatRuntime.pendingContent"),
+      color: member.color,
+      thoughtSteps: [t("chatRuntime.stepQueued")],
+      activityItems: [createActivityItem("status", t("chatRuntime.stepQueued"), "running")],
+    });
+    startSpeakingTimer(pendingId, startedAt);
+  }
+
+  if (!pendingMessageIds.value.includes(pendingId)) {
+    pendingMessageIds.value = [...pendingMessageIds.value, pendingId];
+  }
+  await scrollToBottom();
 
   try {
     const codeToolsEnabled = shouldInspectWorkspace(responseRule);
@@ -937,24 +1174,17 @@ async function askMember(
       codeToolsEnabled ? t("chatRuntime.stepGotContext") : t("chatRuntime.stepNoContext"),
     );
     addThoughtStep(pendingId, t("chatRuntime.stepWaitingModel"));
-    unlistenStream = await listen<ChatCompletionStreamEvent>(
-      "chat-completion-stream",
-      (event) => {
-        const payload = event.payload;
-
-        if (payload.streamId !== pendingId || isRunInterrupted(runId)) {
-          return;
-        }
-
-        if (payload.eventType === "traceChunk" || payload.eventType === "traceStep") {
-          sawStreamTrace = true;
-        }
-
-        applyCompletionStreamEvent(pendingId, payload);
-      },
+    addActivityItem(
+      pendingId,
+      "status",
+      codeToolsEnabled ? t("chatRuntime.stepGotContext") : t("chatRuntime.stepNoContext"),
+      codeToolsEnabled ? "running" : "info",
     );
-    const response = await invoke<ChatCompletionResponse>("chat_completion", {
-      request: {
+    addActivityItem(pendingId, "status", t("chatRuntime.stepWaitingModel"), "running");
+    const { response, sawStreamTrace } = await invokeStreamingCompletion(
+      pendingId,
+      runId,
+      {
         providerName: provider.name,
         baseUrl: provider.baseUrl,
         apiKey: provider.apiKey,
@@ -963,13 +1193,13 @@ async function askMember(
         temperature: member.temperature,
         workspacePath: activeGroup.value?.workspacePath ?? "",
         codeToolsEnabled,
-        streamId: pendingId,
         systemPrompt: buildSystemPrompt(member, activeGroup.value, responseRule),
         messages: conversation,
       },
-    });
+    );
 
     if (isRunInterrupted(runId)) {
+      releasePendingMessage(pendingId, startedAt);
       return null;
     }
 
@@ -977,13 +1207,12 @@ async function askMember(
       status: "done",
       content: response.content,
     });
-    stopSpeakingTimer(pendingId, startedAt);
-    flushStreamingTraceLine(pendingId);
-    streamingContent.delete(pendingId);
+    releasePendingMessage(pendingId, startedAt);
     if (!sawStreamTrace) {
       addResponseTraceSteps(pendingId, response);
     }
     addThoughtStep(pendingId, t("chatRuntime.stepDone"));
+    addActivityItem(pendingId, "status", t("chatRuntime.stepDone"), "done");
     await maybeCreatePatchProposal(member, response.content);
     return {
       messageId: pendingId,
@@ -991,20 +1220,16 @@ async function askMember(
       content: response.content,
     };
   } catch (error) {
-    stopSpeakingTimer(pendingId, startedAt);
+    releasePendingMessage(pendingId, startedAt);
     settingsStore.updateMessage(pendingId, {
       status: "error",
       content: t("chatRuntime.callFailedContent", { error: String(error) }),
     });
     addThoughtStep(pendingId, t("chatRuntime.stepFailed"));
+    addActivityItem(pendingId, "status", t("chatRuntime.stepFailed"), "error");
     return null;
   } finally {
-    unlistenStream?.();
-    flushStreamingTraceLine(pendingId);
-    streamingContent.delete(pendingId);
-    stopSpeakingTimer(pendingId, startedAt);
     removeSpeakerQueueMember(member.id);
-    pendingMessageIds.value = pendingMessageIds.value.filter((id) => id !== pendingId);
     await scrollToBottom();
   }
 }
@@ -1198,11 +1423,12 @@ async function sendMessage() {
 
         const decision = await decideMemberResponse(member, "afterPeers", runId);
 
-        if (decision === "speak") {
+        if (decision.decision === "speak") {
           const answer = await askMember(
             member,
             t("chatRuntime.observerRule"),
             runId,
+            decision.pendingMessage,
           );
           await resolveConsensus(answer, runId);
         }
@@ -1218,12 +1444,12 @@ async function sendMessage() {
 
       const decision = await decideMemberResponse(member, "first", runId);
 
-      if (decision === "wait") {
+      if (decision.decision === "wait") {
         waitingMembers.push(member);
         continue;
       }
 
-      const answer = await askMember(member, "", runId);
+      const answer = await askMember(member, "", runId, decision.pendingMessage);
       await resolveConsensus(answer, runId);
     }
 
@@ -1234,8 +1460,8 @@ async function sendMessage() {
 
       const decision = await decideMemberResponse(member, "afterPeers", runId);
 
-      if (decision === "speak") {
-        const answer = await askMember(member, "", runId);
+      if (decision.decision === "speak") {
+        const answer = await askMember(member, "", runId, decision.pendingMessage);
         await resolveConsensus(answer, runId);
       }
     }
