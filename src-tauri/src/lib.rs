@@ -27,6 +27,8 @@ struct ChatCompletionRequest {
     reasoning_effort: Option<String>,
     temperature: Option<f32>,
     system_prompt: Option<String>,
+    workspace_path: Option<String>,
+    code_tools_enabled: Option<bool>,
     messages: Vec<ChatMessage>,
 }
 
@@ -225,7 +227,7 @@ fn write_avatar_data_url(value: &str, cache_directory: &Path) -> Result<Option<S
 
     let bytes = general_purpose::STANDARD
         .decode(encoded)
-        .map_err(|error| format!("Failed to decode cached avatar: {}", error))?;
+        .map_err(|error| format!("Failed to read local file list: {}", error))?;
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("Failed to create avatar name: {}", error))?
@@ -307,7 +309,7 @@ async fn copy_avatar_to_cache(
     let target = avatar_directory.join(format!("avatar-{}.{}", stamp, extension));
 
     fs::copy(&source, &target)
-        .map_err(|error| format!("Failed to copy avatar into cache: {}", error))?;
+        .map_err(|error| format!("Failed to read local file list: {}", error))?;
 
     Ok(AvatarCacheResponse {
         path: target.to_string_lossy().to_string(),
@@ -317,14 +319,25 @@ async fn copy_avatar_to_cache(
 #[tauri::command]
 async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletionResponse, String> {
     if request.api_key.trim().is_empty() {
-        return Err(format!("{} API Key 未配置", request.provider_name));
+        return Err(format!(
+            "{} API Key is not configured.",
+            request.provider_name
+        ));
     }
 
     if request.model.trim().is_empty() {
-        return Err("模型名称不能为空".to_string());
+        return Err("Model name cannot be empty.".to_string());
     }
 
-    let mut messages = Vec::new();
+    let code_workspace = if request.code_tools_enabled.unwrap_or(false) {
+        Some(validate_workspace(
+            request.workspace_path.as_deref().unwrap_or(""),
+        )?)
+    } else {
+        None
+    };
+
+    let mut messages: Vec<Value> = Vec::new();
     if let Some(system_prompt) = request.system_prompt.as_deref() {
         let trimmed = system_prompt.trim();
         if !trimmed.is_empty() {
@@ -335,7 +348,7 @@ async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletio
         }
     }
 
-    for message in request.messages {
+    for message in &request.messages {
         messages.push(json!({
             "role": message.role,
             "content": message.content,
@@ -346,74 +359,193 @@ async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletio
         "{}/chat/completions",
         request.base_url.trim().trim_end_matches('/')
     );
+    let client = reqwest::Client::new();
 
-    let mut payload = json!({
-        "model": request.model,
-        "messages": messages,
-        "temperature": request.temperature.unwrap_or(0.7),
-    });
+    for _ in 0..4 {
+        let mut payload = json!({
+            "model": request.model,
+            "messages": messages,
+            "temperature": request.temperature.unwrap_or(0.7),
+        });
 
-    if let Some(reasoning_effort) = request.reasoning_effort.as_deref() {
-        let trimmed = reasoning_effort.trim();
-        if !trimmed.is_empty() && trimmed != "off" {
-            payload["reasoning_effort"] = json!(trimmed);
+        if let Some(reasoning_effort) = request.reasoning_effort.as_deref() {
+            let trimmed = reasoning_effort.trim();
+            if !trimmed.is_empty() && trimmed != "off" {
+                payload["reasoning_effort"] = json!(trimmed);
+            }
+        }
+
+        if code_workspace.is_some() {
+            payload["tools"] = codegraph_tools_schema();
+            payload["tool_choice"] = json!("auto");
+        }
+
+        let parsed = send_chat_completion_request(
+            &client,
+            &endpoint,
+            &request.api_key,
+            &request.provider_name,
+            &payload,
+        )
+        .await?;
+        let message = parsed
+            .get("choices")
+            .and_then(|choices| choices.get(0))
+            .and_then(|choice| choice.get("message"))
+            .cloned()
+            .ok_or_else(|| format!("{} returned no message.", request.provider_name))?;
+
+        if let (Some(workspace), Some(tool_calls)) = (
+            code_workspace.as_ref(),
+            message.get("tool_calls").and_then(Value::as_array),
+        ) {
+            if !tool_calls.is_empty() {
+                messages.push(message.clone());
+                for tool_call in tool_calls {
+                    messages.push(execute_code_tool_call(workspace, tool_call));
+                }
+                continue;
+            }
+        }
+
+        let content = message
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        if !content.is_empty() {
+            return Ok(ChatCompletionResponse { content });
         }
     }
 
-    let client = reqwest::Client::new();
+    Err(format!(
+        "{} returned no displayable content.",
+        request.provider_name
+    ))
+}
+
+fn codegraph_tools_schema() -> Value {
+    json!([
+        {
+            "type": "function",
+            "function": {
+                "name": "codegraph_explore",
+                "description": "Read the current workspace with CodeGraph. Use it before answering questions about code, files, symbols, call paths, or implementation details.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The symbols, files, call flow, or implementation question to inspect."
+                        }
+                    },
+                    "required": ["query"],
+                    "additionalProperties": false
+                }
+            }
+        }
+    ])
+}
+
+async fn send_chat_completion_request(
+    client: &reqwest::Client,
+    endpoint: &str,
+    api_key: &str,
+    provider_name: &str,
+    payload: &Value,
+) -> Result<Value, String> {
     let response = client
         .post(endpoint)
-        .bearer_auth(request.api_key.trim())
-        .json(&payload)
+        .bearer_auth(api_key.trim())
+        .json(payload)
         .send()
         .await
-        .map_err(|error| format!("请求 {} 失败：{}", request.provider_name, error))?;
+        .map_err(|error| format!("Request to {} failed: {}", provider_name, error))?;
 
     let status = response.status();
     let body = response
         .text()
         .await
-        .map_err(|error| format!("读取 {} 响应失败：{}", request.provider_name, error))?;
+        .map_err(|error| format!("Failed to read {} response: {}", provider_name, error))?;
 
     if !status.is_success() {
         return Err(format!(
-            "{} 返回 HTTP {}：{}",
-            request.provider_name, status, body
+            "{} returned HTTP {}: {}",
+            provider_name, status, body
         ));
     }
 
-    let parsed: Value = serde_json::from_str(&body)
-        .map_err(|error| format!("解析 {} 响应失败：{}", request.provider_name, error))?;
+    serde_json::from_str(&body)
+        .map_err(|error| format!("Failed to parse {} response: {}", provider_name, error))
+}
 
-    let content = parsed
-        .get("choices")
-        .and_then(|choices| choices.get(0))
-        .and_then(|choice| choice.get("message"))
-        .and_then(|message| message.get("content"))
+fn execute_code_tool_call(workspace: &Path, tool_call: &Value) -> Value {
+    let tool_call_id = tool_call
+        .get("id")
         .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim()
-        .to_string();
+        .unwrap_or("codegraph-tool-call");
+    let function = tool_call.get("function").unwrap_or(&Value::Null);
+    let name = function.get("name").and_then(Value::as_str).unwrap_or("");
+    let arguments = function
+        .get("arguments")
+        .and_then(Value::as_str)
+        .unwrap_or("{}");
 
-    if content.is_empty() {
-        return Err(format!("{} 未返回可显示的消息内容", request.provider_name));
-    }
+    let content = if name == "codegraph_explore" {
+        let query = serde_json::from_str::<Value>(arguments)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("query")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .unwrap_or_default();
 
-    Ok(ChatCompletionResponse { content })
+        if query.trim().is_empty() {
+            "CodeGraph returned no usable result.".to_string()
+        } else {
+            match run_codegraph_explore(workspace, &query) {
+                Ok(content) => content,
+                Err(codegraph_error) => {
+                    read_local_code_context(workspace, &query).unwrap_or_else(|fallback_error| {
+                        format!(
+                            "CodeGraph failed: {}\nLocal fallback failed: {}",
+                            codegraph_error, fallback_error
+                        )
+                    })
+                }
+            }
+        }
+    } else {
+        format!("Unknown tool: {}", name)
+    };
+
+    json!({
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "content": content,
+    })
 }
 
 fn validate_workspace(workspace_path: &str) -> Result<PathBuf, String> {
     let trimmed = workspace_path.trim();
 
     if trimmed.is_empty() {
-        return Err("工作文件夹不能为空".to_string());
+        return Err("Workspace path cannot be empty.".to_string());
     }
 
-    let workspace = fs::canonicalize(trimmed)
-        .map_err(|error| format!("工作文件夹不存在或不可访问：{}", error))?;
+    let workspace = fs::canonicalize(trimmed).map_err(|error| {
+        format!(
+            "Workspace folder does not exist or is inaccessible: {}",
+            error
+        )
+    })?;
 
     if !workspace.is_dir() {
-        return Err("工作文件夹必须是目录".to_string());
+        return Err("Workspace path must be a directory.".to_string());
     }
 
     Ok(workspace)
@@ -431,13 +563,13 @@ fn truncate_text(text: String, max_chars: usize) -> String {
     }
 
     let mut truncated: String = text.chars().take(max_chars).collect();
-    truncated.push_str("\n\n[内容已截断]");
+    truncated.push_str("\n\n[Content truncated]");
     truncated
 }
 
 fn run_codegraph_explore(workspace: &Path, query: &str) -> Result<String, String> {
     if !has_codegraph_index(workspace) {
-        return Err("当前工作文件夹未发现 .codegraph 索引".to_string());
+        return Err("No .codegraph index was found for the current workspace.".to_string());
     }
 
     let output = Command::new("codegraph")
@@ -445,16 +577,16 @@ fn run_codegraph_explore(workspace: &Path, query: &str) -> Result<String, String
         .arg("explore")
         .arg(query)
         .output()
-        .map_err(|error| format!("启动 CodeGraph 失败：{}", error))?;
+        .map_err(|error| format!("Failed to start CodeGraph: {}", error))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
     if !output.status.success() || stdout.trim().is_empty() {
         return Err(if stderr.trim().is_empty() {
-            "CodeGraph 未返回可用结果".to_string()
+            "CodeGraph returned no usable result.".to_string()
         } else {
-            format!("CodeGraph 查询失败：{}", stderr.trim())
+            format!("CodeGraph query failed: {}", stderr.trim())
         });
     }
 
@@ -504,10 +636,10 @@ fn read_local_code_context(workspace: &Path, query: &str) -> Result<String, Stri
                 .arg("ls-files")
                 .output()
         })
-        .map_err(|error| format!("本地文件列表读取失败：{}", error))?;
+        .map_err(|error| format!("Failed to read local file list: {}", error))?;
 
     if !output.status.success() {
-        return Err("本地文件列表读取失败".to_string());
+        return Err("Failed to read local file list.".to_string());
     }
 
     let files: Vec<String> = String::from_utf8_lossy(&output.stdout)
@@ -530,8 +662,8 @@ fn read_local_code_context(workspace: &Path, query: &str) -> Result<String, Stri
     }
 
     let mut sections = vec![
-        "CodeGraph 不可用，已降级为本地命令读取。".to_string(),
-        "文件列表：".to_string(),
+        "CodeGraph is unavailable; using local command fallback.".to_string(),
+        "File list:".to_string(),
         files
             .iter()
             .take(80)
@@ -568,7 +700,7 @@ async fn inspect_code_workspace(
     let query = request.query.trim();
 
     if query.is_empty() {
-        return Err("代码阅读问题不能为空".to_string());
+        return Err("Code inspection query cannot be empty.".to_string());
     }
 
     match run_codegraph_explore(&workspace, query) {
@@ -579,7 +711,7 @@ async fn inspect_code_workspace(
         Err(codegraph_error) => {
             let fallback = read_local_code_context(&workspace, query)?;
             Ok(InspectCodeWorkspaceResponse {
-                tool: format!("LocalCommands（CodeGraph 失败：{}）", codegraph_error),
+                tool: format!("LocalCommands (CodeGraph failed: {})", codegraph_error),
                 content: fallback,
             })
         }
@@ -590,19 +722,19 @@ fn validate_relative_file(file: &str) -> Result<String, String> {
     let normalized = file.trim().replace('\\', "/");
 
     if normalized.is_empty() {
-        return Err("补丁包含空文件路径".to_string());
+        return Err("Patch contains an empty file path.".to_string());
     }
 
     let path = Path::new(&normalized);
 
     if path.is_absolute() {
-        return Err(format!("拒绝绝对路径：{}", normalized));
+        return Err(format!("Absolute paths are not allowed: {}", normalized));
     }
 
     for component in path.components() {
         match component {
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
-                return Err(format!("拒绝越界路径：{}", normalized));
+                return Err(format!("Path traversal is not allowed: {}", normalized));
             }
             Component::Normal(part) => {
                 let text = part.to_string_lossy().to_ascii_lowercase();
@@ -611,7 +743,10 @@ fn validate_relative_file(file: &str) -> Result<String, String> {
                     ".ssh" | ".aws" | ".config" | "node_modules" | "dist" | "target"
                 ) || text.starts_with(".env")
                 {
-                    return Err(format!("拒绝敏感或生成目录路径：{}", normalized));
+                    return Err(format!(
+                        "Sensitive or generated paths are not allowed: {}",
+                        normalized
+                    ));
                 }
             }
             _ => {}
@@ -646,7 +781,7 @@ fn collect_patch_files(request: &ApplyPatchRequest) -> Result<Vec<String>, Strin
     }
 
     if validated.is_empty() {
-        return Err("无法识别补丁目标文件".to_string());
+        return Err("No patch target files were detected.".to_string());
     }
 
     Ok(validated)
@@ -655,14 +790,14 @@ fn collect_patch_files(request: &ApplyPatchRequest) -> Result<Vec<String>, Strin
 fn write_temp_patch(patch_text: &str) -> Result<PathBuf, String> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|error| format!("生成临时补丁名失败：{}", error))?
+        .map_err(|error| format!("Failed to create temporary patch name: {}", error))?
         .as_millis();
     let path = std::env::temp_dir().join(format!("matrixofprescience-{}.patch", stamp));
-    let mut file =
-        fs::File::create(&path).map_err(|error| format!("创建临时补丁失败：{}", error))?;
+    let mut file = fs::File::create(&path)
+        .map_err(|error| format!("Failed to create temporary patch: {}", error))?;
 
     file.write_all(patch_text.as_bytes())
-        .map_err(|error| format!("写入临时补丁失败：{}", error))?;
+        .map_err(|error| format!("Failed to write temporary patch: {}", error))?;
 
     Ok(path)
 }
@@ -685,15 +820,15 @@ fn run_git_apply(
     let output = command
         .arg(patch_file)
         .output()
-        .map_err(|error| format!("执行 git apply 失败：{}", error))?;
+        .map_err(|error| format!("Failed to run git apply: {}", error))?;
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
     if !output.status.success() {
         return Err(if stderr.trim().is_empty() {
-            format!("git apply 失败：{}", stdout)
+            format!("git apply failed: {}", stdout)
         } else {
-            format!("git apply 失败：{}", stderr)
+            format!("git apply failed: {}", stderr)
         });
     }
 
@@ -706,7 +841,7 @@ async fn apply_patch_proposal(request: ApplyPatchRequest) -> Result<ApplyPatchRe
     let patch_text = request.patch_text.trim();
 
     if patch_text.is_empty() {
-        return Err("补丁内容不能为空".to_string());
+        return Err("Patch content cannot be empty.".to_string());
     }
 
     let applied_files = collect_patch_files(&request)?;

@@ -16,6 +16,7 @@ export function buildSystemPrompt(
     workspacePath
       ? t("agentPrompt.workspaceSet", { path: workspacePath })
       : t("agentPrompt.workspaceMissing"),
+    workspacePath && config?.agentMode !== "chat" ? t("agentPrompt.codeToolGuide") : "",
     config
       ? [
           t("agentPrompt.localModeTitle"),

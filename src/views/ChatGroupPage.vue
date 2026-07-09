@@ -44,8 +44,6 @@ interface ApplyPatchResponse {
   stderr: string;
 }
 
-interface InspectCodeWorkspaceResponse { tool: string; content: string }
-
 type MemberDecision = "speak" | "wait";
 type MemberVote = "agree" | "supplement" | "disagree";
 
@@ -335,39 +333,6 @@ function shouldInspectWorkspace(extraRule: string) {
   return /代码|源码|项目|文件|目录|实现|组件|函数|class|bug|报错|修改|编辑|patch|diff|read|code|source|file|folder|repo|repository/.test(
     recentText,
   );
-}
-
-async function inspectWorkspaceForMember(member: AgentModel, extraRule: string) {
-  if (!shouldInspectWorkspace(extraRule)) {
-    return "";
-  }
-
-  const workspacePath = activeGroup.value?.workspacePath?.trim() ?? "";
-  const query = [
-    t("chatRuntime.inspectMember", { name: member.name }),
-    t("chatRuntime.inspectRole", { role: member.systemPrompt }),
-    t("chatRuntime.inspectInstruction"),
-    activeMessages.value
-      .slice(-6)
-      .map((message) => `${message.modelName}: ${message.content}`)
-      .join("\n"),
-    extraRule,
-  ]
-    .filter(Boolean)
-    .join("\n\n");
-
-  try {
-    const result = await invoke<InspectCodeWorkspaceResponse>("inspect_code_workspace", {
-      request: {
-        workspacePath,
-        query,
-      },
-    });
-
-    return [t("chatRuntime.inspectTool", { tool: result.tool }), result.content].join("\n\n");
-  } catch (error) {
-    return t("chatRuntime.inspectFailed", { error: String(error) });
-  }
 }
 
 function extractPatchText(content: string) {
@@ -699,16 +664,10 @@ async function askMember(
   await scrollToBottom();
 
   try {
-    addThoughtStep(pendingId, t("chatRuntime.stepInspect"));
-    const codeContext = await inspectWorkspaceForMember(member, responseRule);
-
-    if (isRunInterrupted(runId)) {
-      return null;
-    }
-
+    const codeToolsEnabled = shouldInspectWorkspace(responseRule);
     addThoughtStep(
       pendingId,
-      codeContext ? t("chatRuntime.stepGotContext") : t("chatRuntime.stepNoContext"),
+      codeToolsEnabled ? t("chatRuntime.stepGotContext") : t("chatRuntime.stepNoContext"),
     );
     addThoughtStep(pendingId, t("chatRuntime.stepWaitingModel"));
     const response = await invoke<ChatCompletionResponse>("chat_completion", {
@@ -719,7 +678,9 @@ async function askMember(
         model: member.model,
         reasoningEffort: member.reasoningEffort,
         temperature: member.temperature,
-        systemPrompt: buildSystemPrompt(member, activeGroup.value, responseRule, codeContext),
+        workspacePath: activeGroup.value?.workspacePath ?? "",
+        codeToolsEnabled,
+        systemPrompt: buildSystemPrompt(member, activeGroup.value, responseRule),
         messages: conversation,
       },
     });

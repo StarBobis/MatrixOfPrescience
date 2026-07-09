@@ -227,6 +227,7 @@
     "collaborationRule": "Group collaboration rules: you can see messages from the user and other members. Do not speak in isolation. When you need to respond to, supplement, challenge, or correct another member's view, say so explicitly. If your specialty should not speak yet, you may wait for other members first.",
     "codeContextGuide": "You can discuss code based on the following tool output. Prefer CodeGraph. If the result came from LocalCommands, mention that it is a fallback read.",
     "codeContextTitle": "Code reading tool result:",
+    "codeToolGuide": "You have access to a codegraph_explore tool for reading the current workspace. For code, file, symbol, call-path, or implementation questions, call codegraph_explore before answering. If the tool returns a LocalCommands fallback, say it is a fallback read.",
     "coreRole": "Your core role:",
     "localModeTitle": "Local Agent collaboration mode:",
     "modeAgent": "- Agent mode: {value}",
@@ -251,7 +252,7 @@
       "ruleNoFabrication": "- Do not invent completed file changes. Only claim files were written after the approval queue shows the patch was applied.",
       "rulePatchQueue": "- Diff or patch output enters the approval queue. Do not claim files were written before approval and application.",
       "ruleRisk": "- Explicitly mark risk when deleting, overwriting, migrating, broadly renaming, running external commands, making network requests, or changing secrets or permissions.",
-      "ruleTool": "- When code reading is involved, the app prefers CodeGraph and only falls back to local commands when CodeGraph is unavailable. Answer from the \"Code reading tool result\" and do not claim you can only see a path.",
+      "ruleTool": "- When code reading is involved, call codegraph_explore first. The app executes CodeGraph for you and only falls back to local commands when CodeGraph is unavailable.",
       "sandboxYolo": "- Sandbox YOLO: you may automatically advance low and medium risk plans, but assume an isolated workspace. Never cross the workspace boundary, delete user data, or handle secrets.",
       "securityAnalyzer": "- Security Analyzer: first classify risk into allow, needs confirmation, or blocked, then give editing suggestions.",
       "strict": "- Strict: all file writes, command execution, and dependency installation must be planned and confirmed first."

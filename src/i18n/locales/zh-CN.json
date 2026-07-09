@@ -227,6 +227,7 @@
     "collaborationRule": "群聊协作规则：你能看到用户和其它群友已经发出的消息。不要只各说各话；需要回应、补充、质疑或修正其它群友观点时，请明确指出。若你的专业分工暂时不该发言，可以等待其它群友先说。",
     "codeContextGuide": "你可以基于以下工具输出讨论代码。优先信任 CodeGraph；如果结果来自 LocalCommands，需要说明这是降级读取。",
     "codeContextTitle": "代码阅读工具结果：",
+    "codeToolGuide": "你可以调用 codegraph_explore 工具阅读当前工作区。遇到代码、文件、符号、调用链或实现问题时，先调用 codegraph_explore 再回答。如果工具结果来自 LocalCommands，请说明这是降级读取。",
     "coreRole": "你的核心角色：",
     "localModeTitle": "本地 Agent 协作模式：",
     "modeAgent": "- Agent 模式：{value}",
@@ -251,7 +252,7 @@
       "ruleNoFabrication": "- 不要编造已执行的文件修改；只有审批队列显示补丁已应用后，才可以声称文件已写入。",
       "rulePatchQueue": "- 输出 diff 或补丁会进入审批队列；批准并应用前不得声称已经写入文件。",
       "ruleRisk": "- 涉及删除、覆盖、迁移、大范围重命名、运行外部命令、网络请求、密钥或权限变更时，必须显式标记风险。",
-      "ruleTool": "- 涉及代码阅读时，软件会优先调用 CodeGraph；CodeGraph 不可用时才降级为本地命令。你必须基于“代码阅读工具结果”回答，不能声称只能看到路径。",
+      "ruleTool": "- 涉及代码阅读时，先调用 codegraph_explore。应用会为你执行 CodeGraph；CodeGraph 不可用时才降级为本地命令。",
       "sandboxYolo": "- Sandbox YOLO：可自动推进低中风险改动计划，但必须假设运行在隔离工作区；禁止越过工作文件夹、删除用户数据或处理密钥。",
       "securityAnalyzer": "- Security Analyzer：先进行风险分类，输出允许/需确认/禁止三类结论，再给出编辑建议。",
       "strict": "- Strict：所有文件写入、命令执行和依赖安装都必须先给出计划并等待确认。"
