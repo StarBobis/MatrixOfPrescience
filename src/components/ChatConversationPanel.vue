@@ -1,0 +1,136 @@
+<script setup lang="ts">
+import { nextTick, ref } from "vue";
+import { open } from "@tauri-apps/plugin-dialog";
+import { FolderOpened, Promotion, Setting } from "@element-plus/icons-vue";
+import type { ChatGroup, ChatMessage } from "../stores/settings";
+
+defineProps<{
+  activeGroup?: ChatGroup;
+  activeMemberCount: number;
+  messages: ChatMessage[];
+  composer: string;
+  workspacePath: string;
+  sending: boolean;
+  canSend: boolean;
+  statusText: Record<ChatMessage["status"], string>;
+  renderMarkdown: (source: string) => string;
+}>();
+
+const emit = defineEmits<{
+  "update:composer": [value: string];
+  "update:workspacePath": [value: string];
+  sendMessage: [];
+  openSettings: [];
+}>();
+
+const messagesPanel = ref<HTMLElement | null>(null);
+
+async function scrollToBottom() {
+  await nextTick();
+
+  if (messagesPanel.value) {
+    messagesPanel.value.scrollTop = messagesPanel.value.scrollHeight;
+  }
+}
+
+async function chooseWorkspacePath() {
+  const selected = await open({
+    directory: true,
+    multiple: false,
+    title: "选择当前群工作文件夹",
+  });
+
+  if (typeof selected === "string") {
+    emit("update:workspacePath", selected);
+  }
+}
+
+defineExpose({
+  scrollToBottom,
+});
+</script>
+
+<template>
+  <main class="chat-workspace">
+    <header class="chat-header">
+      <div>
+        <p class="eyebrow">Group Conversation</p>
+        <h2>{{ activeGroup?.name }}</h2>
+        <p class="group-description">{{ activeGroup?.description }}</p>
+      </div>
+      <div class="header-actions">
+        <el-tag type="info">{{ activeMemberCount }} 个未禁言群友</el-tag>
+        <el-button :icon="Setting" @click="emit('openSettings')">设置</el-button>
+      </div>
+    </header>
+
+    <section ref="messagesPanel" class="messages-panel">
+      <article
+        v-for="message in messages"
+        :key="message.id"
+        class="message-row"
+        :class="message.role"
+        :style="{ '--accent': message.color }"
+      >
+        <div class="message-meta">
+          <span class="accent-line"></span>
+          <div class="message-title">
+            <strong>{{ message.modelName }}</strong>
+            <span v-if="message.providerName">{{ message.providerName }}</span>
+          </div>
+          <span class="status-pill" :class="message.status">
+            {{ statusText[message.status] }}
+          </span>
+          <time>{{ message.time }}</time>
+        </div>
+
+        <div class="message-body" v-html="renderMarkdown(message.content)"></div>
+
+        <div class="message-reactions">
+          <span class="reaction-pill agree">
+            同意 {{ (message.agreeMemberIds ?? []).length }}
+          </span>
+          <span class="reaction-pill disagree">
+            不同意 {{ (message.disagreeMemberIds ?? []).length }}
+          </span>
+        </div>
+      </article>
+    </section>
+
+    <div class="workspace-bar">
+      <span>当前群工作文件夹</span>
+      <el-input
+        :model-value="workspacePath"
+        placeholder="选择或输入当前群工作文件夹路径"
+        clearable
+        @update:model-value="emit('update:workspacePath', String($event))"
+      >
+        <template #append>
+          <el-button :icon="FolderOpened" title="选择工作文件夹" @click="chooseWorkspacePath" />
+        </template>
+      </el-input>
+    </div>
+
+    <footer class="composer">
+      <el-input
+        :model-value="composer"
+        type="textarea"
+        :autosize="{ minRows: 3, maxRows: 7 }"
+        resize="none"
+        placeholder="输入消息，Enter 发送，Shift + Enter 换行"
+        @update:model-value="emit('update:composer', String($event))"
+        @keydown.enter.exact.prevent="emit('sendMessage')"
+      />
+
+      <el-button
+        type="primary"
+        :loading="sending"
+        :disabled="!canSend"
+        :icon="Promotion"
+        @click="emit('sendMessage')"
+      >
+        发给 {{ activeMemberCount }} 个群友
+      </el-button>
+    </footer>
+  </main>
+</template>

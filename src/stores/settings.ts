@@ -3,6 +3,13 @@ import { defineStore } from "pinia";
 export type ProviderId = "openai" | "deepseek";
 export type ChatRole = "user" | "assistant";
 export type MessageStatus = "done" | "thinking" | "error";
+export type AgentMode = "chat" | "local-agent" | "architect";
+export type AgentWorkflowMode = "ask" | "edit-before-ask" | "code" | "yolo";
+export type AgentApprovalMode = "manual" | "confirm-risky" | "auto";
+export type AgentSafetyModel = "strict" | "balanced" | "security-analyzer" | "sandbox-yolo";
+export type PatchRiskLevel = "low" | "medium" | "high";
+export type PatchApprovalStatus = "pending" | "approved" | "rejected" | "discarded";
+export type PatchSafetyVerdict = "allow" | "needs-confirmation" | "blocked";
 
 export interface ProviderConfig {
   id: ProviderId;
@@ -21,6 +28,7 @@ export interface AgentModel {
   temperature: number;
   enabled: boolean;
   color: string;
+  avatar?: string;
 }
 
 export interface ChatMessage {
@@ -32,15 +40,56 @@ export interface ChatMessage {
   content: string;
   time: string;
   color: string;
+  agreeMemberIds?: string[];
+  disagreeMemberIds?: string[];
 }
 
 export interface ChatGroup {
   id: string;
   name: string;
   description: string;
+  announcement: string;
+  workspacePath: string;
+  agentConfig: AgentCollaborationConfig;
+  patchProposals: AgentPatchProposal[];
   members: AgentModel[];
   messages: ChatMessage[];
   updatedAt: string;
+}
+
+export interface AgentCollaborationConfig {
+  agentMode: AgentMode;
+  workflowMode: AgentWorkflowMode;
+  approvalMode: AgentApprovalMode;
+  safetyModel: AgentSafetyModel;
+  editBeforeAsk: boolean;
+  yoloMode: boolean;
+}
+
+export interface OwnerProfile {
+  name: string;
+  avatar: string;
+  color: string;
+}
+
+export interface AgentPatchProposal {
+  id: string;
+  title: string;
+  proposerName: string;
+  riskLevel: PatchRiskLevel;
+  safetyCheck: PatchSafetyCheck;
+  status: PatchApprovalStatus;
+  workspacePath: string;
+  files: string[];
+  summary: string;
+  patchText: string;
+  createdAt: string;
+}
+
+export interface PatchSafetyCheck {
+  verdict: PatchSafetyVerdict;
+  reasons: string[];
+  warnings: string[];
 }
 
 interface PersistedSettings {
@@ -48,6 +97,7 @@ interface PersistedSettings {
   agentModels?: AgentModel[];
   groups?: ChatGroup[];
   activeGroupId?: string;
+  ownerProfile?: Partial<OwnerProfile>;
 }
 
 const STORAGE_KEY = "matrix-of-prescience-settings";
@@ -69,6 +119,73 @@ const providerDefaults: Record<ProviderId, ProviderConfig> = {
   },
 };
 
+const defaultAnnouncement =
+  "群公告：所有群友需要基于事实、清晰表达；先说明判断，再给出可执行建议。不同群友可以保留分歧，但必须指出依据。";
+
+const defaultOwnerProfile: OwnerProfile = {
+  name: "我",
+  avatar: "",
+  color: "#4d5a61",
+};
+
+const defaultAgentConfig: AgentCollaborationConfig = {
+  agentMode: "chat",
+  workflowMode: "ask",
+  approvalMode: "manual",
+  safetyModel: "balanced",
+  editBeforeAsk: false,
+  yoloMode: false,
+};
+
+function normalizeAgentConfig(
+  config?: Partial<AgentCollaborationConfig>,
+): AgentCollaborationConfig {
+  const merged = {
+    ...structuredClone(defaultAgentConfig),
+    ...config,
+  };
+
+  if (merged.yoloMode) {
+    merged.workflowMode = "yolo";
+    merged.approvalMode = "auto";
+    merged.safetyModel = "sandbox-yolo";
+  }
+
+  if (merged.editBeforeAsk) {
+    merged.workflowMode = "edit-before-ask";
+  }
+
+  return merged;
+}
+
+function normalizeGroup(group: ChatGroup): ChatGroup {
+  const workspacePath = group.workspacePath ?? "";
+
+  return {
+    ...group,
+    announcement: group.announcement ?? defaultAnnouncement,
+    workspacePath,
+    agentConfig: normalizeAgentConfig(group.agentConfig),
+    patchProposals: (group.patchProposals ?? []).map((proposal) => ({
+      ...proposal,
+      workspacePath: proposal.workspacePath ?? workspacePath,
+      safetyCheck: proposal.safetyCheck ?? {
+        verdict: proposal.riskLevel === "high" ? "blocked" : "needs-confirmation",
+        reasons:
+          proposal.riskLevel === "high"
+            ? ["旧提案缺少安全校验结果，已按高风险阻止。"]
+            : [],
+        warnings: ["旧提案缺少安全校验结果，需要重新人工复核。"],
+      },
+    })),
+    messages: group.messages.map((message) => ({
+      ...message,
+      agreeMemberIds: message.agreeMemberIds ?? [],
+      disagreeMemberIds: message.disagreeMemberIds ?? [],
+    })),
+  };
+}
+
 function nowText() {
   return new Intl.DateTimeFormat("zh-CN", {
     hour: "2-digit",
@@ -85,6 +202,8 @@ function createSystemMessage(content: string): ChatMessage {
     content,
     time: nowText(),
     color: "#6c6f75",
+    agreeMemberIds: [],
+    disagreeMemberIds: [],
   };
 }
 
@@ -132,10 +251,14 @@ function createDefaultGroup(): ChatGroup {
     id: crypto.randomUUID(),
     name: "默认 Agent 群",
     description: "多模型协作讨论群",
+    announcement: defaultAnnouncement,
+    workspacePath: "",
+    agentConfig: structuredClone(defaultAgentConfig),
+    patchProposals: [],
     members: createDefaultMembers(),
     messages: [
       createSystemMessage(
-        "这是一个 Agent 聊天群。每个虚拟群友都有自己的 API、模型和核心角色；你发出一条消息后，启用的群友会共享同一个上下文并分别回复。",
+        "这是一个 Agent 聊天群。每个虚拟群友都有自己的 API、模型和核心角色；你发出一条消息后，未禁言的群友会共享同一个上下文并分别回复。",
       ),
     ],
     updatedAt: new Date().toISOString(),
@@ -150,6 +273,7 @@ export const useSettingsStore = defineStore("settings", {
       providers: structuredClone(providerDefaults),
       groups: [defaultGroup] as ChatGroup[],
       activeGroupId: defaultGroup.id,
+      ownerProfile: structuredClone(defaultOwnerProfile),
     };
   },
 
@@ -179,8 +303,15 @@ export const useSettingsStore = defineStore("settings", {
         };
       }
 
+      if (parsed.ownerProfile) {
+        this.ownerProfile = {
+          ...structuredClone(defaultOwnerProfile),
+          ...parsed.ownerProfile,
+        };
+      }
+
       if (Array.isArray(parsed.groups) && parsed.groups.length > 0) {
-        this.groups = parsed.groups;
+        this.groups = parsed.groups.map((group) => normalizeGroup(group));
         this.activeGroupId = parsed.activeGroupId ?? parsed.groups[0].id;
         return;
       }
@@ -201,6 +332,7 @@ export const useSettingsStore = defineStore("settings", {
           providers: this.providers,
           groups: this.groups,
           activeGroupId: this.activeGroupId,
+          ownerProfile: this.ownerProfile,
         }),
       );
     },
@@ -218,11 +350,20 @@ export const useSettingsStore = defineStore("settings", {
       this.activeGroupId = groupId;
     },
 
-    createGroup(name: string, description: string, members: AgentModel[]) {
+    createGroup(
+      name: string,
+      description: string,
+      announcement: string,
+      members: AgentModel[],
+    ) {
       const group: ChatGroup = {
         id: crypto.randomUUID(),
         name,
         description,
+        announcement: announcement.trim() || defaultAnnouncement,
+        workspacePath: "",
+        agentConfig: structuredClone(defaultAgentConfig),
+        patchProposals: [],
         members,
         messages: [
           createSystemMessage(
@@ -296,6 +437,8 @@ export const useSettingsStore = defineStore("settings", {
         ...message,
         id: crypto.randomUUID(),
         time: nowText(),
+        agreeMemberIds: message.agreeMemberIds ?? [],
+        disagreeMemberIds: message.disagreeMemberIds ?? [],
       });
       group.updatedAt = new Date().toISOString();
     },
@@ -306,6 +449,8 @@ export const useSettingsStore = defineStore("settings", {
       group.messages.push({
         ...message,
         time: nowText(),
+        agreeMemberIds: message.agreeMemberIds ?? [],
+        disagreeMemberIds: message.disagreeMemberIds ?? [],
       });
       group.updatedAt = new Date().toISOString();
     },
@@ -317,6 +462,34 @@ export const useSettingsStore = defineStore("settings", {
         Object.assign(message, patch);
         this.activeGroup.updatedAt = new Date().toISOString();
       }
+    },
+
+    addPatchProposal(proposal: Omit<AgentPatchProposal, "id" | "createdAt" | "status">) {
+      const group = this.activeGroup;
+
+      group.patchProposals.unshift({
+        ...proposal,
+        id: crypto.randomUUID(),
+        status: "pending",
+        createdAt: nowText(),
+      });
+      group.updatedAt = new Date().toISOString();
+    },
+
+    updatePatchProposalStatus(proposalId: string, status: PatchApprovalStatus) {
+      const proposal = this.activeGroup.patchProposals.find((item) => item.id === proposalId);
+
+      if (proposal) {
+        proposal.status = status;
+        this.activeGroup.updatedAt = new Date().toISOString();
+      }
+    },
+
+    removePatchProposal(proposalId: string) {
+      this.activeGroup.patchProposals = this.activeGroup.patchProposals.filter(
+        (item) => item.id !== proposalId,
+      );
+      this.activeGroup.updatedAt = new Date().toISOString();
     },
 
     createMemberDraft(provider: ProviderId = "openai") {
