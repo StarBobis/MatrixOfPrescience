@@ -21,6 +21,7 @@ export interface ProviderConfig {
 
 export interface AgentModel {
   id: string;
+  libraryId?: string;
   name: string;
   provider: ProviderId;
   model: string;
@@ -180,6 +181,10 @@ function normalizeGroup(group: ChatGroup): ChatGroup {
         warnings: ["旧提案缺少安全校验结果，需要重新人工复核。"],
       },
     })),
+    members: group.members.map((member) => ({
+      ...member,
+      libraryId: member.libraryId ?? crypto.randomUUID(),
+    })),
     messages: group.messages.map((message) => ({
       ...message,
       agreeMemberIds: message.agreeMemberIds ?? [],
@@ -223,6 +228,7 @@ function createMember(
 ): AgentModel {
   return {
     id: crypto.randomUUID(),
+    libraryId: crypto.randomUUID(),
     name,
     provider,
     model,
@@ -271,6 +277,7 @@ function cloneMember(member: AgentModel, members: AgentModel[] = []) {
 function toPlainMember(member: AgentModel): AgentModel {
   return {
     id: member.id,
+    libraryId: member.libraryId,
     name: member.name,
     provider: member.provider,
     model: member.model,
@@ -344,7 +351,13 @@ export const useSettingsStore = defineStore("settings", {
 
       for (const group of this.groups) {
         for (const member of group.members) {
-          if (!members.some((item) => normalizeName(item.name) === normalizeName(member.name))) {
+          if (
+            !members.some(
+              (item) =>
+                (member.libraryId && item.libraryId === member.libraryId) ||
+                normalizeName(item.name) === normalizeName(member.name),
+            )
+          ) {
             members.push(member);
           }
         }
@@ -418,7 +431,8 @@ export const useSettingsStore = defineStore("settings", {
         const name = makeUniqueMemberName(member.name, members);
         members.push({
           ...toPlainMember(member),
-          id: member.id,
+          id: member.libraryId ?? member.id,
+          libraryId: member.libraryId ?? member.id,
           name,
         });
       }
@@ -438,20 +452,29 @@ export const useSettingsStore = defineStore("settings", {
 
     rememberMember(member: AgentModel) {
       const existing = this.memberLibrary.find(
-        (item) => normalizeName(item.name) === normalizeName(member.name),
+        (item) =>
+          (member.libraryId && item.libraryId === member.libraryId) ||
+          normalizeName(item.name) === normalizeName(member.name),
       );
 
       if (existing) {
-        Object.assign(existing, toPlainMember(member), { id: existing.id });
+        const plainMember = toPlainMember(member);
+        Object.assign(existing, plainMember, {
+          id: existing.id,
+          libraryId: existing.libraryId ?? plainMember.libraryId ?? existing.id,
+        });
+        member.libraryId = existing.libraryId;
         return existing;
       }
 
       const libraryMember = {
         ...toPlainMember(member),
         id: crypto.randomUUID(),
+        libraryId: crypto.randomUUID(),
         name: makeUniqueMemberName(member.name, this.memberLibrary),
       };
 
+      member.libraryId = libraryMember.libraryId;
       this.memberLibrary.push(libraryMember);
       return libraryMember;
     },
@@ -549,6 +572,7 @@ export const useSettingsStore = defineStore("settings", {
       }
 
       group.members.push(cloneMember(source, group.members));
+      this.rememberMember(source);
       group.updatedAt = new Date().toISOString();
       return true;
     },
@@ -575,6 +599,11 @@ export const useSettingsStore = defineStore("settings", {
       member.name = makeUniqueMemberName(name, group.members, memberId);
       this.rememberMember(member);
       group.updatedAt = new Date().toISOString();
+    },
+
+    updateMemberProfile(member: AgentModel) {
+      this.rememberMember(member);
+      this.activeGroup.updatedAt = new Date().toISOString();
     },
 
     removeMember(memberId: string) {

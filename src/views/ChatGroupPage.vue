@@ -246,6 +246,10 @@ function renameMember(memberId: string, name: string) {
   settingsStore.renameMember(memberId, name);
 }
 
+function updateMemberProfile(member: AgentModel) {
+  settingsStore.updateMemberProfile(member);
+}
+
 function removeMember(memberId: string) {
   if (activeGroupMembers.value.length <= 1) {
     ElMessage.warning("至少保留一个虚拟群友");
@@ -968,6 +972,7 @@ onMounted(() => {
           @add-historical-member="addHistoricalMember"
           @remove-member="removeMember"
           @rename-member="renameMember"
+          @update-member-profile="updateMemberProfile"
         />
       </template>
     </ResizableGroupLayout>

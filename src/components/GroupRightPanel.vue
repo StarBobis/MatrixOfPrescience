@@ -54,6 +54,7 @@ const emit = defineEmits<{
   addHistoricalMember: [memberId: string];
   removeMember: [memberId: string];
   renameMember: [memberId: string, name: string];
+  updateMemberProfile: [member: AgentModel];
 }>();
 
 function syncEditBeforeAsk(value: boolean) {
@@ -208,6 +209,7 @@ function finishAnnouncementEdit() {
       @add-historical-member="(memberId) => emit('addHistoricalMember', memberId)"
       @remove-member="(memberId) => emit('removeMember', memberId)"
       @rename-member="(memberId, name) => emit('renameMember', memberId, name)"
+      @update-member-profile="(member) => emit('updateMemberProfile', member)"
     />
   </aside>
 </template>

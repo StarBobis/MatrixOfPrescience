@@ -16,6 +16,7 @@ const emit = defineEmits<{
   addHistoricalMember: [memberId: string];
   removeMember: [memberId: string];
   renameMember: [memberId: string, name: string];
+  updateMemberProfile: [member: AgentModel];
 }>();
 
 const activeMemberCardId = ref("");
@@ -66,6 +67,7 @@ async function assignLocalAvatar(member: AgentModel) {
 
   if (avatar) {
     member.avatar = avatar;
+    emit("updateMemberProfile", member);
   }
 }
 </script>
@@ -171,13 +173,13 @@ async function assignLocalAvatar(member: AgentModel) {
               <span v-else>{{ getInitial(member.name) }}</span>
             </span>
             <div class="profile-title">
-              <el-input
-                v-model="member.name"
-                size="small"
-                @focus="startMemberCardEdit(member.id)"
-                @change="emit('renameMember', member.id, member.name)"
-                @blur="finishMemberCardEdit(member.id)"
-              />
+            <el-input
+              v-model="member.name"
+              size="small"
+              @focus="startMemberCardEdit(member.id)"
+              @input="emit('renameMember', member.id, member.name)"
+              @blur="finishMemberCardEdit(member.id)"
+            />
               <span>{{ member.enabled ? "未禁言" : "已禁言" }}</span>
             </div>
           </div>
@@ -208,6 +210,7 @@ async function assignLocalAvatar(member: AgentModel) {
               active-color="#c45656"
               :active-value="false"
               :inactive-value="true"
+              @change="emit('updateMemberProfile', member)"
             />
           </div>
 
@@ -220,6 +223,7 @@ async function assignLocalAvatar(member: AgentModel) {
               resize="none"
               placeholder="描述这个群友的分工、立场和回答边界"
               @focus="startMemberCardEdit(member.id)"
+              @input="emit('updateMemberProfile', member)"
               @blur="finishMemberCardEdit(member.id)"
             />
           </div>
