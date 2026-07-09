@@ -14,6 +14,9 @@ import {
   type ChatMessageActivityItem,
   type ChatMessageActivityKind,
   type ChatMessageActivityStatus,
+  type ChatMessageExecutionItem,
+  type ChatMessageExecutionKind,
+  type ChatMessageExecutionStatus,
   type OwnerProfile,
   type PatchApprovalStatus,
   type PatchRiskLevel,
@@ -135,6 +138,7 @@ const DEEPSEEK_STANDARD_CONTEXT_LIMIT = 128_000;
 const DEFAULT_CONTEXT_LIMIT = 128_000;
 const CACHE_PREFIX_MESSAGE_COUNT = 4;
 const RECENT_CONVERSATION_MESSAGE_COUNT = 14;
+const MAX_MESSAGE_EXECUTION_ITEMS = 160;
 
 const { t } = useI18n();
 const settingsStore = useSettingsStore();
@@ -158,7 +162,7 @@ const speakingTimers = new Map<string, number>();
 const streamingContent = new Map<string, string>();
 const streamingTraceLines = new Map<
   string,
-  { kind: ChatTraceStep["kind"]; index: number; text: string }
+  { kind: ChatTraceStep["kind"]; itemId: string; index: number; text: string }
 >();
 
 const newGroupName = ref(t("defaults.newGroup.name"));
@@ -850,15 +854,15 @@ function addResponseTraceSteps(messageId: string, response: ChatCompletionRespon
   for (const step of response.traceSteps ?? []) {
     if (step.kind === "tool") {
       addActivityItem(messageId, "tool", step.text, inferToolActivityStatus(step.text), step.detail);
+    } else {
+      const text = formatReasoningStep(step);
+
+      if (text) {
+        addThoughtStep(messageId, text);
+        addExecutionItem(messageId, "reasoning", text, "done", step.detail);
+      }
     }
   }
-
-  addThoughtSteps(
-    messageId,
-    (response.traceSteps ?? [])
-      .filter((step) => step.kind !== "tool")
-      .map(formatReasoningStep),
-  );
 }
 
 function createActivityItem(
@@ -876,6 +880,22 @@ function createActivityItem(
   };
 }
 
+function createExecutionItem(
+  kind: ChatMessageExecutionKind,
+  text: string,
+  status: ChatMessageExecutionStatus = "info",
+  detail = "",
+): ChatMessageExecutionItem {
+  return {
+    id: crypto.randomUUID(),
+    kind,
+    status,
+    text,
+    detail: detail.trim() || undefined,
+    createdAt: Date.now(),
+  };
+}
+
 function addActivityItem(
   messageId: string,
   kind: ChatMessageActivityKind,
@@ -890,12 +910,43 @@ function addActivityItem(
   }
 
   const message = activeMessages.value.find((item) => item.id === messageId);
+  const activityItem = createActivityItem(kind, trimmed, status, detail);
+  const executionItem = createExecutionItem(kind, trimmed, status, detail);
   settingsStore.updateMessage(messageId, {
     activityItems: [
       ...(message?.activityItems ?? []),
-      createActivityItem(kind, trimmed, status, detail),
+      activityItem,
     ].slice(-36),
+    executionItems: [
+      ...(message?.executionItems ?? []),
+      executionItem,
+    ].slice(-MAX_MESSAGE_EXECUTION_ITEMS),
   });
+}
+
+function addExecutionItem(
+  messageId: string,
+  kind: ChatMessageExecutionKind,
+  text: string,
+  status: ChatMessageExecutionStatus = "info",
+  detail = "",
+) {
+  const trimmed = text.trim();
+
+  if (!trimmed) {
+    return "";
+  }
+
+  const message = activeMessages.value.find((item) => item.id === messageId);
+  const executionItem = createExecutionItem(kind, trimmed, status, detail);
+  settingsStore.updateMessage(messageId, {
+    executionItems: [
+      ...(message?.executionItems ?? []),
+      executionItem,
+    ].slice(-MAX_MESSAGE_EXECUTION_ITEMS),
+  });
+
+  return executionItem.id;
 }
 
 function inferToolActivityStatus(text: string): ChatMessageActivityStatus {
@@ -925,8 +976,36 @@ function updateThoughtStepAt(messageId: string, index: number, step: string) {
   settingsStore.updateMessage(messageId, { thoughtSteps });
 }
 
+function updateExecutionItem(messageId: string, itemId: string, patch: Partial<ChatMessageExecutionItem>) {
+  const message = activeMessages.value.find((item) => item.id === messageId);
+  const executionItems = (message?.executionItems ?? []).map((item) =>
+    item.id === itemId
+      ? {
+          ...item,
+          ...patch,
+        }
+      : item,
+  );
+
+  if (executionItems.length === 0) {
+    return;
+  }
+
+  settingsStore.updateMessage(messageId, { executionItems });
+}
+
 function flushStreamingTraceLine(messageId: string) {
+  const current = streamingTraceLines.get(messageId);
+
+  if (current?.itemId) {
+    updateExecutionItem(messageId, current.itemId, { status: "done" });
+  }
+
   streamingTraceLines.delete(messageId);
+}
+
+function traceKindToExecutionKind(kind: ChatTraceStep["kind"]): ChatMessageExecutionKind {
+  return kind === "tool" ? "tool" : "reasoning";
 }
 
 function appendStreamingTraceText(
@@ -941,13 +1020,22 @@ function appendStreamingTraceText(
       ? current
       : {
           kind,
+          itemId: addExecutionItem(messageId, traceKindToExecutionKind(kind), text, "running"),
           index: message?.thoughtSteps?.length ?? 0,
           text: "",
         };
 
   next.text += text;
   streamingTraceLines.set(messageId, next);
-  updateThoughtStepAt(messageId, next.index, formatReasoningStep({ kind, text: next.text }));
+  const formatted = formatReasoningStep({ kind, text: next.text });
+  updateThoughtStepAt(messageId, next.index, formatted);
+
+  if (next.itemId) {
+    updateExecutionItem(messageId, next.itemId, {
+      text: formatted,
+      status: "running",
+    });
+  }
 }
 
 function appendStreamingTraceChunk(
@@ -1011,7 +1099,9 @@ function applyCompletionStreamEvent(messageId: string, payload: ChatCompletionSt
   }
 
   flushStreamingTraceLine(messageId);
-  addThoughtStep(messageId, formatReasoningStep({ kind: traceKind, text: payload.text }));
+  const text = formatReasoningStep({ kind: traceKind, text: payload.text });
+  addThoughtStep(messageId, text);
+  addExecutionItem(messageId, traceKindToExecutionKind(traceKind), text, "done", payload.detail);
 }
 
 async function invokeStreamingCompletion(
@@ -1187,6 +1277,9 @@ async function decideMemberResponse(
     activityItems: [
       createActivityItem("status", t("chatRuntime.stepCheckingDecision"), "running"),
     ],
+    executionItems: [
+      createExecutionItem("status", t("chatRuntime.stepCheckingDecision"), "running"),
+    ],
   });
   startSpeakingTimer(pendingId, startedAt);
   pendingMessageIds.value = [...pendingMessageIds.value, pendingId];
@@ -1316,6 +1409,7 @@ async function askMember(
       color: member.color,
       thoughtSteps: [],
       activityItems: [createActivityItem("status", t("chatRuntime.stepQueued"), "running")],
+      executionItems: [createExecutionItem("status", t("chatRuntime.stepQueued"), "running")],
     });
     startSpeakingTimer(pendingId, startedAt);
   }

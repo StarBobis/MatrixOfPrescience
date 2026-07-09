@@ -8,6 +8,8 @@ export type ChatRole = "user" | "assistant";
 export type MessageStatus = "done" | "thinking" | "error";
 export type ChatMessageActivityKind = "status" | "tool";
 export type ChatMessageActivityStatus = "running" | "done" | "error" | "info";
+export type ChatMessageExecutionKind = "status" | "reasoning" | "tool";
+export type ChatMessageExecutionStatus = ChatMessageActivityStatus;
 export type AgentMode = "chat" | "local-agent" | "architect";
 export type AgentWorkflowMode = "ask" | "edit-before-ask" | "code" | "yolo";
 export type AgentApprovalMode = "manual" | "confirm-risky" | "auto";
@@ -49,6 +51,15 @@ export interface ChatMessageActivityItem {
   detail?: string;
 }
 
+export interface ChatMessageExecutionItem {
+  id: string;
+  kind: ChatMessageExecutionKind;
+  status: ChatMessageExecutionStatus;
+  text: string;
+  detail?: string;
+  createdAt?: number;
+}
+
 export interface ChatMessage {
   id: string;
   role: ChatRole;
@@ -74,6 +85,7 @@ export interface ChatMessage {
   disagreeMemberIds?: string[];
   thoughtSteps?: string[];
   activityItems?: ChatMessageActivityItem[];
+  executionItems?: ChatMessageExecutionItem[];
 }
 
 export interface ChatGroup {
@@ -149,6 +161,9 @@ const THOUGHT_STEP_TEXT_LIMIT = 1200;
 const ACTIVITY_ITEM_LIMIT = 36;
 const ACTIVITY_ITEM_TEXT_LIMIT = 360;
 const ACTIVITY_ITEM_DETAIL_LIMIT = 6000;
+const EXECUTION_ITEM_LIMIT = 160;
+const EXECUTION_ITEM_TEXT_LIMIT = 1200;
+const EXECUTION_ITEM_DETAIL_LIMIT = 6000;
 
 type PersistenceMode = "normal" | "compact" | "minimal";
 
@@ -263,6 +278,7 @@ function normalizeGroup(group: ChatGroup): ChatGroup {
       disagreeMemberIds: message.disagreeMemberIds ?? [],
       thoughtSteps: message.thoughtSteps ?? [],
       activityItems: message.activityItems ?? [],
+      executionItems: message.executionItems ?? [],
     })),
   };
 }
@@ -306,6 +322,7 @@ function createSystemMessage(content: string): ChatMessage {
     disagreeMemberIds: [],
     thoughtSteps: [],
     activityItems: [],
+    executionItems: [],
   };
 }
 
@@ -406,6 +423,11 @@ function toPersistedMessage(message: ChatMessage, mode: Exclude<PersistenceMode,
       ...item,
       text: truncateText(item.text, ACTIVITY_ITEM_TEXT_LIMIT),
       detail: item.detail ? truncateText(item.detail, ACTIVITY_ITEM_DETAIL_LIMIT) : undefined,
+    })),
+    executionItems: (message.executionItems ?? []).slice(-EXECUTION_ITEM_LIMIT).map((item) => ({
+      ...item,
+      text: truncateText(item.text, EXECUTION_ITEM_TEXT_LIMIT),
+      detail: item.detail ? truncateText(item.detail, EXECUTION_ITEM_DETAIL_LIMIT) : undefined,
     })),
   };
 }
@@ -878,6 +900,7 @@ export const useSettingsStore = defineStore("settings", {
         disagreeMemberIds: message.disagreeMemberIds ?? [],
         thoughtSteps: message.thoughtSteps ?? [],
         activityItems: message.activityItems ?? [],
+        executionItems: message.executionItems ?? [],
       });
       group.updatedAt = new Date().toISOString();
     },
@@ -893,6 +916,7 @@ export const useSettingsStore = defineStore("settings", {
         disagreeMemberIds: message.disagreeMemberIds ?? [],
         thoughtSteps: message.thoughtSteps ?? [],
         activityItems: message.activityItems ?? [],
+        executionItems: message.executionItems ?? [],
       });
       group.updatedAt = new Date().toISOString();
     },

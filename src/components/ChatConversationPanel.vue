@@ -9,7 +9,7 @@ import type {
   AgentModel,
   ChatGroup,
   ChatMessage,
-  ChatMessageActivityItem,
+  ChatMessageExecutionItem,
   PatchApprovalStatus,
 } from "../stores/settings";
 
@@ -53,6 +53,7 @@ const messagesStack = ref<HTMLElement | null>(null);
 const messagesEnd = ref<HTMLElement | null>(null);
 const composerFooter = ref<HTMLElement | null>(null);
 const approvalPanelOpen = ref(false);
+const executionPanelOpen = ref<Record<string, boolean>>({});
 const stickToBottom = ref(true);
 const { t } = useI18n();
 let pendingScrollFrame = 0;
@@ -186,6 +187,9 @@ const messageScrollSignature = computed(() =>
         (message.thoughtSteps ?? []).join("\n").length,
         (message.activityItems ?? [])
           .map((item) => `${item.id}:${item.status}:${item.text.length}:${item.detail?.length ?? 0}`)
+          .join(","),
+        (message.executionItems ?? [])
+          .map((item) => `${item.id}:${item.kind}:${item.status}:${item.text.length}:${item.detail?.length ?? 0}`)
           .join(","),
       ].join(":"),
     )
@@ -341,16 +345,70 @@ function getAgreeLabel(message: ChatMessage) {
   return t("chat.agree", { count: (message.agreeMemberIds ?? []).length });
 }
 
-function getActivityIcon(item: ChatMessageActivityItem) {
+function getExecutionItems(message: ChatMessage): ChatMessageExecutionItem[] {
+  const executionItems = message.executionItems ?? [];
+
+  if (executionItems.length > 0) {
+    return executionItems;
+  }
+
+  return [
+    ...(message.activityItems ?? []).map((item, index) => ({
+      ...item,
+      createdAt: index,
+    })),
+    ...(message.thoughtSteps ?? [])
+      .map((step, index) => ({
+        id: `${message.id}-legacy-reasoning-${index}`,
+        kind: "reasoning" as const,
+        status: "done" as const,
+        text: step,
+        createdAt: (message.activityItems?.length ?? 0) + index,
+      }))
+      .filter((item) => item.text.trim().length > 0),
+  ];
+}
+
+function hasExecutionItems(message: ChatMessage) {
+  return getExecutionItems(message).length > 0;
+}
+
+function getExecutionCount(message: ChatMessage) {
+  return getExecutionItems(message).length;
+}
+
+function isExecutionOpen(message: ChatMessage) {
+  return executionPanelOpen.value[message.id] ?? message.status === "thinking";
+}
+
+function toggleExecutionPanel(message: ChatMessage) {
+  executionPanelOpen.value = {
+    ...executionPanelOpen.value,
+    [message.id]: !isExecutionOpen(message),
+  };
+  scheduleFollowScroll();
+}
+
+function getLatestExecutionItem(message: ChatMessage) {
+  const items = getExecutionItems(message);
+  return items[items.length - 1];
+}
+
+function getLatestExecutionItems(message: ChatMessage) {
+  const item = getLatestExecutionItem(message);
+  return item ? [item] : [];
+}
+
+function getExecutionIcon(item: ChatMessageExecutionItem) {
   return item.kind === "tool" ? Tools : RefreshLeft;
 }
 
-function hasReasoning(message: ChatMessage) {
-  return (message.thoughtSteps ?? []).some((step) => step.trim().length > 0);
+function getExecutionKindLabel(item: ChatMessageExecutionItem) {
+  return t(`chat.execution.kind.${item.kind}`);
 }
 
-function renderReasoningMarkdown(message: ChatMessage) {
-  return props.renderMarkdown((message.thoughtSteps ?? []).join("\n"));
+function renderExecutionMarkdown(item: ChatMessageExecutionItem) {
+  return props.renderMarkdown(item.text);
 }
 
 function hasContextUsage(message: ChatMessage) {
@@ -553,45 +611,71 @@ defineExpose({
                 </span>
               </div>
             </div>
-            <span class="status-pill" :class="message.status">
-              {{ statusText[message.status] }}
-            </span>
-            <time>{{ message.time }}</time>
+            <div class="message-meta-actions">
+              <el-button
+                v-if="hasExecutionItems(message)"
+                class="execution-toggle"
+                :icon="Tools"
+                size="small"
+                plain
+                @click="toggleExecutionPanel(message)"
+              >
+                {{ t("chat.execution.title") }} · {{ getExecutionCount(message) }}
+              </el-button>
+              <span class="status-pill" :class="message.status">
+                {{ statusText[message.status] }}
+              </span>
+              <time>{{ message.time }}</time>
+            </div>
           </div>
 
           <div class="message-body" v-html="renderMarkdown(message.content)"></div>
 
+          <section
+            v-if="hasExecutionItems(message) && isExecutionOpen(message)"
+            class="execution-panel"
+          >
+            <div
+              v-for="item in getExecutionItems(message)"
+              :key="item.id"
+              class="execution-line"
+              :class="[item.kind, item.status]"
+            >
+              <span class="execution-icon">
+                <el-icon>
+                  <component :is="getExecutionIcon(item)" />
+                </el-icon>
+              </span>
+              <span class="execution-kind">{{ getExecutionKindLabel(item) }}</span>
+              <div class="execution-copy">
+                <div class="execution-markdown" v-html="renderExecutionMarkdown(item)"></div>
+                <details
+                  v-if="item.detail"
+                  class="execution-detail"
+                  @toggle="scheduleFollowScroll()"
+                >
+                  <summary>{{ t("chat.execution.detail") }}</summary>
+                  <pre>{{ item.detail }}</pre>
+                </details>
+              </div>
+            </div>
+          </section>
+
           <div class="message-status-bar" :class="message.status">
             <div class="message-activity-feed">
-              <template v-if="(message.activityItems ?? []).length > 0">
-                <template v-for="item in message.activityItems" :key="item.id">
-                  <details
-                    v-if="item.kind === 'tool'"
-                    class="activity-chip activity-detail-chip"
-                    :class="[item.kind, item.status]"
-                    @toggle="scheduleFollowScroll()"
-                  >
-                    <summary :title="item.text">
-                      <el-icon>
-                        <component :is="getActivityIcon(item)" />
-                      </el-icon>
-                      <span>{{ item.text }}</span>
-                    </summary>
-                    <pre class="activity-detail">{{ item.detail || item.text }}</pre>
-                  </details>
-
-                  <span
-                    v-else
-                    class="activity-chip"
-                    :class="[item.kind, item.status]"
-                    :title="item.text"
-                  >
-                    <el-icon>
-                      <component :is="getActivityIcon(item)" />
-                    </el-icon>
-                    <span>{{ item.text }}</span>
-                  </span>
-                </template>
+              <template v-if="getLatestExecutionItems(message).length > 0">
+                <span
+                  v-for="item in getLatestExecutionItems(message)"
+                  :key="item.id"
+                  class="activity-chip"
+                  :class="[item.kind, item.status]"
+                  :title="item.text"
+                >
+                  <el-icon>
+                    <component :is="getExecutionIcon(item)" />
+                  </el-icon>
+                  <span>{{ item.text }}</span>
+                </span>
               </template>
               <span v-else class="activity-empty">{{ statusText[message.status] }}</span>
             </div>
@@ -635,18 +719,6 @@ defineExpose({
               </span>
             </el-tooltip>
           </div>
-
-          <details
-            v-if="hasReasoning(message)"
-            class="reasoning-panel"
-            :open="message.status === 'thinking'"
-          >
-            <summary>
-              <span>{{ t("chat.reasoningPanel") }}</span>
-              <span>{{ t("chat.reasoningLines", { count: message.thoughtSteps?.length ?? 0 }) }}</span>
-            </summary>
-            <div class="reasoning-markdown" v-html="renderReasoningMarkdown(message)"></div>
-          </details>
 
           <div class="message-reactions">
             <span class="reaction-pill agree" :class="{ complete: allPeersAgreed(message) }">
@@ -776,6 +848,28 @@ defineExpose({
   }
 }
 
+.message-meta-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.execution-toggle {
+  height: 28px;
+  border-color: #d7e5dc;
+  border-radius: 999px;
+  padding: 5px 9px;
+  color: #2f6f58;
+  background: #f6fbf8;
+  font-weight: 800;
+}
+
+.execution-toggle :deep(.el-icon) {
+  font-size: 13px;
+}
+
 .message-status-bar {
   display: flex;
   align-items: flex-start;
@@ -863,6 +957,12 @@ defineExpose({
   border-color: #bed9cb;
   color: #24634f;
   background: #eef8f2;
+}
+
+.activity-chip.reasoning {
+  border-color: #d8e2ee;
+  color: #355d80;
+  background: #f3f8fd;
 }
 
 .activity-chip.status.running {
@@ -955,68 +1055,93 @@ defineExpose({
   color: #1f2c25;
 }
 
-.reasoning-panel {
+.execution-panel {
+  display: grid;
+  gap: 8px;
   margin-top: 10px;
   border: 1px solid #dfe9e3;
   border-radius: 8px;
-  color: #53615a;
   background: #f7faf8;
+  padding: 10px;
+}
+
+.execution-line {
+  display: grid;
+  grid-template-columns: 24px minmax(46px, max-content) minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  color: #435149;
   font-size: 12px;
+  line-height: 1.55;
 }
 
-.reasoning-panel summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  min-height: 34px;
-  padding: 7px 10px;
-  cursor: pointer;
-  color: #2f4238;
-  font-weight: 700;
-  list-style: none;
+.execution-icon {
+  display: inline-grid;
+  width: 22px;
+  height: 22px;
+  place-items: center;
+  border: 1px solid #dfe8e2;
+  border-radius: 999px;
+  color: #5a6a61;
+  background: #ffffff;
 }
 
-.reasoning-panel summary::-webkit-details-marker {
-  display: none;
+.execution-line.tool .execution-icon {
+  border-color: #bed9cb;
+  color: #24634f;
+  background: #eef8f2;
 }
 
-.reasoning-panel summary span:last-child {
-  flex: 0 0 auto;
-  color: #7c8a82;
-  font-size: 11px;
+.execution-line.reasoning .execution-icon {
+  border-color: #d8e2ee;
+  color: #355d80;
+  background: #f3f8fd;
 }
 
-.reasoning-markdown {
+.execution-line.error .execution-icon {
+  border-color: #f0c7c7;
+  color: #a33d3d;
+  background: #fff0f0;
+}
+
+.execution-kind {
+  padding-top: 2px;
+  color: #738078;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.execution-copy {
+  min-width: 0;
+}
+
+.execution-markdown {
   overflow-wrap: anywhere;
-  border-top: 1px solid #e4ede7;
-  padding: 9px 10px 10px;
   color: #33413a;
-  line-height: 1.6;
 }
 
-.reasoning-markdown :deep(p),
-.reasoning-markdown :deep(ul),
-.reasoning-markdown :deep(ol),
-.reasoning-markdown :deep(pre),
-.reasoning-markdown :deep(blockquote) {
+.execution-markdown :deep(p),
+.execution-markdown :deep(ul),
+.execution-markdown :deep(ol),
+.execution-markdown :deep(pre),
+.execution-markdown :deep(blockquote) {
   margin: 0 0 8px;
 }
 
-.reasoning-markdown :deep(:first-child) {
+.execution-markdown :deep(:first-child) {
   margin-top: 0;
 }
 
-.reasoning-markdown :deep(:last-child) {
+.execution-markdown :deep(:last-child) {
   margin-bottom: 0;
 }
 
-.reasoning-markdown :deep(ul),
-.reasoning-markdown :deep(ol) {
+.execution-markdown :deep(ul),
+.execution-markdown :deep(ol) {
   padding-left: 18px;
 }
 
-.reasoning-markdown :deep(code) {
+.execution-markdown :deep(code) {
   border-radius: 5px;
   padding: 2px 5px;
   color: #365f51;
@@ -1025,7 +1150,7 @@ defineExpose({
   font-size: 12px;
 }
 
-.reasoning-markdown :deep(pre) {
+.execution-markdown :deep(pre) {
   overflow: auto;
   border: 1px solid #dbe4dd;
   border-radius: 8px;
@@ -1033,10 +1158,45 @@ defineExpose({
   background: #17201c;
 }
 
-.reasoning-markdown :deep(pre code) {
+.execution-markdown :deep(pre code) {
   padding: 0;
   color: #edf6f0;
   background: transparent;
+}
+
+.execution-detail {
+  margin-top: 6px;
+  border: 1px solid #dfe8e2;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.execution-detail summary {
+  min-height: 28px;
+  padding: 5px 9px;
+  cursor: pointer;
+  color: #2f6f58;
+  font-weight: 800;
+  list-style: none;
+}
+
+.execution-detail summary::-webkit-details-marker {
+  display: none;
+}
+
+.execution-detail pre {
+  max-height: 260px;
+  overflow: auto;
+  margin: 0;
+  border-top: 1px solid #e4ede7;
+  padding: 8px 10px;
+  color: #304039;
+  background: #fbfdfb;
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .approval-dock {

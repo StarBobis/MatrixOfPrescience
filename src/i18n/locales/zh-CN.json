@@ -146,6 +146,15 @@
     "thoughtSteps": "思考过程",
     "reasoningPanel": "推理过程",
     "reasoningLines": "{count} 行",
+    "execution": {
+      "detail": "详情",
+      "kind": {
+        "reasoning": "推理",
+        "status": "状态",
+        "tool": "工具"
+      },
+      "title": "执行过程"
+    },
     "workspace": {
       "label": "工作文件夹",
       "pickDialogTitle": "选择当前群工作文件夹",

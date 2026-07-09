@@ -146,6 +146,15 @@
     "thoughtSteps": "Thought process",
     "reasoningPanel": "Reasoning",
     "reasoningLines": "{count} lines",
+    "execution": {
+      "detail": "Details",
+      "kind": {
+        "reasoning": "Reasoning",
+        "status": "Status",
+        "tool": "Tool"
+      },
+      "title": "Execution"
+    },
     "workspace": {
       "label": "Workspace",
       "pickDialogTitle": "Choose current group workspace",
