@@ -435,6 +435,11 @@ function truncateText(value: string, maxLength: number) {
   return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
 }
 
+function isCommandOutputExecutionItem(item: ChatMessageExecutionItem) {
+  const detail = item.detail ?? "";
+  return item.kind === "tool" && (detail.includes("[stdout]") || detail.includes("[stderr]"));
+}
+
 function toPersistedMessage(message: ChatMessage, mode: Exclude<PersistenceMode, "minimal">) {
   const contentLimit =
     mode === "normal" ? NORMAL_MESSAGE_CONTENT_LIMIT : COMPACT_MESSAGE_CONTENT_LIMIT;
@@ -453,7 +458,11 @@ function toPersistedMessage(message: ChatMessage, mode: Exclude<PersistenceMode,
     executionItems: (message.executionItems ?? []).slice(-EXECUTION_ITEM_LIMIT).map((item) => ({
       ...item,
       text: truncateText(item.text, EXECUTION_ITEM_TEXT_LIMIT),
-      detail: item.detail ? truncateText(item.detail, EXECUTION_ITEM_DETAIL_LIMIT) : undefined,
+      detail: item.detail
+        ? mode === "normal" && isCommandOutputExecutionItem(item)
+          ? item.detail
+          : truncateText(item.detail, EXECUTION_ITEM_DETAIL_LIMIT)
+        : undefined,
     })),
   };
 }

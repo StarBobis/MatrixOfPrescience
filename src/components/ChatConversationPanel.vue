@@ -1,7 +1,15 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
-import { CircleClose, FolderOpened, Promotion, RefreshLeft, Tools } from "@element-plus/icons-vue";
+import { ElMessage } from "element-plus";
+import {
+  CircleClose,
+  CopyDocument,
+  FolderOpened,
+  Promotion,
+  RefreshLeft,
+  Tools,
+} from "@element-plus/icons-vue";
 import { useI18n } from "vue-i18n";
 import PatchApprovalPanel from "./PatchApprovalPanel.vue";
 import { getAvatarSrc } from "../utils/avatar";
@@ -866,6 +874,95 @@ function highlightExecutionCode(code: string, language?: string) {
     .join("\n");
 }
 
+function fallbackCopyText(text: string) {
+  const textArea = document.createElement("textarea");
+  textArea.value = text;
+  textArea.setAttribute("readonly", "true");
+  textArea.style.position = "fixed";
+  textArea.style.left = "-9999px";
+  textArea.style.top = "0";
+  document.body.appendChild(textArea);
+  textArea.select();
+
+  try {
+    return document.execCommand("copy");
+  } finally {
+    document.body.removeChild(textArea);
+  }
+}
+
+async function writeClipboardText(text: string) {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+
+  if (!fallbackCopyText(text)) {
+    throw new Error("Clipboard copy failed.");
+  }
+}
+
+async function copyText(text: string) {
+  if (!text.trim()) {
+    return;
+  }
+
+  try {
+    await writeClipboardText(text);
+    ElMessage.success(t("chat.copy.success"));
+  } catch {
+    ElMessage.error(t("chat.copy.failed"));
+  }
+}
+
+function formatExecutionItemForCopy(item: ChatMessageExecutionItem, index: number) {
+  const title = `${index + 1}. [${getExecutionKindLabel(item)}] ${item.text}`.trim();
+  const detail = item.detail?.trim();
+
+  return detail ? `${title}\n\n${detail}` : title;
+}
+
+function getMessageCopyText(message: ChatMessage) {
+  const sections = [`# ${message.modelName}`];
+  const meta = [
+    props.statusText[message.status],
+    getMessageApiModel(message),
+    message.time,
+  ].filter(Boolean);
+
+  if (meta.length > 0) {
+    sections.push(meta.join(" · "));
+  }
+
+  if (message.content.trim()) {
+    sections.push(`## ${t("chat.copy.generatedText")}\n${message.content.trim()}`);
+  }
+
+  const executionItems = getExecutionItems(message);
+
+  if (executionItems.length > 0) {
+    sections.push(
+      `## ${t("chat.execution.title")}\n${executionItems
+        .map((item, index) => formatExecutionItemForCopy(item, index))
+        .join("\n\n")}`,
+    );
+  }
+
+  return sections.join("\n\n");
+}
+
+function copyMessage(message: ChatMessage) {
+  void copyText(getMessageCopyText(message));
+}
+
+function copyExecutionBlock(block: ExecutionRenderBlock) {
+  void copyText(block.text);
+}
+
+function copyExecutionDetail(item: ChatMessageExecutionItem) {
+  void copyText(item.detail ?? "");
+}
+
 function hasContextUsage(message: ChatMessage) {
   return Number.isFinite(message.contextUsedTokens) && Number.isFinite(message.contextLimitTokens);
 }
@@ -1114,7 +1211,16 @@ defineExpose({
               <div class="execution-copy">
                 <div v-if="block.type === 'code'" class="execution-code-block">
                   <div class="execution-code-header">
-                    {{ formatExecutionCodeLanguage(block.language) }}
+                    <span>{{ formatExecutionCodeLanguage(block.language) }}</span>
+                    <button
+                      class="execution-copy-button"
+                      type="button"
+                      :title="t('chat.copy.copyCode')"
+                      :aria-label="t('chat.copy.copyCode')"
+                      @click="copyExecutionBlock(block)"
+                    >
+                      <el-icon><CopyDocument /></el-icon>
+                    </button>
                   </div>
                   <pre class="execution-code-pre"><code v-html="highlightExecutionCode(block.text, block.language)"></code></pre>
                 </div>
@@ -1124,7 +1230,18 @@ defineExpose({
                   class="execution-detail"
                   @toggle="scheduleFollowScroll()"
                 >
-                  <summary>{{ t("chat.execution.detail") }}</summary>
+                  <summary>
+                    <span>{{ t("chat.execution.detail") }}</span>
+                    <button
+                      class="execution-copy-button"
+                      type="button"
+                      :title="t('chat.copy.copyDetail')"
+                      :aria-label="t('chat.copy.copyDetail')"
+                      @click.stop.prevent="copyExecutionDetail(block.item)"
+                    >
+                      <el-icon><CopyDocument /></el-icon>
+                    </button>
+                  </summary>
                   <pre>{{ block.item.detail }}</pre>
                 </details>
               </div>
@@ -1150,44 +1267,55 @@ defineExpose({
               <span v-else class="activity-empty">{{ statusText[message.status] }}</span>
             </div>
 
-            <el-tooltip
-              v-if="hasContextUsage(message)"
-              placement="top"
-              effect="light"
-              :show-after="180"
-            >
-              <template #content>
-                <div class="context-tooltip">
-                  <strong>
-                    {{ t("chat.context.used", {
-                      used: formatTokenCount(message.contextUsedTokens),
-                      total: formatTokenCount(message.contextLimitTokens),
-                    }) }}
-                  </strong>
-                  <span>{{ t("chat.context.percent", { percent: getContextPercent(message) }) }}</span>
-                  <span v-if="Number.isFinite(message.contextPromptTokens)">
-                    {{ t("chat.context.prompt", { tokens: formatTokenCount(message.contextPromptTokens) }) }}
+            <div class="message-status-actions">
+              <el-tooltip
+                v-if="hasContextUsage(message)"
+                placement="top"
+                effect="light"
+                :show-after="180"
+              >
+                <template #content>
+                  <div class="context-tooltip">
+                    <strong>
+                      {{ t("chat.context.used", {
+                        used: formatTokenCount(message.contextUsedTokens),
+                        total: formatTokenCount(message.contextLimitTokens),
+                      }) }}
+                    </strong>
+                    <span>{{ t("chat.context.percent", { percent: getContextPercent(message) }) }}</span>
+                    <span v-if="Number.isFinite(message.contextPromptTokens)">
+                      {{ t("chat.context.prompt", { tokens: formatTokenCount(message.contextPromptTokens) }) }}
+                    </span>
+                    <span v-if="Number.isFinite(message.contextCompletionTokens)">
+                      {{ t("chat.context.completion", { tokens: formatTokenCount(message.contextCompletionTokens) }) }}
+                    </span>
+                    <span v-if="hasCacheUsage(message)">
+                      {{ t("chat.context.cache", {
+                        rate: getCacheHitRate(message),
+                        hit: formatTokenCount(message.contextCacheHitTokens),
+                        miss: formatTokenCount(message.contextCacheMissTokens),
+                      }) }}
+                    </span>
+                  </div>
+                </template>
+                <span class="context-meter" :style="getContextRingStyle(message)">
+                  <span class="context-ring"></span>
+                  <span class="context-token-label">{{ formatTokenCount(message.contextUsedTokens) }}</span>
+                  <span v-if="hasCacheUsage(message)" class="context-cache-label">
+                    {{ t("chat.context.cacheShort", { rate: getCacheHitRate(message) }) }}
                   </span>
-                  <span v-if="Number.isFinite(message.contextCompletionTokens)">
-                    {{ t("chat.context.completion", { tokens: formatTokenCount(message.contextCompletionTokens) }) }}
-                  </span>
-                  <span v-if="hasCacheUsage(message)">
-                    {{ t("chat.context.cache", {
-                      rate: getCacheHitRate(message),
-                      hit: formatTokenCount(message.contextCacheHitTokens),
-                      miss: formatTokenCount(message.contextCacheMissTokens),
-                    }) }}
-                  </span>
-                </div>
-              </template>
-              <span class="context-meter" :style="getContextRingStyle(message)">
-                <span class="context-ring"></span>
-                <span class="context-token-label">{{ formatTokenCount(message.contextUsedTokens) }}</span>
-                <span v-if="hasCacheUsage(message)" class="context-cache-label">
-                  {{ t("chat.context.cacheShort", { rate: getCacheHitRate(message) }) }}
                 </span>
-              </span>
-            </el-tooltip>
+              </el-tooltip>
+              <button
+                class="message-copy-button"
+                type="button"
+                :title="t('chat.copy.copyMessage')"
+                :aria-label="t('chat.copy.copyMessage')"
+                @click="copyMessage(message)"
+              >
+                <el-icon><CopyDocument /></el-icon>
+              </button>
+            </div>
           </div>
 
           <div class="message-reactions">
@@ -1408,6 +1536,52 @@ defineExpose({
   flex: 1;
   flex-wrap: wrap;
   gap: 6px;
+}
+
+.message-status-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.message-copy-button,
+.execution-copy-button {
+  display: inline-grid;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid #cfe0d7;
+  color: #2f6f58;
+  background: #ffffff;
+  cursor: pointer;
+  transition: border-color 0.16s, color 0.16s, background 0.16s, box-shadow 0.16s;
+}
+
+.message-copy-button {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+}
+
+.execution-copy-button {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+}
+
+.message-copy-button:hover,
+.execution-copy-button:hover {
+  border-color: #86bda3;
+  color: #ffffff;
+  background: #2f7a61;
+  box-shadow: 0 4px 10px rgba(47, 122, 97, 0.16);
+}
+
+.message-copy-button .el-icon,
+.execution-copy-button .el-icon {
+  font-size: 13px;
 }
 
 .activity-empty {
@@ -1710,8 +1884,10 @@ defineExpose({
   display: flex;
   min-height: 28px;
   align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   border-bottom: 1px solid #e1e9e4;
-  padding: 5px 10px;
+  padding: 4px 6px 4px 10px;
   color: #557064;
   background: #f2f7f4;
   font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
@@ -1719,6 +1895,13 @@ defineExpose({
   font-weight: 800;
   line-height: 1.2;
   text-transform: uppercase;
+}
+
+.execution-code-header span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .execution-code-pre {
@@ -1782,12 +1965,23 @@ defineExpose({
 }
 
 .execution-detail summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
   min-height: 28px;
-  padding: 5px 9px;
+  padding: 4px 6px 4px 9px;
   cursor: pointer;
   color: #2f6f58;
   font-weight: 800;
   list-style: none;
+}
+
+.execution-detail summary > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .execution-detail summary::-webkit-details-marker {

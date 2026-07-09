@@ -172,12 +172,20 @@ pub(crate) fn tool_result_trace_step(tool_call: &Value, tool_message: &Value) ->
         )
     };
 
-    let detail = format!(
-        "Tool: {}\nResult characters: {}\n\n{}",
-        name,
-        content.chars().count(),
-        content
-    );
+    let detail = if name == "run_command" {
+        format!(
+            "Tool: {}\nResult characters: {}\n\nFull stdout/stderr is shown in the live command output entry above.",
+            name,
+            content.chars().count(),
+        )
+    } else {
+        format!(
+            "Tool: {}\nResult characters: {}\n\n{}",
+            name,
+            content.chars().count(),
+            content
+        )
+    };
 
     trace_step_with_detail("tool", text, detail)
 }
@@ -475,6 +483,11 @@ pub(crate) fn code_tools_schema(strict: bool) -> Value {
                             "description": "Timeout in milliseconds. Defaults to 30000 and is capped at 120000.",
                             "minimum": 1000,
                             "maximum": 120000
+                        },
+                        "env": {
+                            "type": "object",
+                            "additionalProperties": { "type": "string" },
+                            "description": "Optional environment variable overrides for the child process. The command still inherits the Matrix app process environment first."
                         }
                     },
                     "required": ["command"]
@@ -573,6 +586,27 @@ fn tool_arg_string_array(arguments: &Value, key: &str) -> Vec<String> {
                 .iter()
                 .filter_map(Value::as_str)
                 .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn tool_arg_string_map(arguments: &Value, key: &str) -> Vec<(String, String)> {
+    arguments
+        .get(key)
+        .and_then(Value::as_object)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|(name, value)| {
+                    let name = name.trim();
+
+                    if name.is_empty() || name.contains('=') {
+                        return None;
+                    }
+
+                    value.as_str().map(|value| (name.to_string(), value.to_string()))
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -1117,9 +1151,113 @@ fn apply_patch_tool(workspace: &Path, arguments: &Value) -> Result<String, Strin
     ))
 }
 
-fn run_workspace_command_tool(workspace: &Path, arguments: &Value) -> Result<String, String> {
+fn spawn_command_output_reader<R: Read + Send + 'static>(
+    mut reader: R,
+    stream: CommandOutputStream,
+    sender: Sender<CommandOutputEvent>,
+) -> thread::JoinHandle<()> {
+    thread::spawn(move || {
+        let mut buffer = [0_u8; COMMAND_STREAM_CHUNK_SIZE];
+
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read_len) => {
+                    let chunk = String::from_utf8_lossy(&buffer[..read_len]).to_string();
+
+                    if sender
+                        .send(CommandOutputEvent::Chunk(stream, chunk))
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Err(error) => {
+                    let _ = sender.send(CommandOutputEvent::ReadError(stream, error.to_string()));
+                    break;
+                }
+            }
+        }
+
+        let _ = sender.send(CommandOutputEvent::Done(stream));
+    })
+}
+
+fn emit_command_output_chunk(
+    stream_sink: &mut Option<&mut ToolStreamSink<'_>>,
+    stream: CommandOutputStream,
+    chunk: &str,
+) {
+    let Some(sink) = stream_sink.as_deref_mut() else {
+        return;
+    };
+
+    if chunk.is_empty() {
+        return;
+    }
+
+    sink(trace_step_with_detail(
+        "tool",
+        chunk.to_string(),
+        stream.label().to_string(),
+    ));
+}
+
+fn handle_command_output_event(
+    event: CommandOutputEvent,
+    stdout: &mut String,
+    stderr: &mut String,
+    stdout_done: &mut bool,
+    stderr_done: &mut bool,
+    stream_sink: &mut Option<&mut ToolStreamSink<'_>>,
+) {
+    match event {
+        CommandOutputEvent::Chunk(CommandOutputStream::Stdout, chunk) => {
+            stdout.push_str(&chunk);
+            emit_command_output_chunk(stream_sink, CommandOutputStream::Stdout, &chunk);
+        }
+        CommandOutputEvent::Chunk(CommandOutputStream::Stderr, chunk) => {
+            stderr.push_str(&chunk);
+            emit_command_output_chunk(stream_sink, CommandOutputStream::Stderr, &chunk);
+        }
+        CommandOutputEvent::ReadError(CommandOutputStream::Stdout, error) => {
+            *stdout_done = true;
+            stderr.push_str(&format!("\n[stdout read error] {}\n", error));
+        }
+        CommandOutputEvent::ReadError(CommandOutputStream::Stderr, error) => {
+            *stderr_done = true;
+            stderr.push_str(&format!("\n[stderr read error] {}\n", error));
+        }
+        CommandOutputEvent::Done(CommandOutputStream::Stdout) => {
+            *stdout_done = true;
+        }
+        CommandOutputEvent::Done(CommandOutputStream::Stderr) => {
+            *stderr_done = true;
+        }
+    }
+}
+
+fn drain_command_output_events(
+    receiver: &mpsc::Receiver<CommandOutputEvent>,
+    stdout: &mut String,
+    stderr: &mut String,
+    stdout_done: &mut bool,
+    stderr_done: &mut bool,
+    stream_sink: &mut Option<&mut ToolStreamSink<'_>>,
+) {
+    while let Ok(event) = receiver.try_recv() {
+        handle_command_output_event(event, stdout, stderr, stdout_done, stderr_done, stream_sink);
+    }
+}
+
+fn run_workspace_command_tool(
+    workspace: &Path,
+    arguments: &Value,
+    mut stream_sink: Option<&mut ToolStreamSink<'_>>,
+) -> Result<String, String> {
     let command = tool_arg_string(arguments, "command");
     let args = tool_arg_string_array(arguments, "args");
+    let env_overrides = tool_arg_string_map(arguments, "env");
     let timeout_ms = tool_arg_usize(arguments, "timeoutMs", 30_000, 1_000, 120_000) as u64;
     let cwd_arg = tool_arg_string(arguments, "cwd");
     let cwd = if cwd_arg.is_empty() {
@@ -1140,55 +1278,143 @@ fn run_workspace_command_tool(workspace: &Path, arguments: &Value) -> Result<Str
         return Err("run_command cwd must be a directory.".to_string());
     }
 
-    let mut child = Command::new(command)
+    let metadata = format!(
+        "workspace={}\ncwd={}\nenv_overrides={}\n",
+        workspace.display(),
+        cwd.display(),
+        env_overrides.len()
+    );
+    let mut command_builder = Command::new(command);
+    command_builder
         .current_dir(&cwd)
         .args(&args)
+        .envs(env_overrides.iter().map(|(name, value)| (name, value)))
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command_builder
         .spawn()
         .map_err(|error| format!("Failed to start command: {}", error))?;
 
+    let stdout_pipe = child
+        .stdout
+        .take()
+        .ok_or_else(|| "Failed to capture command stdout.".to_string())?;
+    let stderr_pipe = child
+        .stderr
+        .take()
+        .ok_or_else(|| "Failed to capture command stderr.".to_string())?;
+    let (sender, receiver) = mpsc::channel();
+    let stdout_reader =
+        spawn_command_output_reader(stdout_pipe, CommandOutputStream::Stdout, sender.clone());
+    let stderr_reader = spawn_command_output_reader(stderr_pipe, CommandOutputStream::Stderr, sender);
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    let mut stdout = String::new();
+    let mut stderr = String::new();
+    let mut stdout_done = false;
+    let mut stderr_done = false;
+    let mut status = None;
+
     loop {
-        if child
-            .try_wait()
-            .map_err(|error| format!("Failed to poll command: {}", error))?
-            .is_some()
-        {
+        drain_command_output_events(
+            &receiver,
+            &mut stdout,
+            &mut stderr,
+            &mut stdout_done,
+            &mut stderr_done,
+            &mut stream_sink,
+        );
+
+        if status.is_none() {
+            status = child
+                .try_wait()
+                .map_err(|error| format!("Failed to poll command: {}", error))?;
+        }
+
+        if status.is_some() && stdout_done && stderr_done {
             break;
         }
 
         if Instant::now() >= deadline {
             let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!("Command timed out after {} ms.", timeout_ms));
+            let _ = child
+                .wait()
+                .map_err(|error| format!("Failed to wait for timed-out command: {}", error))?;
+
+            while !(stdout_done && stderr_done) {
+                match receiver.recv_timeout(Duration::from_millis(100)) {
+                    Ok(event) => handle_command_output_event(
+                        event,
+                        &mut stdout,
+                        &mut stderr,
+                        &mut stdout_done,
+                        &mut stderr_done,
+                        &mut stream_sink,
+                    ),
+                    Err(RecvTimeoutError::Timeout) => break,
+                    Err(RecvTimeoutError::Disconnected) => break,
+                }
+            }
+
+            let _ = stdout_reader.join();
+            let _ = stderr_reader.join();
+            let combined = format!(
+                "{}Command timed out after {} ms.\nstdout:\n{}\nstderr:\n{}",
+                metadata,
+                timeout_ms,
+                stdout.trim(),
+                stderr.trim()
+            );
+            return Err(combined);
         }
 
-        std::thread::sleep(Duration::from_millis(50));
+        match receiver.recv_timeout(Duration::from_millis(50)) {
+            Ok(event) => handle_command_output_event(
+                event,
+                &mut stdout,
+                &mut stderr,
+                &mut stdout_done,
+                &mut stderr_done,
+                &mut stream_sink,
+            ),
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                if status.is_some() {
+                    break;
+                }
+            }
+        }
     }
 
-    let output = child
-        .wait_with_output()
-        .map_err(|error| format!("Failed to read command output: {}", error))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let code = output
-        .status
+    let _ = stdout_reader.join();
+    let _ = stderr_reader.join();
+    drain_command_output_events(
+        &receiver,
+        &mut stdout,
+        &mut stderr,
+        &mut stdout_done,
+        &mut stderr_done,
+        &mut stream_sink,
+    );
+
+    let status = status.ok_or_else(|| "Command ended without an exit status.".to_string())?;
+    let code = status
         .code()
         .map(|value| value.to_string())
         .unwrap_or_else(|| "terminated".to_string());
     let combined = format!(
-        "exit_code={}\nstdout:\n{}\nstderr:\n{}",
+        "{}exit_code={}\nstdout:\n{}\nstderr:\n{}",
+        metadata,
         code,
         stdout.trim(),
         stderr.trim()
     );
 
-    if !output.status.success() {
-        return Err(truncate_text(combined, 12_000));
+    if !status.success() {
+        return Err(combined);
     }
 
-    Ok(truncate_text(combined, 12_000))
+    Ok(combined)
 }
 
 pub(crate) fn validate_workspace(workspace_path: &str) -> Result<PathBuf, String> {
@@ -1713,4 +1939,106 @@ pub(crate) async fn apply_patch_proposal(
 
     let _ = fs::remove_file(patch_file);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_command_streams_output_before_process_exit() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("matrix-command-stream-test-{}", stamp));
+        fs::create_dir_all(&workspace).unwrap();
+        let workspace = fs::canonicalize(&workspace).unwrap();
+
+        #[cfg(windows)]
+        let (command, args) = (
+            "cmd",
+            vec![
+                "/C",
+                "echo first & powershell -NoProfile -Command Start-Sleep -Milliseconds 600",
+            ],
+        );
+        #[cfg(not(windows))]
+        let (command, args) = ("sh", vec!["-c", "printf 'first\\n'; sleep 0.6"]);
+
+        let mut first_chunk_at: Option<Instant> = None;
+        let mut chunks = Vec::new();
+        let mut sink = |step: ChatTraceStep| {
+            if first_chunk_at.is_none() {
+                first_chunk_at = Some(Instant::now());
+            }
+
+            chunks.push((step.detail.unwrap_or_default(), step.text));
+        };
+
+        let result = run_workspace_command_tool(
+            &workspace,
+            &json!({
+                "command": command,
+                "args": args,
+                "timeoutMs": 5_000
+            }),
+            Some(&mut sink),
+        )
+        .unwrap();
+        let returned_at = Instant::now();
+
+        assert!(result.contains("stdout:"));
+        assert!(result.contains("first"));
+        assert!(
+            chunks
+                .iter()
+                .any(|(stream, text)| stream == "stdout" && text.contains("first"))
+        );
+        assert!(
+            returned_at.duration_since(first_chunk_at.expect("expected a streamed chunk"))
+                >= Duration::from_millis(250)
+        );
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn run_command_reports_cwd_and_applies_env_overrides() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("matrix-command-env-test-{}", stamp));
+        let subdir = workspace.join("child");
+        fs::create_dir_all(&subdir).unwrap();
+        let workspace = fs::canonicalize(&workspace).unwrap();
+        let subdir = fs::canonicalize(&subdir).unwrap();
+
+        #[cfg(windows)]
+        let (command, args) = ("cmd", vec!["/C", "cd && echo %MOP_TEST_ENV%"]);
+        #[cfg(not(windows))]
+        let (command, args) = ("sh", vec!["-c", "pwd; printf '\\n%s\\n' \"$MOP_TEST_ENV\""]);
+
+        let result = run_workspace_command_tool(
+            &workspace,
+            &json!({
+                "command": command,
+                "args": args,
+                "cwd": "child",
+                "env": {
+                    "MOP_TEST_ENV": "hello-from-env"
+                },
+                "timeoutMs": 5_000
+            }),
+            None,
+        )
+        .unwrap();
+
+        assert!(result.contains(&format!("cwd={}", subdir.display())));
+        assert!(result.contains("env_overrides=1"));
+        assert!(result.contains("hello-from-env"));
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
 }

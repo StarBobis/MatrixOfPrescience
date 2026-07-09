@@ -136,6 +136,14 @@
       "prompt": "提示词：{tokens}",
       "used": "上下文：{used} / {total}"
     },
+    "copy": {
+      "copyCode": "复制代码",
+      "copyDetail": "复制详情",
+      "copyMessage": "复制消息和执行过程",
+      "failed": "复制失败",
+      "generatedText": "生成文本",
+      "success": "已复制"
+    },
     "onlineMembers": "{count} 群友在线",
     "queue": {
       "status": {
@@ -289,7 +297,7 @@
     "collaborationRule": "群聊协作规则：你能看到用户和其它群友已经发出的消息。不要只各说各话；需要回应、补充、质疑或修正其它群友观点时，请明确指出。若你的专业分工暂时不该发言，可以等待其它群友先说。",
     "codeContextGuide": "你可以基于以下工具输出讨论代码。优先用 CodeGraph 理解结构和调用链；如果缺少精确行号或局部细节，再用 read_file、search_files、list_files 或 glob_files 补充。需要编辑时，只能在当前工作区内并在安全模式允许时使用 write_file、apply_patch、create_directory、move_path、delete_path 或 run_command。若结果来自 LocalCommands，需要说明这是降级读取。CodeGraph 输出中的 `Found N symbols across M files` 只表示本次查询命中的相关源码范围，不是索引总文件数。",
     "codeContextTitle": "代码阅读工具结果：",
-    "codeToolGuide": "你可以使用当前工作区的代码工具：codegraph_explore 用于结构和调用链，read_file 用于读取精确行段，search_files 用于文本搜索，list_files 用于目录发现，glob_files 用于按文件名模式查找，write_file 用于创建或覆盖文件，apply_patch 用于统一 diff，create_directory、move_path、delete_path 用于目录和文件操作，run_command 用于运行工作区命令。架构问题先用 CodeGraph；缺少细节时继续调用文件/搜索工具。写入、删除、移动和命令工具只能在工作区内使用，并且必须符合当前工作流和安全策略。CodeGraph 输出中的 `Found N symbols across M files` 只表示本次查询命中的相关源码范围，不是索引总文件数。",
+    "codeToolGuide": "你可以使用当前工作区的代码工具：codegraph_explore 用于结构和调用链，read_file 用于读取精确行段，search_files 用于文本搜索，list_files 用于目录发现，glob_files 用于按文件名模式查找，write_file 用于创建或覆盖文件，apply_patch 用于统一 diff，create_directory、move_path、delete_path 用于目录和文件操作，run_command 用于运行工作区命令。run_command 会切换到返回结果中显示的 cwd，并继承 Matrix 应用进程环境；它不会自动加载用户 PowerShell profile、VS Developer Shell、nvm/fnm 等临时会话环境。需要这些环境时，请通过 env 参数显式传入变量，或运行对应的初始化脚本后再执行命令。架构问题先用 CodeGraph；缺少细节时继续调用文件/搜索工具。写入、删除、移动和命令工具只能在工作区内使用，并且必须符合当前工作流和安全策略。CodeGraph 输出中的 `Found N symbols across M files` 只表示本次查询命中的相关源码范围，不是索引总文件数。",
     "coreRole": "你的核心角色：",
     "localModeTitle": "本地 Agent 协作模式：",
     "modeAgent": "- Agent 模式：{value}",
@@ -329,6 +337,7 @@
   },
   "chatRuntime": {
     "callFailedContent": "调用失败：{error}",
+    "commandOutputStreaming": "正在捕获命令输出...",
     "consensusLimit": "本轮讨论达到共识轮次上限，仍存在分歧。请人工收束问题或调整群友角色后继续。",
     "decisionPendingContent": "正在判断是否需要发言...",
     "decisionWaitContent": "本轮先观望。",

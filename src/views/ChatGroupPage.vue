@@ -66,7 +66,7 @@ interface ChatCompletionResponse {
 
 interface ChatCompletionStreamEvent {
   streamId: string;
-  eventType: "traceChunk" | "traceStep" | "contentChunk" | "usage";
+  eventType: "traceChunk" | "traceStep" | "toolChunk" | "contentChunk" | "usage";
   traceKind?: ChatTraceStep["kind"];
   text: string;
   detail?: string;
@@ -177,6 +177,7 @@ const streamingTraceLines = new Map<
   string,
   { kind: ChatTraceStep["kind"]; itemId: string; index: number; text: string }
 >();
+const streamingToolOutputs = new Map<string, { itemId: string; detail: string }>();
 
 const newGroupName = ref(t("defaults.newGroup.name"));
 const newGroupDescription = ref(t("defaults.newGroup.description"));
@@ -1227,15 +1228,30 @@ function updateThoughtStepAt(messageId: string, index: number, step: string) {
   settingsStore.updateMessage(messageId, { thoughtSteps: thoughtSteps.slice(-MAX_MESSAGE_THOUGHT_STEPS) });
 }
 
-function updateExecutionItem(messageId: string, itemId: string, patch: Partial<ChatMessageExecutionItem>) {
+function updateExecutionItem(
+  messageId: string,
+  itemId: string,
+  patch: Partial<ChatMessageExecutionItem>,
+  options: { preserveRawText?: boolean } = {},
+) {
   const message = activeMessages.value.find((item) => item.id === messageId);
   const executionItems = (message?.executionItems ?? []).map((item) =>
     item.id === itemId
       ? {
           ...item,
           ...patch,
-          text: patch.text ? limitRuntimeText(patch.text, MAX_TRACE_TEXT_CHARS) : item.text,
-          detail: patch.detail ? limitRuntimeText(patch.detail, MAX_TRACE_DETAIL_CHARS) : item.detail,
+          text:
+            patch.text === undefined
+              ? item.text
+              : options.preserveRawText
+                ? patch.text
+                : limitRuntimeText(patch.text, MAX_TRACE_TEXT_CHARS),
+          detail:
+            patch.detail === undefined
+              ? item.detail
+              : options.preserveRawText
+                ? patch.detail
+                : limitRuntimeText(patch.detail, MAX_TRACE_DETAIL_CHARS),
         }
       : item,
   );
@@ -1313,6 +1329,75 @@ function appendStreamingTraceChunk(
   });
 }
 
+function formatToolOutputChunk(stream: string, chunk: string) {
+  const normalized = chunk.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const lines = normalized.split("\n");
+
+  return lines
+    .map((line, index) => {
+      if (!line && index === lines.length - 1) {
+        return "";
+      }
+
+      return `[${stream}] ${line}`;
+    })
+    .join("\n");
+}
+
+function latestToolOutputLine(detail: string) {
+  const lines = detail
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  return lines.length > 0 ? lines[lines.length - 1] : t("chatRuntime.commandOutputStreaming");
+}
+
+function appendStreamingToolOutputChunk(messageId: string, payload: ChatCompletionStreamEvent) {
+  const chunk = payload.text.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+
+  if (!chunk) {
+    return;
+  }
+
+  const stream = payload.detail === "stderr" ? "stderr" : "stdout";
+  let current = streamingToolOutputs.get(messageId);
+
+  if (!current) {
+    current = {
+      itemId: addExecutionItem(
+        messageId,
+        "tool",
+        t("chatRuntime.commandOutputStreaming"),
+        "running",
+      ),
+      detail: "",
+    };
+  }
+
+  const nextDetail = `${current.detail}${current.detail ? "\n" : ""}${formatToolOutputChunk(stream, chunk)}`;
+  current.detail = nextDetail;
+  streamingToolOutputs.set(messageId, current);
+
+  if (current.itemId) {
+    updateExecutionItem(messageId, current.itemId, {
+      text: latestToolOutputLine(nextDetail),
+      status: "running",
+      detail: nextDetail,
+    }, { preserveRawText: true });
+  }
+}
+
+function flushStreamingToolOutput(messageId: string, status: ChatMessageExecutionStatus = "done") {
+  const current = streamingToolOutputs.get(messageId);
+
+  if (current?.itemId) {
+    updateExecutionItem(messageId, current.itemId, { status });
+  }
+
+  streamingToolOutputs.delete(messageId);
+}
+
 function appendStreamingContentChunk(messageId: string, chunk: string) {
   if (!chunk) {
     return;
@@ -1342,10 +1427,16 @@ function applyCompletionStreamEvent(messageId: string, payload: ChatCompletionSt
     return;
   }
 
+  if (payload.eventType === "toolChunk") {
+    appendStreamingToolOutputChunk(messageId, payload);
+    return;
+  }
+
   const traceKind = payload.traceKind ?? "reasoning";
 
   if (traceKind === "tool") {
     flushStreamingTraceLine(messageId);
+    flushStreamingToolOutput(messageId, inferToolActivityStatus(payload.text));
     addActivityItem(
       messageId,
       "tool",
@@ -1408,11 +1499,13 @@ async function invokeStreamingCompletion(
   } finally {
     unlisten();
     flushStreamingTraceLine(messageId);
+    flushStreamingToolOutput(messageId);
   }
 }
 
 function releasePendingMessage(messageId: string, startedAt?: number) {
   flushStreamingTraceLine(messageId);
+  flushStreamingToolOutput(messageId);
   streamingContent.delete(messageId);
   stopSpeakingTimer(messageId, startedAt);
   pendingMessageIds.value = pendingMessageIds.value.filter((id) => id !== messageId);

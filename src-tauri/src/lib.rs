@@ -487,7 +487,11 @@ async fn chat_completion(
                     let call_step = tool_call_trace_step(tool_call);
                     emit_trace_step(&app, stream_id.as_deref(), &call_step);
                     append_trace_steps(&mut trace_steps, vec![call_step]);
-                    let tool_result = execute_code_tool_call(workspace, tool_call);
+                    let mut stream_tool_output = |step: ChatTraceStep| {
+                        emit_tool_chunk(&app, stream_id.as_deref(), &step);
+                    };
+                    let tool_result =
+                        execute_code_tool_call(workspace, tool_call, Some(&mut stream_tool_output));
                     let result_step = tool_result_trace_step(tool_call, &tool_result);
                     emit_trace_step(&app, stream_id.as_deref(), &result_step);
                     append_trace_steps(&mut trace_steps, vec![result_step]);
@@ -781,6 +785,18 @@ fn emit_trace_step(app: &AppHandle, stream_id: Option<&str>, step: &ChatTraceSte
         app,
         stream_id,
         "traceStep",
+        Some(&step.kind),
+        step.text.clone(),
+        step.detail.clone(),
+        None,
+    );
+}
+
+fn emit_tool_chunk(app: &AppHandle, stream_id: Option<&str>, step: &ChatTraceStep) {
+    emit_stream_event(
+        app,
+        stream_id,
+        "toolChunk",
         Some(&step.kind),
         step.text.clone(),
         step.detail.clone(),
