@@ -372,6 +372,9 @@ async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletio
             let trimmed = reasoning_effort.trim();
             if !trimmed.is_empty() && trimmed != "off" {
                 payload["reasoning_effort"] = json!(trimmed);
+                if is_deepseek_provider(&request.provider_name, &request.base_url) {
+                    payload["thinking"] = json!({ "type": "enabled" });
+                }
             }
         }
 
@@ -426,6 +429,11 @@ async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletio
     ))
 }
 
+fn is_deepseek_provider(provider_name: &str, base_url: &str) -> bool {
+    provider_name.to_ascii_lowercase().contains("deepseek")
+        || base_url.to_ascii_lowercase().contains("deepseek")
+}
+
 fn codegraph_tools_schema() -> Value {
     json!([
         {
@@ -441,8 +449,7 @@ fn codegraph_tools_schema() -> Value {
                             "description": "The symbols, files, call flow, or implementation question to inspect."
                         }
                     },
-                    "required": ["query"],
-                    "additionalProperties": false
+                    "required": ["query"]
                 }
             }
         }
@@ -490,18 +497,18 @@ fn execute_code_tool_call(workspace: &Path, tool_call: &Value) -> Value {
     let name = function.get("name").and_then(Value::as_str).unwrap_or("");
     let arguments = function
         .get("arguments")
-        .and_then(Value::as_str)
-        .unwrap_or("{}");
+        .cloned()
+        .unwrap_or_else(|| json!("{}"));
 
     let content = if name == "codegraph_explore" {
-        let query = serde_json::from_str::<Value>(arguments)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("query")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-            })
+        let parsed_arguments = if let Some(arguments_text) = arguments.as_str() {
+            serde_json::from_str::<Value>(arguments_text).unwrap_or(Value::Null)
+        } else {
+            arguments
+        };
+        let query = parsed_arguments
+            .get("query")
+            .and_then(Value::as_str)
             .unwrap_or_default();
 
         if query.trim().is_empty() {
