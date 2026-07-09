@@ -56,7 +56,7 @@ const reasoningEffortOptions = computed<Array<{ label: string; value: AgentReaso
 
 defineProps<{
   members: AgentModel[];
-  historicalMembers: AgentModel[];
+  friends: AgentModel[];
   ownerProfile: OwnerProfile;
   getProviderLabel: (provider: ProviderId) => string;
   providerOptions: Array<{ label: string; value: ProviderId }>;
@@ -65,7 +65,7 @@ defineProps<{
 
 const emit = defineEmits<{
   addMember: [provider: ProviderId];
-  addHistoricalMember: [memberId: string];
+  addFriendMember: [friendId: string];
   removeMember: [memberId: string];
   renameMember: [memberId: string, name: string];
   updateOwnerProfile: [profile: OwnerProfile];
@@ -218,14 +218,14 @@ function finishAnnouncementEdit() {
 
     <GroupMemberPanel
       :members="members"
-      :historical-members="historicalMembers"
+      :friends="friends"
       :owner-profile="ownerProfile"
       :get-provider-label="getProviderLabel"
       :provider-options="providerOptions"
       :model-presets="modelPresets"
       :reasoning-effort-options="reasoningEffortOptions"
       @add-member="(provider) => emit('addMember', provider)"
-      @add-historical-member="(memberId) => emit('addHistoricalMember', memberId)"
+      @add-friend-member="(friendId) => emit('addFriendMember', friendId)"
       @remove-member="(memberId) => emit('removeMember', memberId)"
       @rename-member="(memberId, name) => emit('renameMember', memberId, name)"
       @update-owner-profile="(profile) => emit('updateOwnerProfile', profile)"

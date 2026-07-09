@@ -1,14 +1,16 @@
 <script setup lang="ts">
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Close, FullScreen, MagicStick, Minus, Setting } from "@element-plus/icons-vue";
+import { Close, FullScreen, MagicStick, Minus, Setting, UserFilled } from "@element-plus/icons-vue";
 import { useI18n } from "vue-i18n";
 
 defineProps<{
   settingsActive: boolean;
+  friendsActive: boolean;
 }>();
 
 const emit = defineEmits<{
   home: [];
+  toggleFriends: [];
   toggleSettings: [];
 }>();
 
@@ -41,8 +43,20 @@ async function closeWindow() {
     <div class="window-controls">
       <button
         class="window-button"
+        :class="{ active: friendsActive }"
+        :title="t('common.friendLibrary')"
+        :aria-label="t('common.friendLibrary')"
+        @click="emit('toggleFriends')"
+      >
+        <el-icon>
+          <UserFilled />
+        </el-icon>
+      </button>
+      <button
+        class="window-button"
         :class="{ active: settingsActive }"
         :title="t('common.settings')"
+        :aria-label="t('common.settings')"
         @click="emit('toggleSettings')"
       >
         <el-icon>

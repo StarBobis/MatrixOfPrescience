@@ -17,6 +17,7 @@
     "ownerRole": "群主",
     "reject": "拒绝",
     "settings": "设置",
+    "friendLibrary": "好友库",
     "systemName": "系统",
     "temperature": "温度",
     "yes": "是"
@@ -26,7 +27,7 @@
     "cache": {
       "chooseTitle": "选择缓存文件夹",
       "defaultPlaceholder": "默认 AppData 文件夹",
-      "description": "设置、历史群友和缓存头像会以 JSON 与文件形式保存到：{path}",
+      "description": "设置、好友库和缓存头像会以 JSON 与文件形式保存到：{path}",
       "title": "缓存文件夹"
     },
     "profile": {
@@ -46,6 +47,17 @@
       "zhCN": "简体中文"
     }
   },
+  "friends": {
+    "addDeepSeek": "新建 DeepSeek 好友",
+    "addOpenAI": "新建 ChatGPT 好友",
+    "count": "{count} 位好友",
+    "emptyDescription": "先在这里创建好友，再把它加入任意群聊。",
+    "emptyTitle": "还没有好友",
+    "eyebrow": "我的好友",
+    "remove": "删除好友",
+    "title": "好友库",
+    "usedInGroups": "已加入 {count} 个群"
+  },
   "groups": {
     "brandTitle": "Agent 群聊",
     "createTitle": "新建聊天群",
@@ -63,7 +75,7 @@
   },
   "members": {
     "addDeepSeekMember": "新建 DeepSeek 群友",
-    "addFromHistory": "从历史群友添加",
+    "addFromFriends": "从我的好友里选",
     "addOpenAIMember": "新建 ChatGPT 群友",
     "addTitle": "添加群友",
     "adminQuestion": "设为管理员",
@@ -128,11 +140,15 @@
     "queue": {
       "status": {
         "checking": "判断中",
+        "consensus": "共识中",
+        "followup": "待补充",
         "queued": "排队中",
         "speaking": "发言中",
+        "voted": "已投票",
+        "voting": "投票中",
         "waiting": "观望中"
       },
-      "title": "发言队列",
+      "title": "群聊状态",
       "stopAll": "停止所有发言和排队"
     },
     "sendToMembers": "发给 {count} 个群友",
@@ -215,6 +231,7 @@
     "memberAlreadyInCurrentGroup": "这个群友已经在当前群里了",
     "memberNameRequired": "群友名称不能为空",
     "memberNamesUnique": "群友名称必须不同",
+    "friendInUse": "这个好友仍在群聊中，先从相关群聊移除后再删除。",
     "newGroupNeedsMember": "新群至少需要一个虚拟群友",
     "patchApplied": "补丁已应用",
     "patchApplyFailed": "补丁应用失败",
@@ -315,8 +332,8 @@
     "consensusLimit": "本轮讨论达到共识轮次上限，仍存在分歧。请人工收束问题或调整群友角色后继续。",
     "decisionPendingContent": "正在判断是否需要发言...",
     "decisionWaitContent": "本轮先观望。",
-    "addressReplyRule": "你的最终可见回复必须以 @{name} 开头。如果你是在回复某个群友，就 @ 那个群友；如果是在回复用户，就 @ 用户。",
-    "defaultResponderRule": "这条消息没有明确 @ 群友。你是本轮的首要回复者，请直接回答用户消息；其它群友只会在确有必要时补充。",
+    "addressReplyRule": "你的最终可见回复必须以 {'@'}{name} 开头。如果你是在回复某个群友，就 {'@'} 那个群友；如果是在回复用户，就 {'@'} 用户。",
+    "defaultResponderRule": "这条消息没有明确 {'@'} 群友。你是本轮的首要回复者，请直接回答用户消息；其它群友只会在确有必要时补充。",
     "disagreementRule1": "你刚才不同意上一条发言。请明确指出分歧点，并给出能推动集体达成一致的修正方案。",
     "disagreementRule2": "不要重复已经说过的内容；优先提出可被其它群友同意的结论。",
     "inspectFailed": "代码阅读工具调用失败：{error}",

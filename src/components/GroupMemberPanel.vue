@@ -7,7 +7,7 @@ import type { AgentModel, AgentReasoningEffort, OwnerProfile, ProviderId } from 
 
 const props = defineProps<{
   members: AgentModel[];
-  historicalMembers: AgentModel[];
+  friends: AgentModel[];
   ownerProfile: OwnerProfile;
   getProviderLabel: (provider: ProviderId) => string;
   providerOptions: Array<{ label: string; value: ProviderId }>;
@@ -17,7 +17,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   addMember: [provider: ProviderId];
-  addHistoricalMember: [memberId: string];
+  addFriendMember: [friendId: string];
   removeMember: [memberId: string];
   renameMember: [memberId: string, name: string];
   updateOwnerProfile: [profile: OwnerProfile];
@@ -287,20 +287,20 @@ onBeforeUnmount(() => {
           <div class="add-member-card">
             <strong>{{ t("members.addTitle") }}</strong>
             <el-select
-              :placeholder="t('members.addFromHistory')"
+              :placeholder="t('members.addFromFriends')"
               filterable
               clearable
-              @change="(memberId: string) => memberId && emit('addHistoricalMember', memberId)"
+              @change="(friendId: string) => friendId && emit('addFriendMember', friendId)"
             >
               <el-option
-                v-for="member in historicalMembers"
-                :key="member.id"
-                :label="member.name"
-                :value="member.id"
+                v-for="friend in friends"
+                :key="friend.id"
+                :label="friend.name"
+                :value="friend.id"
                 :disabled="
                   members.some(
                     (item) =>
-                      item.name.trim().toLocaleLowerCase() === member.name.trim().toLocaleLowerCase(),
+                      item.libraryId === friend.libraryId || item.libraryId === friend.id,
                   )
                 "
               />

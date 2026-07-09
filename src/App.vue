@@ -3,8 +3,9 @@ import { ref } from "vue";
 import TitleBar from "./views/TitleBar.vue";
 import ChatGroupPage from "./views/ChatGroupPage.vue";
 import SettingsPage from "./views/SettingsPage.vue";
+import FriendLibraryPage from "./views/FriendLibraryPage.vue";
 
-type PageName = "chat" | "settings";
+type PageName = "chat" | "settings" | "friends";
 
 const currentPage = ref<PageName>("chat");
 const previousPage = ref<PageName>("chat");
@@ -30,17 +31,30 @@ function openSettingsPage() {
 
   currentPage.value = "settings";
 }
+
+function toggleFriendsPage() {
+  if (currentPage.value === "friends") {
+    currentPage.value = previousPage.value;
+    return;
+  }
+
+  previousPage.value = currentPage.value;
+  currentPage.value = "friends";
+}
 </script>
 
 <template>
   <div class="app-frame" @contextmenu.prevent>
     <TitleBar
       :settings-active="currentPage === 'settings'"
+      :friends-active="currentPage === 'friends'"
       @home="openChatPage"
+      @toggle-friends="toggleFriendsPage"
       @toggle-settings="toggleSettingsPage"
     />
     <ChatGroupPage v-if="currentPage === 'chat'" @open-settings="openSettingsPage" />
-    <SettingsPage v-else />
+    <SettingsPage v-else-if="currentPage === 'settings'" />
+    <FriendLibraryPage v-else />
   </div>
 </template>
 

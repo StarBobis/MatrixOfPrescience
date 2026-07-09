@@ -10,7 +10,7 @@ defineProps<{
   description: string;
   announcement: string;
   members: AgentModel[];
-  historicalMembers: AgentModel[];
+  friends: AgentModel[];
   providerOptions: Array<{ label: string; value: ProviderId }>;
   modelPresets: Record<ProviderId, string[]>;
 }>();
@@ -20,7 +20,7 @@ const emit = defineEmits<{
   "update:description": [value: string];
   "update:announcement": [value: string];
   addDraftMember: [provider: ProviderId];
-  addDraftMemberFromHistory: [memberId: string];
+  addDraftMemberFromFriend: [friendId: string];
   removeDraftMember: [memberId: string];
   updateDraftMemberProvider: [member: AgentModel];
   createGroup: [];
@@ -54,20 +54,20 @@ const { t } = useI18n();
 
     <div class="settings-toolbar">
       <el-select
-        class="history-member-select"
-        :placeholder="t('members.addFromHistory')"
+        class="friend-member-select"
+        :placeholder="t('members.addFromFriends')"
         filterable
         clearable
-        @change="(memberId: string) => memberId && emit('addDraftMemberFromHistory', memberId)"
+        @change="(friendId: string) => friendId && emit('addDraftMemberFromFriend', friendId)"
       >
         <el-option
-          v-for="member in historicalMembers"
-          :key="member.id"
-          :label="member.name"
-          :value="member.id"
+          v-for="friend in friends"
+          :key="friend.id"
+          :label="friend.name"
+          :value="friend.id"
           :disabled="
             members.some(
-              (item) => item.name.trim().toLocaleLowerCase() === member.name.trim().toLocaleLowerCase(),
+              (item) => item.libraryId === friend.libraryId || item.libraryId === friend.id,
             )
           "
         />
@@ -148,7 +148,7 @@ const { t } = useI18n();
   margin-bottom: 14px;
 }
 
-.history-member-select {
+.friend-member-select {
   width: 220px;
 }
 

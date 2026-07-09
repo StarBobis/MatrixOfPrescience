@@ -150,7 +150,7 @@ const TRACE_TRUNCATED_MARKER = "\n[trace truncated]";
 
 const { t } = useI18n();
 const settingsStore = useSettingsStore();
-const { providers, groups, activeGroup, activeMembers, ownerProfile, historicalMembers } =
+const { providers, groups, activeGroup, activeMembers, ownerProfile, friends } =
   storeToRefs(settingsStore);
 const legacySystemModelName = "\u7cfb\u7edf";
 const statusText = computed<Record<MessageStatus, string>>(() => ({
@@ -166,7 +166,11 @@ const sending = ref(false);
 const activeRunId = ref("");
 const pendingMessageIds = ref<string[]>([]);
 const speakerQueue = ref<SpeakerQueueItem[]>([]);
-const chatPanel = ref<InstanceType<typeof ChatConversationPanel> | null>(null);
+type ChatConversationPanelInstance = InstanceType<typeof ChatConversationPanel> & {
+  collapseExecutionPanel: (messageId: string) => void;
+};
+
+const chatPanel = ref<ChatConversationPanelInstance | null>(null);
 const speakingTimers = new Map<string, number>();
 const streamingContent = new Map<string, string>();
 const streamingTraceLines = new Map<
@@ -221,7 +225,7 @@ function getProviderLabel(provider: ProviderId) {
 }
 
 function renderMarkdown(source: string) {
-  return markdown.render(source);
+  return markdown.render(annotateMarkdownCodeFences(source));
 }
 
 function estimateTextTokens(text: string) {
@@ -350,20 +354,18 @@ function addDraftMember(provider: ProviderId = "openai") {
   newGroupMembers.value.push(member);
 }
 
-function addDraftMemberFromHistory(memberId: string) {
-  const source = historicalMembers.value.find((member) => member.id === memberId);
+function addDraftMemberFromFriend(friendId: string) {
+  const source = friends.value.find((member) => member.id === friendId);
 
   if (
     source &&
-    newGroupMembers.value.some(
-      (item) => item.name.trim().toLocaleLowerCase() === source.name.trim().toLocaleLowerCase(),
-    )
+    newGroupMembers.value.some((item) => item.libraryId === source.libraryId)
   ) {
     ElMessage.warning(t("messages.draftMemberAlreadyInNewGroup"));
     return;
   }
 
-  const member = settingsStore.cloneHistoricalMember(memberId, newGroupMembers.value);
+  const member = settingsStore.cloneFriend(friendId, newGroupMembers.value);
 
   if (!member) {
     return;
@@ -433,8 +435,8 @@ function addMember(provider: ProviderId = "openai") {
   settingsStore.addMember(provider);
 }
 
-function addHistoricalMember(memberId: string) {
-  if (!settingsStore.addMemberFromHistory(memberId)) {
+function addFriendMember(friendId: string) {
+  if (!settingsStore.addMemberFromFriend(friendId)) {
     ElMessage.warning(t("messages.memberAlreadyInCurrentGroup"));
   }
 }
@@ -662,8 +664,52 @@ function inferMarkdownCodeFenceLanguage(code: string) {
   return "text";
 }
 
+function repairMarkdownCodeFences(content: string) {
+  const normalized = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const lines = normalized.split("\n");
+  const repairedLines: string[] = [];
+  let openFence: { indent: string; marker: string } | null = null;
+  const openingFencePattern = /^([ \t]*)(`{3,})([A-Za-z0-9_+.#-]*)[ \t]*$/;
+
+  for (const line of lines) {
+    const openingMatch = line.match(openingFencePattern);
+
+    if (!openFence) {
+      if (openingMatch) {
+        openFence = {
+          indent: openingMatch[1],
+          marker: openingMatch[2],
+        };
+      }
+
+      repairedLines.push(line);
+      continue;
+    }
+
+    const trimmed = line.trim();
+    const closingPattern = new RegExp(`^\`{${openFence.marker.length},}\\s*$`);
+    const malformedClosingPattern = new RegExp(
+      `^\`{${openFence.marker.length},}[A-Za-z0-9_+.#-]+\\s*$`,
+    );
+
+    if (closingPattern.test(trimmed) || malformedClosingPattern.test(trimmed)) {
+      repairedLines.push(`${openFence.indent}${openFence.marker}`);
+      openFence = null;
+      continue;
+    }
+
+    repairedLines.push(line);
+  }
+
+  if (openFence) {
+    repairedLines.push(`${openFence.indent}${openFence.marker}`);
+  }
+
+  return repairedLines.join("\n");
+}
+
 function annotateMarkdownCodeFences(content: string) {
-  return content.replace(
+  return repairMarkdownCodeFences(content).replace(
     /(^|\n)([ \t]*)```\s*\n([\s\S]*?)\n[ \t]*```/g,
     (match, prefix: string, indent: string, code: string) => {
       if (!code.trim()) {
@@ -684,6 +730,27 @@ function ensureAddressedReply(content: string, targetName: string) {
   }
 
   return `@${target}\n\n${normalizedContent}`;
+}
+
+function getInterruptedContent(messageId: string, fallbackContent = "") {
+  const streamedContent = streamingContent.get(messageId)?.trim();
+  const visibleContent = streamedContent || fallbackContent.trim();
+  const ignoredPlaceholders = new Set([
+    t("chatRuntime.pendingContent"),
+    t("chatRuntime.decisionPendingContent"),
+    t("chatRuntime.decisionWaitContent"),
+    t("chatRuntime.interruptedContent"),
+  ]);
+
+  if (!visibleContent || ignoredPlaceholders.has(visibleContent)) {
+    return t("chatRuntime.interruptedContent");
+  }
+
+  if (visibleContent.endsWith(t("chatRuntime.interruptedContent"))) {
+    return visibleContent;
+  }
+
+  return `${annotateMarkdownCodeFences(visibleContent).trimEnd()}\n\n${t("chatRuntime.interruptedContent")}`;
 }
 
 function buildAddressedResponseRule(baseRule: string, targetName: string) {
@@ -1251,7 +1318,13 @@ function appendStreamingContentChunk(messageId: string, chunk: string) {
     return;
   }
 
-  const nextContent = `${streamingContent.get(messageId) ?? ""}${chunk}`;
+  const previousContent = streamingContent.get(messageId) ?? "";
+
+  if (!previousContent) {
+    chatPanel.value?.collapseExecutionPanel(messageId);
+  }
+
+  const nextContent = `${previousContent}${chunk}`;
   streamingContent.set(messageId, nextContent);
   settingsStore.updateMessage(messageId, {
     content: nextContent,
@@ -1382,10 +1455,11 @@ function stopGeneration() {
 
   for (const messageId of pendingMessageIds.value) {
     const message = activeMessages.value.find((item) => item.id === messageId);
+    const interruptedContent = getInterruptedContent(messageId, message?.content ?? "");
     releasePendingMessage(messageId, message?.startedAt);
     settingsStore.updateMessage(messageId, {
       status: "interrupted",
-      content: t("chatRuntime.interruptedContent"),
+      content: interruptedContent,
     });
     addActivityItem(messageId, "status", t("chatRuntime.interruptedStep"), "interrupted");
   }
@@ -1642,9 +1716,11 @@ async function askMember(
       return null;
     }
 
+    chatPanel.value?.collapseExecutionPanel(pendingId);
+    const finalContent = ensureAddressedReply(response.content, replyTargetName);
     settingsStore.updateMessage(pendingId, {
       status: "done",
-      content: ensureAddressedReply(response.content, replyTargetName),
+      content: finalContent,
     });
     applyCompletionUsage(pendingId, response.usage);
     releasePendingMessage(pendingId, startedAt);
@@ -1652,24 +1728,26 @@ async function askMember(
       addResponseTraceSteps(pendingId, response);
     }
     addActivityItem(pendingId, "status", t("chatRuntime.stepDone"), "done");
-    await maybeCreatePatchProposal(member, response.content);
+    await maybeCreatePatchProposal(member, finalContent);
     return {
       messageId: pendingId,
       member,
-      content: ensureAddressedReply(response.content, replyTargetName),
+      content: finalContent,
     };
   } catch (error) {
-    releasePendingMessage(pendingId, startedAt);
-
     if (isRunInterrupted(runId)) {
+      const pendingMessage = activeMessages.value.find((item) => item.id === pendingId);
+      const interruptedContent = getInterruptedContent(pendingId, pendingMessage?.content ?? "");
+      releasePendingMessage(pendingId, startedAt);
       settingsStore.updateMessage(pendingId, {
         status: "interrupted",
-        content: t("chatRuntime.interruptedContent"),
+        content: interruptedContent,
       });
       addActivityItem(pendingId, "status", t("chatRuntime.interruptedStep"), "interrupted");
       return null;
     }
 
+    releasePendingMessage(pendingId, startedAt);
     settingsStore.updateMessage(pendingId, {
       status: "error",
       content: t("chatRuntime.callFailedContent", { error: String(error) }),
@@ -1732,19 +1810,26 @@ async function collectMemberVotes(answer: MemberAnswer, runId: string) {
   const supplementMemberIds: string[] = [];
   const disagreeMemberIds: string[] = [];
 
+  setSpeakerQueue([answer.member, ...voters], "voting");
+  upsertSpeakerQueueMember(answer.member, "consensus");
+
   for (const voter of voters) {
     if (isRunInterrupted(runId)) {
       return [];
     }
 
+    upsertSpeakerQueueMember(voter, "voting");
     const vote = await voteOnAnswer(answer, voter, runId);
 
     if (vote === "disagree") {
       disagreeMemberIds.push(voter.id);
+      upsertSpeakerQueueMember(voter, "followup");
     } else if (vote === "supplement") {
       supplementMemberIds.push(voter.id);
+      upsertSpeakerQueueMember(voter, "followup");
     } else {
       agreeMemberIds.push(voter.id);
+      upsertSpeakerQueueMember(voter, "voted");
     }
   }
 
@@ -1754,9 +1839,17 @@ async function collectMemberVotes(answer: MemberAnswer, runId: string) {
     disagreeMemberIds,
   });
 
-  return voters.filter(
+  const membersNeedingFollowUp = voters.filter(
     (member) => supplementMemberIds.includes(member.id) || disagreeMemberIds.includes(member.id),
   );
+
+  if (membersNeedingFollowUp.length > 0) {
+    setSpeakerQueue(membersNeedingFollowUp, "followup");
+  } else {
+    speakerQueue.value = [];
+  }
+
+  return membersNeedingFollowUp;
 }
 
 async function resolveConsensus(initialAnswer: MemberAnswer | null, runId: string) {
@@ -2000,13 +2093,13 @@ async function sendMessage() {
           v-model:announcement="activeGroupAnnouncement"
           v-model:agent-config="activeGroupAgentConfig"
           :members="activeGroupMembers"
-          :historical-members="historicalMembers"
+          :friends="friends"
           :owner-profile="ownerProfile"
           :get-provider-label="getProviderLabel"
           :provider-options="providerOptions"
           :model-presets="modelPresets"
           @add-member="addMember"
-          @add-historical-member="addHistoricalMember"
+          @add-friend-member="addFriendMember"
           @remove-member="removeMember"
           @rename-member="renameMember"
           @update-owner-profile="updateOwnerProfile"
@@ -2022,11 +2115,11 @@ async function sendMessage() {
       v-model:description="newGroupDescription"
       v-model:announcement="newGroupAnnouncement"
       :members="newGroupMembers"
-      :historical-members="historicalMembers"
+      :friends="friends"
       :provider-options="providerOptions"
       :model-presets="modelPresets"
       @add-draft-member="addDraftMember"
-      @add-draft-member-from-history="addDraftMemberFromHistory"
+      @add-draft-member-from-friend="addDraftMemberFromFriend"
       @remove-draft-member="removeDraftMember"
       @update-draft-member-provider="updateDraftMemberProvider"
       @create-group="createGroup"

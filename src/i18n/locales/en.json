@@ -17,6 +17,7 @@
     "ownerRole": "Owner",
     "reject": "Reject",
     "settings": "Settings",
+    "friendLibrary": "Friend Library",
     "systemName": "System",
     "temperature": "Temperature",
     "yes": "Yes"
@@ -26,7 +27,7 @@
     "cache": {
       "chooseTitle": "Choose cache folder",
       "defaultPlaceholder": "Default app data folder",
-      "description": "Settings, member history, and cached avatars are saved as JSON and files under: {path}",
+      "description": "Settings, friend library, and cached avatars are saved as JSON and files under: {path}",
       "title": "Cache folder"
     },
     "profile": {
@@ -46,6 +47,17 @@
       "zhCN": "Simplified Chinese"
     }
   },
+  "friends": {
+    "addDeepSeek": "New DeepSeek friend",
+    "addOpenAI": "New ChatGPT friend",
+    "count": "{count} friends",
+    "emptyDescription": "Create a friend here, then add it to any chat group.",
+    "emptyTitle": "No friends yet",
+    "eyebrow": "My friends",
+    "remove": "Delete friend",
+    "title": "Friend Library",
+    "usedInGroups": "Used in {count} groups"
+  },
   "groups": {
     "brandTitle": "Agent Chats",
     "createTitle": "New chat group",
@@ -63,7 +75,7 @@
   },
   "members": {
     "addDeepSeekMember": "New DeepSeek member",
-    "addFromHistory": "Add from history",
+    "addFromFriends": "Add from my friends",
     "addOpenAIMember": "New ChatGPT member",
     "addTitle": "Add member",
     "adminQuestion": "Make admin",
@@ -128,11 +140,15 @@
     "queue": {
       "status": {
         "checking": "Checking",
+        "consensus": "Resolving",
+        "followup": "Follow-up",
         "queued": "Queued",
         "speaking": "Speaking",
+        "voted": "Voted",
+        "voting": "Voting",
         "waiting": "Watching"
       },
-      "title": "Speaking queue",
+      "title": "Group status",
       "stopAll": "Stop all speaking and queued members"
     },
     "sendToMembers": "Send to {count} members",
@@ -215,6 +231,7 @@
     "memberAlreadyInCurrentGroup": "This member is already in the current group",
     "memberNameRequired": "Member names cannot be empty",
     "memberNamesUnique": "Member names must be unique",
+    "friendInUse": "This friend is still used in a chat group. Remove it from those groups first.",
     "newGroupNeedsMember": "A new group needs at least one virtual member",
     "patchApplied": "Patch applied",
     "patchApplyFailed": "Patch application failed",
@@ -315,7 +332,7 @@
     "consensusLimit": "This discussion reached the consensus round limit and still has disagreements. Please narrow the question manually or adjust member roles before continuing.",
     "decisionPendingContent": "Deciding whether to speak...",
     "decisionWaitContent": "Observing this round.",
-    "addressReplyRule": "Your final visible reply must begin with @{name}. If you are replying to a member, address that member; if you are replying to the user, address the user.",
+    "addressReplyRule": "Your final visible reply must begin with {'@'}{name}. If you are replying to a member, address that member; if you are replying to the user, address the user.",
     "defaultResponderRule": "No member was explicitly mentioned. You are the primary responder for this turn. Answer the user's message directly; other members will only add something if needed.",
     "disagreementRule1": "You disagreed with the previous response. Clearly state the disagreement and give a revision that helps the group move toward consensus.",
     "disagreementRule2": "Do not repeat what was already said. Prioritize a conclusion that other members can agree with.",

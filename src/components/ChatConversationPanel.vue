@@ -13,7 +13,15 @@ import type {
   PatchApprovalStatus,
 } from "../stores/settings";
 
-export type SpeakerQueueStatus = "queued" | "checking" | "waiting" | "speaking";
+export type SpeakerQueueStatus =
+  | "queued"
+  | "checking"
+  | "waiting"
+  | "speaking"
+  | "voting"
+  | "voted"
+  | "consensus"
+  | "followup";
 
 export interface SpeakerQueueItem {
   id: string;
@@ -62,6 +70,7 @@ const messagesEnd = ref<HTMLElement | null>(null);
 const composerFooter = ref<HTMLElement | null>(null);
 const approvalPanelOpen = ref(false);
 const executionPanelOpen = ref<Record<string, boolean>>({});
+const failedMentionAvatars = ref<Set<string>>(new Set());
 const stickToBottom = ref(true);
 const { t } = useI18n();
 const previousMessageStatuses = new Map<string, ChatMessage["status"]>();
@@ -84,11 +93,38 @@ const mentionCandidates = computed(() => {
     .slice(0, 8);
 });
 
-const speakerQueueStatusType: Record<SpeakerQueueStatus, "info" | "warning" | "success" | "primary"> = {
+function getMentionAvatarSrc(member: AgentModel) {
+  const source = getAvatarSrc(member.avatar);
+  if (!source || failedMentionAvatars.value.has(`${member.id}:${source}`)) {
+    return "";
+  }
+
+  return source;
+}
+
+function markMentionAvatarFailed(member: AgentModel) {
+  const source = getAvatarSrc(member.avatar);
+  if (!source) {
+    return;
+  }
+
+  const nextFailed = new Set(failedMentionAvatars.value);
+  nextFailed.add(`${member.id}:${source}`);
+  failedMentionAvatars.value = nextFailed;
+}
+
+const speakerQueueStatusType: Record<
+  SpeakerQueueStatus,
+  "info" | "warning" | "success" | "primary" | "danger"
+> = {
   queued: "info",
   checking: "warning",
   waiting: "info",
   speaking: "success",
+  voting: "warning",
+  voted: "success",
+  consensus: "primary",
+  followup: "warning",
 };
 const codeFenceLinePattern = /^\s*```([A-Za-z0-9_+.#-]*)?\s*$/;
 const hashCommentLanguages = new Set([
@@ -184,6 +220,8 @@ const codeLiterals = new Set([
   "undefined",
 ]);
 const codeOperatorCharacters = new Set(["=", "+", "-", "*", "/", "%", "<", ">", "!", "&", "|", "^", "~", "?", ":"]);
+const htmlCommentOpenToken = "<!" + "--";
+const htmlCommentCloseToken = "--" + ">";
 
 function hasApplicablePatchShape(patchText: string) {
   const hasTargetHeader = /^(diff --git|---\s+(?:a\/)?\S+|\+\+\+\s+(?:b\/)?\S+)/m.test(patchText);
@@ -627,6 +665,18 @@ function toggleExecutionPanel(message: ChatMessage) {
   scheduleFollowScroll();
 }
 
+function collapseExecutionPanel(messageId: string) {
+  if (!messageId || executionPanelOpen.value[messageId] === false) {
+    return;
+  }
+
+  executionPanelOpen.value = {
+    ...executionPanelOpen.value,
+    [messageId]: false,
+  };
+  scheduleFollowScroll(true);
+}
+
 function getExecutionToggleLabel(message: ChatMessage) {
   return isExecutionOpen(message) ? t("chat.execution.collapse") : t("chat.execution.expand");
 }
@@ -726,9 +776,10 @@ function highlightCodeLine(line: string, language: string) {
     const remaining = line.slice(index);
     const character = line[index];
 
-    if (remaining.startsWith("<!--")) {
-      const commentEnd = line.indexOf("-->", index + 4);
-      const endIndex = commentEnd >= 0 ? commentEnd + 3 : line.length;
+    if (remaining.startsWith(htmlCommentOpenToken)) {
+      const commentEnd = line.indexOf(htmlCommentCloseToken, index + htmlCommentOpenToken.length);
+      const endIndex =
+        commentEnd >= 0 ? commentEnd + htmlCommentCloseToken.length : line.length;
       html += wrapSyntaxToken("comment", line.slice(index, endIndex));
       index = endIndex;
       continue;
@@ -870,6 +921,7 @@ function getCacheHitRate(message: ChatMessage) {
 }
 
 defineExpose({
+  collapseExecutionPanel,
   scrollToBottom,
 });
 </script>
@@ -940,6 +992,7 @@ defineExpose({
           v-for="member in speakerQueue"
           :key="member.id"
           class="speaker-queue-pill"
+          :class="member.status"
           :style="{ '--queue-accent': member.color }"
         >
           <span class="queue-dot"></span>
@@ -1154,32 +1207,43 @@ defineExpose({
     </section>
 
     <footer ref="composerFooter" class="composer">
-      <div v-if="mentionOpen && mentionCandidates.length > 0" class="mention-menu">
-        <button
-          v-for="member in mentionCandidates"
-          :key="member.id"
-          type="button"
-          @click="insertMention(member)"
-        >
-          <span class="mention-avatar" :style="{ background: member.color }">
-            {{ member.name.trim().slice(0, 1) || "?" }}
-          </span>
-          <span>{{ member.name }}</span>
-          <span v-if="member.isAdmin" class="identity-badge admin">
-            {{ t("members.adminRole") }}
-          </span>
-        </button>
-      </div>
+      <div class="composer-input-wrap">
+        <div v-if="mentionOpen && mentionCandidates.length > 0" class="mention-menu">
+          <button
+            v-for="member in mentionCandidates"
+            :key="member.id"
+            type="button"
+            @click="insertMention(member)"
+          >
+            <span class="mention-avatar" :style="{ background: member.color }">
+              <img
+                v-if="getMentionAvatarSrc(member)"
+                :src="getMentionAvatarSrc(member)"
+                alt=""
+                @error="markMentionAvatarFailed(member)"
+              />
+              <span v-else>{{ member.name.trim().slice(0, 1) || "?" }}</span>
+            </span>
+            <span class="mention-member-copy">
+              <strong>{{ member.name }}</strong>
+              <small>{{ member.model }}</small>
+            </span>
+            <span v-if="member.isAdmin" class="identity-badge admin">
+              {{ t("members.adminRole") }}
+            </span>
+          </button>
+        </div>
 
-      <el-input
-        :model-value="composer"
-        type="textarea"
-        :autosize="{ minRows: 3, maxRows: 7 }"
-        resize="none"
-        :placeholder="t('chat.composerPlaceholder')"
-        @update:model-value="emit('update:composer', String($event))"
-        @keydown.enter.exact.prevent="emit('sendMessage')"
-      />
+        <el-input
+          :model-value="composer"
+          type="textarea"
+          :autosize="{ minRows: 3, maxRows: 7 }"
+          resize="none"
+          :placeholder="t('chat.composerPlaceholder')"
+          @update:model-value="emit('update:composer', String($event))"
+          @keydown.enter.exact.prevent="emit('sendMessage')"
+        />
+      </div>
 
       <el-button
         v-if="sending"
@@ -1865,6 +1929,27 @@ defineExpose({
   white-space: nowrap;
 }
 
+.speaker-queue-pill.checking .queue-dot,
+.speaker-queue-pill.speaking .queue-dot,
+.speaker-queue-pill.voting .queue-dot,
+.speaker-queue-pill.consensus .queue-dot,
+.speaker-queue-pill.followup .queue-dot {
+  animation: queue-dot-pulse 1.45s ease-in-out infinite;
+}
+
+@keyframes queue-dot-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 color-mix(in srgb, var(--queue-accent), transparent 62%);
+    opacity: 0.72;
+  }
+
+  50% {
+    box-shadow: 0 0 0 5px color-mix(in srgb, var(--queue-accent), transparent 86%);
+    opacity: 1;
+  }
+}
+
 .identity-badge {
   display: inline-flex;
   flex: 0 0 auto;
@@ -1906,25 +1991,48 @@ defineExpose({
   background: var(--queue-accent);
 }
 
-.mention-menu {
+.composer {
   display: flex;
-  max-height: 148px;
-  flex-direction: column;
-  gap: 4px;
+  align-items: flex-end;
+  gap: 10px;
+  padding: 12px 18px 14px;
+  border-top: 1px solid #dfe7e1;
+  position: relative;
+  background: #fbfcfb;
+  overflow: visible;
+}
+
+.composer-input-wrap {
+  position: relative;
+  min-width: 0;
+  flex: 1;
+}
+
+.mention-menu {
+  position: absolute;
+  z-index: 20;
+  right: 0;
+  bottom: calc(100% + 8px);
+  left: 0;
+  display: grid;
+  max-height: 248px;
+  gap: 6px;
   overflow: auto;
-  padding: 6px;
+  padding: 8px;
   border: 1px solid #d9e2dc;
   border-radius: 8px;
   background: #ffffff;
-  box-shadow: 0 10px 24px rgba(31, 43, 36, 0.12);
+  box-shadow: 0 16px 36px rgba(31, 43, 36, 0.16);
 }
 
 .mention-menu button {
-  display: flex;
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr) max-content;
   align-items: center;
-  gap: 8px;
-  padding: 7px 8px;
-  border: 0;
+  gap: 10px;
+  min-height: 48px;
+  padding: 7px 9px;
+  border: 1px solid transparent;
   border-radius: 6px;
   color: #24312a;
   background: transparent;
@@ -1932,26 +2040,51 @@ defineExpose({
   text-align: left;
 }
 
-.mention-menu button > span:nth-child(2) {
+.mention-member-copy {
+  display: grid;
   min-width: 0;
+  gap: 2px;
+}
+
+.mention-member-copy strong,
+.mention-member-copy small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.mention-member-copy strong {
+  color: #1f2c25;
+  font-size: 13px;
+}
+
+.mention-member-copy small {
+  color: #718077;
+  font-size: 11px;
+}
+
 .mention-menu button:hover {
-  background: #eef5f0;
+  border-color: #d7e6dc;
+  background: #f2f8f5;
 }
 
 .mention-avatar {
   display: grid;
-  width: 24px;
-  height: 24px;
+  width: 34px;
+  height: 34px;
   flex: 0 0 auto;
+  overflow: hidden;
   place-items: center;
   border-radius: 50%;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.4);
   color: #ffffff;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 800;
+}
+
+.mention-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 </style>

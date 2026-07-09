@@ -299,7 +299,7 @@ function normalizeMessageStatus(value: unknown): MessageStatus {
 function normalizeMember(member: AgentModel): AgentModel {
   return {
     ...member,
-    libraryId: member.libraryId ?? crypto.randomUUID(),
+    libraryId: member.libraryId,
     reasoningEffort: normalizeReasoningEffort(member.reasoningEffort),
     temperature: Number.isFinite(member.temperature) ? member.temperature : 0.7,
     isAdmin: Boolean(member.isAdmin),
@@ -389,10 +389,27 @@ function makeUniqueMemberName(name: string, members: AgentModel[], exceptId = ""
 }
 
 function cloneMember(member: AgentModel, members: AgentModel[] = []) {
+  const libraryId = member.libraryId ?? member.id;
+
   return {
     ...toPlainMember(member),
     id: crypto.randomUUID(),
+    libraryId,
     name: makeUniqueMemberName(member.name, members),
+  };
+}
+
+function toLibraryMember(member: AgentModel, friends: AgentModel[] = []) {
+  const libraryId = member.libraryId ?? member.id ?? crypto.randomUUID();
+
+  return {
+    ...toPlainMember({
+      ...member,
+      libraryId,
+    }),
+    id: libraryId,
+    libraryId,
+    name: makeUniqueMemberName(member.name, friends, libraryId),
   };
 }
 
@@ -496,7 +513,7 @@ export const useSettingsStore = defineStore("settings", {
     return {
       providers: structuredClone(providerDefaults),
       groups: [defaultGroup] as ChatGroup[],
-      memberLibrary: createDefaultMembers() as AgentModel[],
+      memberLibrary: defaultGroup.members.map((member) => toLibraryMember(member)) as AgentModel[],
       activeGroupId: defaultGroup.id,
       ownerProfile: createDefaultOwnerProfile(),
       locale: defaultLocale as AppLocale,
@@ -513,24 +530,8 @@ export const useSettingsStore = defineStore("settings", {
       return this.activeGroup?.members.filter((member) => member.enabled) ?? [];
     },
 
-    historicalMembers(): AgentModel[] {
-      const members = [...this.memberLibrary];
-
-      for (const group of this.groups) {
-        for (const member of group.members) {
-          if (
-            !members.some(
-              (item) =>
-                (member.libraryId && item.libraryId === member.libraryId) ||
-                normalizeName(item.name) === normalizeName(member.name),
-            )
-          ) {
-            members.push(member);
-          }
-        }
-      }
-
-      return members;
+    friends(): AgentModel[] {
+      return this.memberLibrary;
     },
   },
 
@@ -692,58 +693,198 @@ export const useSettingsStore = defineStore("settings", {
     },
 
     buildMemberLibrary(seed: AgentModel[] = []) {
-      const members: AgentModel[] = [];
+      const friends: AgentModel[] = [];
+      const byLibraryId = new Map<string, AgentModel>();
+      const byName = new Map<string, AgentModel>();
 
-      for (const member of [...seed, ...this.groups.flatMap((group) => group.members)]) {
-        const name = makeUniqueMemberName(member.name, members);
-        members.push({
-          ...toPlainMember(member),
-          id: member.libraryId ?? member.id,
-          libraryId: member.libraryId ?? member.id,
-          name,
-        });
-      }
+      const upsertFriend = (source: AgentModel, sourceIsGroupMember = false) => {
+        const sourceLibraryId = source.libraryId ?? "";
+        const sourceName = normalizeName(source.name);
+        const existing =
+          (sourceLibraryId ? byLibraryId.get(sourceLibraryId) : undefined) ??
+          byName.get(sourceName);
 
-      const seen = new Set<string>();
-      return members.filter((member) => {
-        const key = normalizeName(member.name);
+        if (existing) {
+          const libraryId = existing.libraryId ?? existing.id;
+          source.libraryId = libraryId;
 
-        if (seen.has(key)) {
-          return false;
+          if (sourceIsGroupMember) {
+            Object.assign(source, toPlainMember(existing), {
+              id: source.id,
+              libraryId,
+            });
+          }
+
+          return existing;
         }
 
-        seen.add(key);
-        return true;
-      });
+        const friend = toLibraryMember(
+          {
+            ...source,
+            libraryId: sourceLibraryId || source.id || crypto.randomUUID(),
+          },
+          friends,
+        );
+
+        friends.push(friend);
+        byLibraryId.set(friend.libraryId ?? friend.id, friend);
+        byName.set(normalizeName(friend.name), friend);
+
+        if (sourceIsGroupMember) {
+          source.libraryId = friend.libraryId;
+        }
+
+        return friend;
+      };
+
+      for (const member of seed.map(normalizeMember)) {
+        upsertFriend(member);
+      }
+
+      for (const group of this.groups) {
+        for (const member of group.members) {
+          upsertFriend(member, true);
+        }
+      }
+
+      return friends;
     },
 
     rememberMember(member: AgentModel) {
-      const existing = this.memberLibrary.find(
-        (item) =>
-          (member.libraryId && item.libraryId === member.libraryId) ||
-          normalizeName(item.name) === normalizeName(member.name),
-      );
+      const memberLibraryId = member.libraryId ?? "";
+      const existingByLibraryId = memberLibraryId
+        ? this.memberLibrary.find((item) => (item.libraryId ?? item.id) === memberLibraryId)
+        : undefined;
+      const existingByName = existingByLibraryId
+        ? undefined
+        : this.memberLibrary.find((item) => normalizeName(item.name) === normalizeName(member.name));
+      const existing = existingByLibraryId ?? existingByName;
 
       if (existing) {
-        const plainMember = toPlainMember(member);
-        Object.assign(existing, plainMember, {
-          id: existing.id,
-          libraryId: existing.libraryId ?? plainMember.libraryId ?? existing.id,
+        const libraryId = existing.libraryId ?? existing.id;
+        const name = makeUniqueMemberName(member.name, this.memberLibrary, existing.id);
+        const plainMember = toPlainMember({
+          ...member,
+          name,
+          libraryId,
         });
-        member.libraryId = existing.libraryId;
+        Object.assign(existing, plainMember, {
+          id: libraryId,
+          libraryId,
+          name,
+        });
+        member.libraryId = libraryId;
+        member.name = name;
+        this.syncFriendToGroups(existing);
         return existing;
       }
 
-      const libraryMember = {
-        ...toPlainMember(member),
-        id: crypto.randomUUID(),
-        libraryId: crypto.randomUUID(),
-        name: makeUniqueMemberName(member.name, this.memberLibrary),
-      };
+      const libraryId = member.libraryId ?? crypto.randomUUID();
+      const libraryMember = toLibraryMember(
+        {
+          ...member,
+          libraryId,
+        },
+        this.memberLibrary,
+      );
 
       member.libraryId = libraryMember.libraryId;
+      member.name = libraryMember.name;
       this.memberLibrary.push(libraryMember);
+      this.syncFriendToGroups(libraryMember);
       return libraryMember;
+    },
+
+    syncFriendToGroups(friend: AgentModel) {
+      const libraryId = friend.libraryId ?? friend.id;
+      const plainFriend = toPlainMember({
+        ...friend,
+        id: libraryId,
+        libraryId,
+      });
+
+      for (const group of this.groups) {
+        let groupChanged = false;
+
+        for (const member of group.members) {
+          if (member.libraryId !== libraryId) {
+            continue;
+          }
+
+          Object.assign(member, plainFriend, {
+            id: member.id,
+            libraryId,
+          });
+          groupChanged = true;
+        }
+
+        if (groupChanged) {
+          group.updatedAt = new Date().toISOString();
+        }
+      }
+    },
+
+    addFriend(provider: ProviderId = "openai") {
+      const providerConfig = this.providers[provider];
+      const friend = createMember(
+        provider,
+        makeUniqueMemberName(
+          t("defaults.member.draftName", { provider: providerConfig.name }),
+          this.memberLibrary,
+        ),
+        providerConfig.defaultModel,
+        t("defaults.member.defaultPrompt"),
+      );
+      const libraryFriend = this.rememberMember(friend);
+      return libraryFriend;
+    },
+
+    renameFriend(friendId: string, name: string) {
+      const friend = this.memberLibrary.find((member) => member.id === friendId);
+
+      if (!friend) {
+        return;
+      }
+
+      friend.name = makeUniqueMemberName(name, this.memberLibrary, friend.id);
+      this.syncFriendToGroups(friend);
+    },
+
+    updateFriendProfile(friend: AgentModel) {
+      const existing = this.memberLibrary.find((member) => member.id === friend.id);
+
+      if (!existing) {
+        return;
+      }
+
+      Object.assign(existing, toLibraryMember(friend, this.memberLibrary), {
+        id: existing.id,
+        libraryId: existing.libraryId ?? existing.id,
+        name: makeUniqueMemberName(friend.name, this.memberLibrary, existing.id),
+      });
+      this.syncFriendToGroups(existing);
+    },
+
+    updateFriendProvider(friend: AgentModel) {
+      friend.model = this.providers[friend.provider].defaultModel;
+      friend.color = getModelColor(friend.provider);
+      friend.deepSeekLongContext = friend.provider === "deepseek";
+      this.updateFriendProfile(friend);
+    },
+
+    removeFriend(friendId: string) {
+      const friend = this.memberLibrary.find((member) => member.id === friendId);
+      const libraryId = friend?.libraryId ?? friendId;
+      const isInUse = this.groups.some((group) =>
+        group.members.some((member) => member.libraryId === libraryId),
+      );
+
+      if (isInUse) {
+        return false;
+      }
+
+      this.memberLibrary = this.memberLibrary.filter((friend) => friend.id !== friendId);
+      return true;
     },
 
     startPersistence() {
@@ -842,8 +983,8 @@ export const useSettingsStore = defineStore("settings", {
       group.updatedAt = new Date().toISOString();
     },
 
-    addMemberFromHistory(memberId: string) {
-      const source = this.historicalMembers.find((member) => member.id === memberId);
+    addMemberFromFriend(friendId: string) {
+      const source = this.memberLibrary.find((member) => member.id === friendId);
 
       if (!source) {
         return false;
@@ -851,24 +992,33 @@ export const useSettingsStore = defineStore("settings", {
 
       const group = this.activeGroup;
 
-      if (group.members.some((member) => normalizeName(member.name) === normalizeName(source.name))) {
+      if (
+        group.members.some(
+          (member) =>
+            member.libraryId === source.libraryId ||
+            member.libraryId === source.id,
+        )
+      ) {
         return false;
       }
 
       group.members.push(cloneMember(source, group.members));
-      this.rememberMember(source);
       group.updatedAt = new Date().toISOString();
       return true;
     },
 
     duplicateMember(member: AgentModel) {
       const group = this.activeGroup;
-
-      group.members.push({
-        ...member,
+      const libraryId = crypto.randomUUID();
+      const copy = {
+        ...toPlainMember(member),
         id: crypto.randomUUID(),
+        libraryId,
         name: makeUniqueMemberName(t("defaults.member.copyName", { name: member.name }), group.members),
-      });
+      };
+
+      group.members.push(copy);
+      this.rememberMember(copy);
       group.updatedAt = new Date().toISOString();
     },
 
@@ -986,16 +1136,17 @@ export const useSettingsStore = defineStore("settings", {
         provider,
         makeUniqueMemberName(
           t("defaults.member.draftName", { provider: providerConfig.name }),
-          this.historicalMembers,
+          this.memberLibrary,
         ),
         providerConfig.defaultModel,
         t("defaults.member.defaultPrompt"),
       );
     },
 
-    cloneHistoricalMember(memberId: string, members: AgentModel[] = []) {
-      const source = this.historicalMembers.find((member) => member.id === memberId);
+    cloneFriend(friendId: string, members: AgentModel[] = []) {
+      const source = this.memberLibrary.find((member) => member.id === friendId);
       return source ? cloneMember(source, members) : null;
     },
+
   },
 });
