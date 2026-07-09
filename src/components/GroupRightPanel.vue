@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { ref } from "vue";
 import GroupMemberPanel from "./GroupMemberPanel.vue";
 import type {
   AgentCollaborationConfig,
@@ -8,9 +8,7 @@ import type {
   AgentApprovalMode,
   AgentSafetyModel,
   AgentModel,
-  AgentPatchProposal,
   OwnerProfile,
-  PatchApprovalStatus,
   ProviderId,
 } from "../stores/settings";
 
@@ -44,58 +42,16 @@ const safetyModelOptions: Array<{ label: string; value: AgentSafetyModel }> = [
   { label: "Sandbox YOLO", value: "sandbox-yolo" },
 ];
 
-const props = defineProps<{
+defineProps<{
   members: AgentModel[];
   ownerProfile: OwnerProfile;
-  patchProposals: AgentPatchProposal[];
   getProviderLabel: (provider: ProviderId) => string;
 }>();
 
 const emit = defineEmits<{
   addMember: [provider: ProviderId];
   removeMember: [memberId: string];
-  updatePatchStatus: [proposalId: string, status: PatchApprovalStatus];
-  removePatchProposal: [proposalId: string];
 }>();
-
-const pendingPatchCount = computed(
-  () => props.patchProposals.filter((proposal) => proposal.status === "pending").length,
-);
-
-const patchRiskType: Record<AgentPatchProposal["riskLevel"], "success" | "warning" | "danger"> = {
-  low: "success",
-  medium: "warning",
-  high: "danger",
-};
-
-const patchStatusType: Record<PatchApprovalStatus, "info" | "success" | "danger" | "warning"> = {
-  pending: "warning",
-  approved: "success",
-  rejected: "danger",
-  discarded: "info",
-};
-
-const patchStatusText: Record<PatchApprovalStatus, string> = {
-  pending: "待审批",
-  approved: "已应用",
-  rejected: "已拒绝",
-  discarded: "已丢弃",
-};
-
-const safetyVerdictType: Record<
-  AgentPatchProposal["safetyCheck"]["verdict"],
-  "success" | "warning" | "danger"
-> = {
-  allow: "success",
-  "needs-confirmation": "warning",
-  blocked: "danger",
-};
-
-const safetyVerdictText: Record<AgentPatchProposal["safetyCheck"]["verdict"], string> = {
-  allow: "允许",
-  "needs-confirmation": "需确认",
-  blocked: "已阻止",
-};
 
 function syncEditBeforeAsk(value: boolean) {
   if (value) {
@@ -240,97 +196,6 @@ function finishAnnouncementEdit() {
       </el-form>
     </section>
 
-    <section class="patch-panel">
-      <div class="section-heading">
-        <span>审批队列</span>
-        <el-tag size="small" :type="pendingPatchCount > 0 ? 'warning' : 'info'">
-          {{ pendingPatchCount }}
-        </el-tag>
-      </div>
-
-      <div v-if="patchProposals.length === 0" class="patch-empty">
-        还没有补丁提案
-      </div>
-
-      <div v-else class="patch-list">
-        <article
-          v-for="proposal in patchProposals"
-          :key="proposal.id"
-          class="patch-card"
-          :class="proposal.status"
-        >
-          <div class="patch-card-head">
-            <div>
-              <strong>{{ proposal.title }}</strong>
-              <span>{{ proposal.proposerName }} · {{ proposal.createdAt }}</span>
-            </div>
-            <div class="patch-tags">
-              <el-tag size="small" :type="patchRiskType[proposal.riskLevel]">
-                {{ proposal.riskLevel }}
-              </el-tag>
-              <el-tag size="small" :type="patchStatusType[proposal.status]">
-                {{ patchStatusText[proposal.status] }}
-              </el-tag>
-              <el-tag size="small" :type="safetyVerdictType[proposal.safetyCheck.verdict]">
-                {{ safetyVerdictText[proposal.safetyCheck.verdict] }}
-              </el-tag>
-            </div>
-          </div>
-
-          <p class="patch-summary">{{ proposal.summary }}</p>
-
-          <div class="patch-safety">
-            <strong>安全校验</strong>
-            <ul>
-              <li v-for="reason in proposal.safetyCheck.reasons" :key="reason">
-                {{ reason }}
-              </li>
-              <li v-for="warning in proposal.safetyCheck.warnings" :key="warning" class="warning">
-                {{ warning }}
-              </li>
-            </ul>
-          </div>
-
-          <div v-if="proposal.files.length > 0" class="patch-files">
-            <span v-for="file in proposal.files" :key="file">{{ file }}</span>
-          </div>
-          <div v-else class="patch-files muted">
-            未识别具体文件
-          </div>
-
-          <pre v-if="proposal.patchText" class="patch-preview">{{ proposal.patchText }}</pre>
-
-          <div class="patch-actions">
-            <template v-if="proposal.status === 'pending'">
-              <el-button
-                size="small"
-                type="primary"
-                :disabled="proposal.safetyCheck.verdict === 'blocked' || !proposal.patchText"
-                @click="emit('updatePatchStatus', proposal.id, 'approved')"
-              >
-                批准并应用
-              </el-button>
-              <el-button
-                size="small"
-                type="danger"
-                plain
-                @click="emit('updatePatchStatus', proposal.id, 'rejected')"
-              >
-                拒绝
-              </el-button>
-            </template>
-            <el-button
-              size="small"
-              plain
-              @click="emit('removePatchProposal', proposal.id)"
-            >
-              丢弃
-            </el-button>
-          </div>
-        </article>
-      </div>
-    </section>
-
     <GroupMemberPanel
       :members="members"
       :owner-profile="ownerProfile"
@@ -358,8 +223,7 @@ function finishAnnouncementEdit() {
 }
 
 .announcement-panel,
-.agent-panel,
-.patch-panel {
+.agent-panel {
   display: grid;
   gap: 12px;
 }

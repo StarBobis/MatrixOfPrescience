@@ -49,6 +49,20 @@ struct ApplyPatchResponse {
     stderr: String,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InspectCodeWorkspaceRequest {
+    workspace_path: String,
+    query: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct InspectCodeWorkspaceResponse {
+    tool: String,
+    content: String,
+}
+
 #[tauri::command]
 async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletionResponse, String> {
     if request.api_key.trim().is_empty() {
@@ -143,6 +157,173 @@ fn validate_workspace(workspace_path: &str) -> Result<PathBuf, String> {
     }
 
     Ok(workspace)
+}
+
+fn has_codegraph_index(workspace: &Path) -> bool {
+    workspace
+        .ancestors()
+        .any(|path| path.join(".codegraph").is_dir())
+}
+
+fn truncate_text(text: String, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text;
+    }
+
+    let mut truncated: String = text.chars().take(max_chars).collect();
+    truncated.push_str("\n\n[内容已截断]");
+    truncated
+}
+
+fn run_codegraph_explore(workspace: &Path, query: &str) -> Result<String, String> {
+    if !has_codegraph_index(workspace) {
+        return Err("当前工作文件夹未发现 .codegraph 索引".to_string());
+    }
+
+    let output = Command::new("codegraph")
+        .current_dir(workspace)
+        .arg("explore")
+        .arg(query)
+        .output()
+        .map_err(|error| format!("启动 CodeGraph 失败：{}", error))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() || stdout.trim().is_empty() {
+        return Err(if stderr.trim().is_empty() {
+            "CodeGraph 未返回可用结果".to_string()
+        } else {
+            format!("CodeGraph 查询失败：{}", stderr.trim())
+        });
+    }
+
+    Ok(truncate_text(stdout, 18_000))
+}
+
+fn is_code_file(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    matches!(
+        Path::new(&lower)
+            .extension()
+            .and_then(|value| value.to_str()),
+        Some(
+            "ts" | "tsx"
+                | "vue"
+                | "js"
+                | "jsx"
+                | "rs"
+                | "json"
+                | "css"
+                | "md"
+                | "toml"
+                | "yml"
+                | "yaml"
+                | "py"
+                | "go"
+                | "java"
+                | "kt"
+        )
+    )
+}
+
+fn read_local_code_context(workspace: &Path, query: &str) -> Result<String, String> {
+    let output = Command::new("rg")
+        .current_dir(workspace)
+        .arg("--files")
+        .arg("-g")
+        .arg("!node_modules")
+        .arg("-g")
+        .arg("!dist")
+        .arg("-g")
+        .arg("!target")
+        .output()
+        .or_else(|_| {
+            Command::new("git")
+                .current_dir(workspace)
+                .arg("ls-files")
+                .output()
+        })
+        .map_err(|error| format!("本地文件列表读取失败：{}", error))?;
+
+    if !output.status.success() {
+        return Err("本地文件列表读取失败".to_string());
+    }
+
+    let files: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.trim().replace('\\', "/"))
+        .filter(|line| !line.is_empty() && is_code_file(line))
+        .take(240)
+        .collect();
+
+    let query_lower = query.to_ascii_lowercase();
+    let mut selected: Vec<String> = files
+        .iter()
+        .filter(|file| query_lower.contains(&file.to_ascii_lowercase()))
+        .take(8)
+        .cloned()
+        .collect();
+
+    if selected.is_empty() {
+        selected = files.iter().take(12).cloned().collect();
+    }
+
+    let mut sections = vec![
+        "CodeGraph 不可用，已降级为本地命令读取。".to_string(),
+        "文件列表：".to_string(),
+        files
+            .iter()
+            .take(80)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ];
+
+    for file in selected {
+        let path = workspace.join(&file);
+        if let Ok(metadata) = fs::metadata(&path) {
+            if metadata.len() > 80_000 {
+                continue;
+            }
+        }
+
+        if let Ok(content) = fs::read_to_string(&path) {
+            sections.push(format!(
+                "\n--- {} ---\n{}",
+                file,
+                truncate_text(content, 4_000)
+            ));
+        }
+    }
+
+    Ok(truncate_text(sections.join("\n"), 18_000))
+}
+
+#[tauri::command]
+async fn inspect_code_workspace(
+    request: InspectCodeWorkspaceRequest,
+) -> Result<InspectCodeWorkspaceResponse, String> {
+    let workspace = validate_workspace(&request.workspace_path)?;
+    let query = request.query.trim();
+
+    if query.is_empty() {
+        return Err("代码阅读问题不能为空".to_string());
+    }
+
+    match run_codegraph_explore(&workspace, query) {
+        Ok(content) => Ok(InspectCodeWorkspaceResponse {
+            tool: "CodeGraph".to_string(),
+            content,
+        }),
+        Err(codegraph_error) => {
+            let fallback = read_local_code_context(&workspace, query)?;
+            Ok(InspectCodeWorkspaceResponse {
+                tool: format!("LocalCommands（CodeGraph 失败：{}）", codegraph_error),
+                content: fallback,
+            })
+        }
+    }
 }
 
 fn validate_relative_file(file: &str) -> Result<String, String> {
@@ -294,6 +475,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             chat_completion,
+            inspect_code_workspace,
             apply_patch_proposal
         ])
         .run(tauri::generate_context!())

@@ -39,6 +39,11 @@ interface ApplyPatchResponse {
   stderr: string;
 }
 
+interface InspectCodeWorkspaceResponse {
+  tool: string;
+  content: string;
+}
+
 type MemberDecision = "speak" | "wait";
 type MemberVote = "agree" | "disagree";
 
@@ -221,7 +226,7 @@ function buildConversation(): ApiChatMessage[] {
     }));
 }
 
-function buildSystemPrompt(member: AgentModel, extraRules = "") {
+function buildSystemPrompt(member: AgentModel, extraRules = "", codeContext = "") {
   const group = activeGroup.value;
   const config = group?.agentConfig;
   const workspacePath = group?.workspacePath?.trim();
@@ -244,10 +249,70 @@ function buildSystemPrompt(member: AgentModel, extraRules = "") {
     buildSafetyPolicy(),
     "你的核心角色：",
     member.systemPrompt.trim(),
+    codeContext
+      ? [
+          "代码阅读工具结果：",
+          "你可以基于以下工具输出讨论代码。优先信任 CodeGraph；如果结果来自 LocalCommands，需要说明这是降级读取。",
+          codeContext,
+        ].join("\n")
+      : "",
     extraRules,
   ]
     .filter(Boolean)
     .join("\n\n");
+}
+
+function shouldInspectWorkspace(extraRule: string) {
+  const group = activeGroup.value;
+
+  if (!group?.workspacePath?.trim()) {
+    return false;
+  }
+
+  if (!group.agentConfig || group.agentConfig.agentMode === "chat") {
+    return false;
+  }
+
+  const recentText = [...activeMessages.value.slice(-4).map((message) => message.content), extraRule]
+    .join("\n")
+    .toLowerCase();
+
+  return /代码|源码|项目|文件|目录|实现|组件|函数|class|bug|报错|修改|编辑|patch|diff|read|code|source|file|folder|repo|repository/.test(
+    recentText,
+  );
+}
+
+async function inspectWorkspaceForMember(member: AgentModel, extraRule: string) {
+  if (!shouldInspectWorkspace(extraRule)) {
+    return "";
+  }
+
+  const workspacePath = activeGroup.value?.workspacePath?.trim() ?? "";
+  const query = [
+    `当前群友：${member.name}`,
+    `角色身份：${member.systemPrompt}`,
+    "请围绕最近群聊问题读取相关代码。优先定位符号、调用链、文件职责和影响范围。",
+    activeMessages.value
+      .slice(-6)
+      .map((message) => `${message.modelName}：${message.content}`)
+      .join("\n"),
+    extraRule,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
+
+  try {
+    const result = await invoke<InspectCodeWorkspaceResponse>("inspect_code_workspace", {
+      request: {
+        workspacePath,
+        query,
+      },
+    });
+
+    return [`工具：${result.tool}`, result.content].join("\n\n");
+  } catch (error) {
+    return `代码阅读工具调用失败：${String(error)}`;
+  }
 }
 
 function buildSafetyPolicy() {
@@ -259,6 +324,7 @@ function buildSafetyPolicy() {
 
   const commonRules = [
     "代码协作安全边界：",
+    "- 涉及代码阅读时，软件会优先调用 CodeGraph；CodeGraph 不可用时才降级为本地命令。你必须基于“代码阅读工具结果”回答，不能声称只能看到路径。",
     "- 只能围绕当前聊天群工作文件夹进行分析和编辑计划。",
     "- 涉及删除、覆盖、迁移、大范围重命名、运行外部命令、网络请求、密钥或权限变更时，必须显式标记风险。",
     "- 不要编造已执行的文件修改；只有审批队列显示补丁已应用后，才可以声称文件已写入。",
@@ -352,7 +418,7 @@ function inferRiskLevel(content: string, files: string[]): PatchRiskLevel {
   return "low";
 }
 
-function maybeCreatePatchProposal(member: AgentModel, content: string) {
+async function maybeCreatePatchProposal(member: AgentModel, content: string) {
   const config = activeGroup.value?.agentConfig;
 
   if (!config || config.agentMode === "chat" || config.workflowMode === "ask") {
@@ -370,7 +436,7 @@ function maybeCreatePatchProposal(member: AgentModel, content: string) {
   const riskLevel = inferRiskLevel(content, files);
   const workspacePath = activeGroup.value?.workspacePath ?? "";
 
-  settingsStore.addPatchProposal({
+  const proposal = {
     title: `${member.name} 的编辑提案`,
     proposerName: member.name,
     riskLevel,
@@ -386,7 +452,17 @@ function maybeCreatePatchProposal(member: AgentModel, content: string) {
     files,
     summary: content.slice(0, 420),
     patchText,
-  });
+  };
+
+  settingsStore.addPatchProposal(proposal);
+
+  if (config.approvalMode === "auto" && proposal.safetyCheck.verdict === "allow" && patchText.trim()) {
+    const created = activeGroup.value?.patchProposals[0];
+
+    if (created) {
+      await updatePatchProposalStatus(created.id, "approved");
+    }
+  }
 }
 
 async function updatePatchProposalStatus(proposalId: string, status: PatchApprovalStatus) {
@@ -547,6 +623,9 @@ async function askMember(member: AgentModel, extraRule = ""): Promise<MemberAnsw
   const provider = getProvider(member);
   const pendingId = crypto.randomUUID();
   const conversation = buildConversation();
+  const responseRule =
+    extraRule ||
+    "请基于当前完整群聊历史发言。优先回应用户需求，同时可以补充、质疑或修正其它群友已经说过的内容。";
 
   settingsStore.appendPendingMessage({
     id: pendingId,
@@ -560,6 +639,7 @@ async function askMember(member: AgentModel, extraRule = ""): Promise<MemberAnsw
   await scrollToBottom();
 
   try {
+    const codeContext = await inspectWorkspaceForMember(member, responseRule);
     const response = await invoke<ChatCompletionResponse>("chat_completion", {
       request: {
         providerName: provider.name,
@@ -567,11 +647,7 @@ async function askMember(member: AgentModel, extraRule = ""): Promise<MemberAnsw
         apiKey: provider.apiKey,
         model: member.model,
         temperature: member.temperature,
-        systemPrompt: buildSystemPrompt(
-          member,
-          extraRule ||
-            "请基于当前完整群聊历史发言。优先回应用户需求，同时可以补充、质疑或修正其它群友已经说过的内容。",
-        ),
+        systemPrompt: buildSystemPrompt(member, responseRule, codeContext),
         messages: conversation,
       },
     });
@@ -580,7 +656,7 @@ async function askMember(member: AgentModel, extraRule = ""): Promise<MemberAnsw
       status: "done",
       content: response.content,
     });
-    maybeCreatePatchProposal(member, response.content);
+    await maybeCreatePatchProposal(member, response.content);
     return {
       messageId: pendingId,
       member,
@@ -806,11 +882,14 @@ onMounted(() => {
           :active-group="activeGroup"
           :active-member-count="activeMembers.length"
           :messages="activeMessages"
+          :patch-proposals="activeGroup?.patchProposals ?? []"
           v-model:workspace-path="activeGroupWorkspacePath"
           :sending="sending"
           :can-send="canSend"
           :status-text="statusText"
           :render-markdown="renderMarkdown"
+          @update-patch-status="updatePatchProposalStatus"
+          @remove-patch-proposal="settingsStore.removePatchProposal"
           @send-message="sendMessage"
         />
       </template>
@@ -822,12 +901,9 @@ onMounted(() => {
           v-model:agent-config="activeGroupAgentConfig"
           :members="activeGroupMembers"
           :owner-profile="ownerProfile"
-          :patch-proposals="activeGroup?.patchProposals ?? []"
           :get-provider-label="getProviderLabel"
           @add-member="addMember"
           @remove-member="removeMember"
-          @update-patch-status="updatePatchProposalStatus"
-          @remove-patch-proposal="settingsStore.removePatchProposal"
         />
       </template>
     </ResizableGroupLayout>

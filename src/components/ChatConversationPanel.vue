@@ -2,12 +2,14 @@
 import { nextTick, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FolderOpened, Promotion } from "@element-plus/icons-vue";
-import type { ChatGroup, ChatMessage } from "../stores/settings";
+import PatchApprovalPanel from "./PatchApprovalPanel.vue";
+import type { ChatGroup, ChatMessage, PatchApprovalStatus } from "../stores/settings";
 
 defineProps<{
   activeGroup?: ChatGroup;
   activeMemberCount: number;
   messages: ChatMessage[];
+  patchProposals: ChatGroup["patchProposals"];
   composer: string;
   workspacePath: string;
   sending: boolean;
@@ -19,6 +21,8 @@ defineProps<{
 const emit = defineEmits<{
   "update:composer": [value: string];
   "update:workspacePath": [value: string];
+  updatePatchStatus: [proposalId: string, status: PatchApprovalStatus];
+  removePatchProposal: [proposalId: string];
   sendMessage: [];
 }>();
 
@@ -79,6 +83,12 @@ defineExpose({
     </header>
 
     <section ref="messagesPanel" class="messages-panel">
+      <PatchApprovalPanel
+        :patch-proposals="patchProposals"
+        @update-patch-status="(proposalId, status) => emit('updatePatchStatus', proposalId, status)"
+        @remove-patch-proposal="(proposalId) => emit('removePatchProposal', proposalId)"
+      />
+
       <article
         v-for="message in messages"
         :key="message.id"
