@@ -23,6 +23,14 @@ export interface SpeakerQueueItem {
   status: SpeakerQueueStatus;
 }
 
+interface ExecutionRenderBlock {
+  id: string;
+  item: ChatMessageExecutionItem;
+  type: "markdown" | "code";
+  text: string;
+  language?: string;
+}
+
 const props = defineProps<{
   activeGroup?: ChatGroup;
   activeMemberCount: number;
@@ -82,6 +90,100 @@ const speakerQueueStatusType: Record<SpeakerQueueStatus, "info" | "warning" | "s
   waiting: "info",
   speaking: "success",
 };
+const codeFenceLinePattern = /^\s*```([A-Za-z0-9_+.#-]*)?\s*$/;
+const hashCommentLanguages = new Set([
+  "bash",
+  "ini",
+  "ps1",
+  "py",
+  "python",
+  "rb",
+  "ruby",
+  "sh",
+  "toml",
+  "yaml",
+  "yml",
+  "zsh",
+]);
+const codeKeywords = new Set([
+  "abstract",
+  "and",
+  "as",
+  "async",
+  "await",
+  "break",
+  "case",
+  "catch",
+  "class",
+  "const",
+  "continue",
+  "def",
+  "default",
+  "defer",
+  "del",
+  "do",
+  "else",
+  "enum",
+  "export",
+  "extends",
+  "final",
+  "finally",
+  "fn",
+  "for",
+  "from",
+  "func",
+  "function",
+  "global",
+  "go",
+  "if",
+  "implements",
+  "import",
+  "in",
+  "interface",
+  "is",
+  "let",
+  "match",
+  "mut",
+  "new",
+  "not",
+  "or",
+  "package",
+  "private",
+  "protected",
+  "public",
+  "return",
+  "select",
+  "static",
+  "struct",
+  "switch",
+  "template",
+  "throw",
+  "try",
+  "type",
+  "typedef",
+  "using",
+  "var",
+  "void",
+  "while",
+  "with",
+  "yield",
+]);
+const codeLiterals = new Set([
+  "False",
+  "Infinity",
+  "NaN",
+  "None",
+  "True",
+  "false",
+  "nil",
+  "null",
+  "self",
+  "super",
+  "this",
+  "true",
+  "undefined",
+]);
+const codeOperatorCharacters = new Set(["=", "+", "-", "*", "/", "%", "<", ">", "!", "&", "|", "^", "~", "?", ":"]);
 
 function hasApplicablePatchShape(patchText: string) {
   const hasTargetHeader = /^(diff --git|---\s+(?:a\/)?\S+|\+\+\+\s+(?:b\/)?\S+)/m.test(patchText);
@@ -403,6 +505,104 @@ function getExecutionItems(message: ChatMessage): ChatMessageExecutionItem[] {
   ];
 }
 
+function normalizeCodeLanguage(language?: string) {
+  return (language ?? "").trim().replace(/[^\w+.#-]/g, "").slice(0, 32).toLowerCase();
+}
+
+function pushMarkdownExecutionBlock(
+  blocks: ExecutionRenderBlock[],
+  item: ChatMessageExecutionItem,
+  text: string,
+  suffix: string,
+) {
+  if (text.trim().length === 0 && !item.detail) {
+    return;
+  }
+
+  blocks.push({
+    id: `${item.id}-markdown-${suffix}`,
+    item,
+    text,
+    type: "markdown",
+  });
+}
+
+function pushCodeExecutionBlock(
+  blocks: ExecutionRenderBlock[],
+  openCodeBlock: { item: ChatMessageExecutionItem; language: string; lines: string[] },
+) {
+  const text = openCodeBlock.lines.join("\n").replace(/\n+$/g, "");
+
+  if (text.trim().length === 0) {
+    return;
+  }
+
+  blocks.push({
+    id: `${openCodeBlock.item.id}-code-${blocks.length}`,
+    item: openCodeBlock.item,
+    language: openCodeBlock.language,
+    text,
+    type: "code",
+  });
+}
+
+function getExecutionBlocks(message: ChatMessage): ExecutionRenderBlock[] {
+  const blocks: ExecutionRenderBlock[] = [];
+  let openCodeBlock: { item: ChatMessageExecutionItem; language: string; lines: string[] } | null = null;
+
+  getExecutionItems(message).forEach((item, itemIndex) => {
+    if (item.kind !== "reasoning") {
+      if (openCodeBlock) {
+        pushCodeExecutionBlock(blocks, openCodeBlock);
+        openCodeBlock = null;
+      }
+
+      pushMarkdownExecutionBlock(blocks, item, item.text, `${itemIndex}`);
+      return;
+    }
+
+    const lines = item.text.replace(/\r\n/g, "\n").split("\n");
+    const markdownLines: string[] = [];
+    let partIndex = 0;
+
+    lines.forEach((line) => {
+      const fenceMatch = line.match(codeFenceLinePattern);
+
+      if (fenceMatch) {
+        if (openCodeBlock) {
+          pushCodeExecutionBlock(blocks, openCodeBlock);
+          openCodeBlock = null;
+        } else {
+          pushMarkdownExecutionBlock(blocks, item, markdownLines.join("\n"), `${itemIndex}-${partIndex}`);
+          markdownLines.length = 0;
+          partIndex += 1;
+          openCodeBlock = {
+            item,
+            language: normalizeCodeLanguage(fenceMatch[1]),
+            lines: [],
+          };
+        }
+
+        return;
+      }
+
+      if (openCodeBlock) {
+        openCodeBlock.lines.push(line);
+      } else {
+        markdownLines.push(line);
+      }
+    });
+
+    pushMarkdownExecutionBlock(blocks, item, markdownLines.join("\n"), `${itemIndex}-${partIndex}`);
+  });
+
+  if (openCodeBlock) {
+    pushCodeExecutionBlock(blocks, openCodeBlock);
+  }
+
+  return blocks;
+}
+
 function hasExecutionItems(message: ChatMessage) {
   return getExecutionItems(message).length > 0;
 }
@@ -412,7 +612,7 @@ function shouldShowExecutionToggle(message: ChatMessage) {
 }
 
 function getExecutionCount(message: ChatMessage) {
-  return getExecutionItems(message).length;
+  return getExecutionBlocks(message).length;
 }
 
 function isExecutionOpen(message: ChatMessage) {
@@ -449,8 +649,170 @@ function getExecutionKindLabel(item: ChatMessageExecutionItem) {
   return t(`chat.execution.kind.${item.kind}`);
 }
 
-function renderExecutionMarkdown(item: ChatMessageExecutionItem) {
-  return props.renderMarkdown(item.text);
+function renderExecutionMarkdown(text: string) {
+  return props.renderMarkdown(text);
+}
+
+function formatExecutionCodeLanguage(language?: string) {
+  return language ? language.toUpperCase() : "code";
+}
+
+function escapeHtml(value: string) {
+  return value.replace(/[&<>"']/g, (character) => {
+    switch (character) {
+      case "&":
+        return "&amp;";
+      case "<":
+        return "&lt;";
+      case ">":
+        return "&gt;";
+      case "\"":
+        return "&quot;";
+      case "'":
+        return "&#39;";
+      default:
+        return character;
+    }
+  });
+}
+
+function wrapSyntaxToken(kind: string, value: string) {
+  return `<span class="syntax-${kind}">${escapeHtml(value)}</span>`;
+}
+
+function isIdentifierStart(character: string) {
+  return /[A-Za-z_$]/.test(character);
+}
+
+function isIdentifierPart(character: string) {
+  return /[A-Za-z0-9_$]/.test(character);
+}
+
+function readQuotedToken(line: string, startIndex: number) {
+  const quote = line[startIndex];
+  let index = startIndex + 1;
+  let escaped = false;
+
+  while (index < line.length) {
+    const character = line[index];
+
+    if (escaped) {
+      escaped = false;
+      index += 1;
+      continue;
+    }
+
+    if (character === "\\") {
+      escaped = true;
+      index += 1;
+      continue;
+    }
+
+    index += 1;
+
+    if (character === quote) {
+      break;
+    }
+  }
+
+  return index;
+}
+
+function highlightCodeLine(line: string, language: string) {
+  let html = "";
+  let index = 0;
+
+  while (index < line.length) {
+    const remaining = line.slice(index);
+    const character = line[index];
+
+    if (remaining.startsWith("<!--")) {
+      const commentEnd = line.indexOf("-->", index + 4);
+      const endIndex = commentEnd >= 0 ? commentEnd + 3 : line.length;
+      html += wrapSyntaxToken("comment", line.slice(index, endIndex));
+      index = endIndex;
+      continue;
+    }
+
+    if (remaining.startsWith("/*")) {
+      const commentEnd = line.indexOf("*/", index + 2);
+      const endIndex = commentEnd >= 0 ? commentEnd + 2 : line.length;
+      html += wrapSyntaxToken("comment", line.slice(index, endIndex));
+      index = endIndex;
+      continue;
+    }
+
+    if (remaining.startsWith("//")) {
+      html += wrapSyntaxToken("comment", remaining);
+      break;
+    }
+
+    if (character === "#" && (language === "" || hashCommentLanguages.has(language))) {
+      html += wrapSyntaxToken("comment", remaining);
+      break;
+    }
+
+    if (character === "\"" || character === "'" || character === "`") {
+      const endIndex = readQuotedToken(line, index);
+      html += wrapSyntaxToken("string", line.slice(index, endIndex));
+      index = endIndex;
+      continue;
+    }
+
+    if (/\d/.test(character)) {
+      const numberMatch = remaining.match(/^\d[\d_]*(?:\.\d[\d_]*)?(?:e[+-]?\d+)?/i);
+
+      if (numberMatch) {
+        html += wrapSyntaxToken("number", numberMatch[0]);
+        index += numberMatch[0].length;
+        continue;
+      }
+    }
+
+    if (isIdentifierStart(character)) {
+      let endIndex = index + 1;
+
+      while (endIndex < line.length && isIdentifierPart(line[endIndex])) {
+        endIndex += 1;
+      }
+
+      const word = line.slice(index, endIndex);
+      const nextVisibleCharacter = line.slice(endIndex).match(/\S/)?.[0];
+
+      if (codeKeywords.has(word)) {
+        html += wrapSyntaxToken("keyword", word);
+      } else if (codeLiterals.has(word)) {
+        html += wrapSyntaxToken("literal", word);
+      } else if (nextVisibleCharacter === "(") {
+        html += wrapSyntaxToken("function", word);
+      } else {
+        html += escapeHtml(word);
+      }
+
+      index = endIndex;
+      continue;
+    }
+
+    if (codeOperatorCharacters.has(character)) {
+      html += wrapSyntaxToken("operator", character);
+      index += 1;
+      continue;
+    }
+
+    html += escapeHtml(character);
+    index += 1;
+  }
+
+  return html;
+}
+
+function highlightExecutionCode(code: string, language?: string) {
+  const normalizedLanguage = normalizeCodeLanguage(language);
+  return code
+    .replace(/\r\n/g, "\n")
+    .split("\n")
+    .map((line) => highlightCodeLine(line, normalizedLanguage))
+    .join("\n");
 }
 
 function hasContextUsage(message: ChatMessage) {
@@ -685,26 +1047,32 @@ defineExpose({
             class="execution-panel"
           >
             <div
-              v-for="item in getExecutionItems(message)"
-              :key="item.id"
+              v-for="block in getExecutionBlocks(message)"
+              :key="block.id"
               class="execution-line"
-              :class="[item.kind, item.status]"
+              :class="[block.item.kind, block.item.status, block.type]"
             >
               <span class="execution-icon">
                 <el-icon>
-                  <component :is="getExecutionIcon(item)" />
+                  <component :is="getExecutionIcon(block.item)" />
                 </el-icon>
               </span>
-              <span class="execution-kind">{{ getExecutionKindLabel(item) }}</span>
+              <span class="execution-kind">{{ getExecutionKindLabel(block.item) }}</span>
               <div class="execution-copy">
-                <div class="execution-markdown" v-html="renderExecutionMarkdown(item)"></div>
+                <div v-if="block.type === 'code'" class="execution-code-block">
+                  <div class="execution-code-header">
+                    {{ formatExecutionCodeLanguage(block.language) }}
+                  </div>
+                  <pre class="execution-code-pre"><code v-html="highlightExecutionCode(block.text, block.language)"></code></pre>
+                </div>
+                <div v-else class="execution-markdown" v-html="renderExecutionMarkdown(block.text)"></div>
                 <details
-                  v-if="item.detail"
+                  v-if="block.type === 'markdown' && block.item.detail"
                   class="execution-detail"
                   @toggle="scheduleFollowScroll()"
                 >
                   <summary>{{ t("chat.execution.detail") }}</summary>
-                  <pre>{{ item.detail }}</pre>
+                  <pre>{{ block.item.detail }}</pre>
                 </details>
               </div>
             </div>
@@ -1218,13 +1586,90 @@ defineExpose({
   border: 1px solid #dbe4dd;
   border-radius: 8px;
   padding: 10px;
-  background: #17201c;
+  background: #fbfcfd;
 }
 
 .execution-markdown :deep(pre code) {
   padding: 0;
-  color: #edf6f0;
+  color: #27332d;
   background: transparent;
+}
+
+.execution-code-block {
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid #d8e3dc;
+  border-radius: 8px;
+  background: #fbfcfd;
+  box-shadow: 0 6px 18px rgba(31, 43, 36, 0.05);
+}
+
+.execution-code-header {
+  display: flex;
+  min-height: 28px;
+  align-items: center;
+  border-bottom: 1px solid #e1e9e4;
+  padding: 5px 10px;
+  color: #557064;
+  background: #f2f7f4;
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.execution-code-pre {
+  overflow: auto;
+  max-height: 420px;
+  margin: 0;
+  padding: 11px 12px;
+  color: #25322b;
+  background: #fbfcfd;
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.6;
+  tab-size: 2;
+  white-space: pre;
+}
+
+.execution-code-pre code {
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+}
+
+.execution-code-pre :deep(.syntax-keyword) {
+  color: #245cbf;
+  font-weight: 800;
+}
+
+.execution-code-pre :deep(.syntax-string) {
+  color: #257247;
+}
+
+.execution-code-pre :deep(.syntax-comment) {
+  color: #7a867e;
+  font-style: italic;
+}
+
+.execution-code-pre :deep(.syntax-number) {
+  color: #ad5f00;
+}
+
+.execution-code-pre :deep(.syntax-literal) {
+  color: #7b4ab8;
+  font-weight: 700;
+}
+
+.execution-code-pre :deep(.syntax-function) {
+  color: #087987;
+  font-weight: 700;
+}
+
+.execution-code-pre :deep(.syntax-operator) {
+  color: #a34444;
 }
 
 .execution-detail {
