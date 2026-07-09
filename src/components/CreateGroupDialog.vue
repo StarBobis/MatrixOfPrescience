@@ -84,7 +84,13 @@ const { t } = useI18n();
       <section v-for="member in members" :key="member.id" class="settings-card">
         <div class="settings-card-head">
           <el-input v-model="member.name" class="model-name-input" />
-          <el-switch v-model="member.enabled" />
+          <div class="draft-member-toggles">
+            <span class="draft-toggle">
+              <span>{{ t("members.adminRole") }}</span>
+              <el-switch v-model="member.isAdmin" active-color="#2f7a61" />
+            </span>
+            <el-switch v-model="member.enabled" />
+          </div>
         </div>
 
         <div class="member-grid">
@@ -144,5 +150,19 @@ const { t } = useI18n();
 
 .history-member-select {
   width: 220px;
+}
+
+.draft-member-toggles,
+.draft-toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.draft-toggle > span {
+  color: #2f7a61;
+  font-size: 12px;
+  font-weight: 800;
 }
 </style>

@@ -33,6 +33,7 @@ export interface AgentModel {
   systemPrompt: string;
   temperature: number;
   enabled: boolean;
+  isAdmin: boolean;
   color: string;
   avatar?: string;
 }
@@ -242,6 +243,7 @@ function normalizeMember(member: AgentModel): AgentModel {
     libraryId: member.libraryId ?? crypto.randomUUID(),
     reasoningEffort: normalizeReasoningEffort(member.reasoningEffort),
     temperature: Number.isFinite(member.temperature) ? member.temperature : 0.7,
+    isAdmin: Boolean(member.isAdmin),
   };
 }
 
@@ -291,6 +293,7 @@ function createMember(
     systemPrompt,
     temperature: 0.7,
     enabled: true,
+    isAdmin: false,
     color: getModelColor(provider),
   };
 }
@@ -341,6 +344,7 @@ function toPlainMember(member: AgentModel): AgentModel {
     systemPrompt: member.systemPrompt,
     temperature: member.temperature,
     enabled: member.enabled,
+    isAdmin: Boolean(member.isAdmin),
     color: member.color,
     avatar: member.avatar,
   };

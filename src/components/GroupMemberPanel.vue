@@ -161,7 +161,10 @@ async function assignLocalAvatar(member: AgentModel) {
           <span v-else>{{ getInitial(ownerProfile.name) }}</span>
         </span>
         <div class="member-card-copy">
-          <strong>{{ ownerProfile.name || t("common.ownerName") }}</strong>
+          <div class="member-name-row">
+            <strong>{{ ownerProfile.name || t("common.ownerName") }}</strong>
+            <span class="identity-badge owner">{{ t("common.ownerRole") }}</span>
+          </div>
           <span class="member-sub">· {{ t("common.ownerRole") }}</span>
         </div>
       </article>
@@ -178,7 +181,7 @@ async function assignLocalAvatar(member: AgentModel) {
         <template #reference>
           <div
             class="right-member-card"
-            :class="{ muted: !member.enabled }"
+            :class="{ admin: member.isAdmin, muted: !member.enabled }"
             :style="{ '--member-accent': member.color }"
             @mouseenter="showMemberCard(member.id)"
             @mouseleave="scheduleHideMemberCard(member.id)"
@@ -188,7 +191,12 @@ async function assignLocalAvatar(member: AgentModel) {
               <span v-else>{{ getInitial(member.name) }}</span>
             </span>
             <div class="member-card-copy">
-              <strong>{{ member.name }}</strong>
+              <div class="member-name-row">
+                <strong>{{ member.name }}</strong>
+                <span v-if="member.isAdmin" class="identity-badge admin">
+                  {{ t("members.adminRole") }}
+                </span>
+              </div>
               <span v-if="!member.enabled" class="member-sub">{{ t("members.muted") }}</span>
               <span v-else class="member-sub">· {{ member.model }}</span>
             </div>
@@ -214,7 +222,12 @@ async function assignLocalAvatar(member: AgentModel) {
               @blur="finishMemberCardEdit(member.id)"
               @keydown.enter.prevent="finishMemberCardEdit(member.id)"
             />
-              <span v-if="!member.enabled">{{ t("members.muted") }}</span>
+              <div class="profile-badges">
+                <span v-if="member.isAdmin" class="identity-badge admin">
+                  {{ t("members.adminRole") }}
+                </span>
+                <span v-if="!member.enabled">{{ t("members.muted") }}</span>
+              </div>
             </div>
           </div>
 
@@ -319,6 +332,19 @@ async function assignLocalAvatar(member: AgentModel) {
               active-color="#c45656"
               :active-value="false"
               :inactive-value="true"
+              @change="emit('updateMemberProfile', member)"
+            />
+          </div>
+
+          <div class="profile-admin-row">
+            <span>{{ t("members.adminQuestion") }}</span>
+            <el-switch
+              v-model="member.isAdmin"
+              size="small"
+              inline-prompt
+              :active-text="t('common.yes')"
+              :inactive-text="t('common.no')"
+              active-color="#2f7a61"
               @change="emit('updateMemberProfile', member)"
             />
           </div>
@@ -436,8 +462,8 @@ async function assignLocalAvatar(member: AgentModel) {
 
 /* ===== 群主卡片 ===== */
 .owner-card {
-  border-color: #c4dbcf;
-  background: linear-gradient(135deg, #f6fbf8, #edf5f0);
+  border-color: #d8b75f;
+  background: linear-gradient(135deg, #fffaf0, #fff2c8);
 }
 
 /* ===== 成员卡片 ===== */
@@ -449,6 +475,16 @@ async function assignLocalAvatar(member: AgentModel) {
   border-color: #b8cdc1;
   background: #f8fbf9;
   box-shadow: 0 2px 8px rgba(31, 43, 36, 0.06);
+}
+
+.right-member-card.admin {
+  border-color: #8fc6a9;
+  background: #f4fbf7;
+}
+
+.right-member-card.admin:hover {
+  border-color: #5fa382;
+  background: #eef8f2;
 }
 
 .right-member-card.muted {
@@ -501,7 +537,7 @@ async function assignLocalAvatar(member: AgentModel) {
 }
 
 .owner-avatar {
-  box-shadow: 0 0 0 2px #fff, 0 0 0 3px rgba(90, 158, 130, 0.5);
+  box-shadow: 0 0 0 2px #fff, 0 0 0 3px rgba(181, 133, 29, 0.55);
 }
 
 /* ===== 文案区域 ===== */
@@ -514,13 +550,45 @@ async function assignLocalAvatar(member: AgentModel) {
   overflow: hidden;
 }
 
+.member-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
 .member-card-copy strong {
+  min-width: 0;
   font-size: 13px;
   font-weight: 700;
   color: #1a2620;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.identity-badge {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-height: 20px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.identity-badge.admin {
+  color: #2f7a61;
+  background: #eef8f2;
+}
+
+.identity-badge.owner {
+  color: #9a6a13;
+  background: #fff6dc;
 }
 
 .member-card-copy .member-sub {
@@ -561,7 +629,8 @@ async function assignLocalAvatar(member: AgentModel) {
   min-width: 0;
 }
 
-.profile-title span {
+.profile-title > span,
+.profile-badges > span:not(.identity-badge) {
   display: block;
   overflow: hidden;
   margin-top: 3px;
@@ -569,6 +638,13 @@ async function assignLocalAvatar(member: AgentModel) {
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.profile-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 5px;
 }
 
 .profile-details {
@@ -579,7 +655,8 @@ async function assignLocalAvatar(member: AgentModel) {
 }
 
 .profile-details div,
-.profile-muted-row {
+.profile-muted-row,
+.profile-admin-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -588,6 +665,7 @@ async function assignLocalAvatar(member: AgentModel) {
 
 .profile-details dt,
 .profile-muted-row span,
+.profile-admin-row span,
 .profile-prompt span {
   color: #778179;
   font-size: 12px;

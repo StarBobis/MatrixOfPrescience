@@ -34,6 +34,7 @@ export function buildSystemPrompt(
       : "",
     buildSafetyPolicy(group),
     t("agentPrompt.coreRole"),
+    member.isAdmin ? t("agentPrompt.memberAdmin") : "",
     member.systemPrompt.trim(),
     codeContext
       ? [

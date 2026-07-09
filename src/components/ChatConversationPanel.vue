@@ -13,6 +13,7 @@ export interface SpeakerQueueItem {
   id: string;
   name: string;
   color: string;
+  isAdmin: boolean;
   status: SpeakerQueueStatus;
 }
 
@@ -120,6 +121,10 @@ function getMessageReasoningEffort(message: ChatMessage) {
   return message.reasoningEffort || findMessageMember(message)?.reasoningEffort || "off";
 }
 
+function isAdminMessage(message: ChatMessage) {
+  return message.role === "assistant" && Boolean(findMessageMember(message)?.isAdmin);
+}
+
 function formatDuration(durationMs?: number) {
   if (!Number.isFinite(durationMs)) {
     return "";
@@ -217,6 +222,9 @@ defineExpose({
         >
           <span class="queue-dot"></span>
           <strong>{{ member.name }}</strong>
+          <span v-if="member.isAdmin" class="identity-badge admin">
+            {{ t("members.adminRole") }}
+          </span>
           <el-tag size="small" :type="speakerQueueStatusType[member.status]">
             {{ t(`chat.queue.status.${member.status}`) }}
           </el-tag>
@@ -246,6 +254,12 @@ defineExpose({
           <div class="message-heading">
             <div class="message-title">
               <strong>{{ message.modelName }}</strong>
+              <span v-if="message.role === 'user'" class="identity-badge owner">
+                {{ t("common.ownerRole") }}
+              </span>
+              <span v-else-if="isAdminMessage(message)" class="identity-badge admin">
+                {{ t("members.adminRole") }}
+              </span>
               <span v-if="message.providerName">{{ message.providerName }}</span>
             </div>
             <div class="message-detail-list">
@@ -305,6 +319,9 @@ defineExpose({
             {{ member.name.trim().slice(0, 1) || "?" }}
           </span>
           <span>{{ member.name }}</span>
+          <span v-if="member.isAdmin" class="identity-badge admin">
+            {{ t("members.adminRole") }}
+          </span>
         </button>
       </div>
 
@@ -417,6 +434,39 @@ defineExpose({
   white-space: nowrap;
 }
 
+.identity-badge {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  min-height: 20px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.identity-badge.admin {
+  color: #2f7a61;
+  background: #eef8f2;
+}
+
+.identity-badge.owner {
+  color: #9a6a13;
+  background: #fff6dc;
+}
+
+.message-title .identity-badge {
+  color: #2f7a61;
+  font-size: 11px;
+}
+
+.message-title .identity-badge.owner {
+  color: #9a6a13;
+}
+
 .queue-dot {
   width: 8px;
   height: 8px;
@@ -449,6 +499,13 @@ defineExpose({
   background: transparent;
   cursor: pointer;
   text-align: left;
+}
+
+.mention-menu button > span:nth-child(2) {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .mention-menu button:hover {

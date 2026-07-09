@@ -2,8 +2,7 @@ use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
-    env,
-    fs,
+    env, fs,
     io::Write,
     path::{Component, Path, PathBuf},
     process::{Command, Output},
@@ -92,6 +91,9 @@ struct AvatarCacheResponse {
     path: String,
 }
 
+const MAX_CHAT_COMPLETION_TURNS: usize = 8;
+const MAX_CODE_TOOL_ROUNDS: usize = 5;
+const FINAL_ANSWER_INSTRUCTION: &str = "The code reading tool budget for this response is exhausted. Use the tool results already provided and write the final answer now. Do not request more tool calls.";
 const CACHE_LOCATION_FILE: &str = "cache-location.json";
 const SETTINGS_FILE: &str = "settings.json";
 const MEMBER_LIBRARY_FILE: &str = "member-library.json";
@@ -363,25 +365,26 @@ async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletio
     let client = reqwest::Client::new();
     let is_deepseek = is_deepseek_provider(&request.provider_name, &request.base_url);
     let mut code_tool_called = false;
+    let mut code_tool_rounds = 0usize;
+    let mut final_answer_requested = false;
+    let mut last_finish_reason: Option<String> = None;
 
-    for _ in 0..4 {
+    for _ in 0..MAX_CHAT_COMPLETION_TURNS {
+        let payload_messages = chat_payload_messages(&messages, final_answer_requested);
         let mut payload = json!({
             "model": request.model,
-            "messages": messages,
+            "messages": payload_messages,
             "temperature": request.temperature.unwrap_or(0.7),
         });
+        let strict_tool_schema = is_deepseek && code_workspace.is_some() && !final_answer_requested;
 
-        if let Some(reasoning_effort) = request.reasoning_effort.as_deref() {
-            let trimmed = reasoning_effort.trim();
-            if !trimmed.is_empty() && trimmed != "off" {
-                payload["reasoning_effort"] = json!(trimmed);
-                if is_deepseek {
-                    payload["thinking"] = json!({ "type": "enabled" });
-                }
-            }
-        }
+        apply_reasoning_payload(
+            &mut payload,
+            is_deepseek,
+            request.reasoning_effort.as_deref(),
+        );
 
-        if code_workspace.is_some() {
+        if code_workspace.is_some() && !final_answer_requested {
             payload["tools"] = codegraph_tools_schema(is_deepseek);
             payload["tool_choice"] = if is_deepseek && !code_tool_called {
                 json!("required")
@@ -400,7 +403,7 @@ async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletio
         .await
         {
             Ok(parsed) => parsed,
-            Err(error) if is_deepseek && code_workspace.is_some() => {
+            Err(error) if strict_tool_schema => {
                 payload["tools"] = codegraph_tools_schema(false);
                 payload["tool_choice"] = json!("auto");
                 send_chat_completion_request(
@@ -420,6 +423,7 @@ async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletio
             }
             Err(error) => return Err(error),
         };
+        last_finish_reason = first_choice_finish_reason(&parsed);
         let message = parsed
             .get("choices")
             .and_then(|choices| choices.get(0))
@@ -437,25 +441,32 @@ async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletio
                     messages.push(execute_code_tool_call(workspace, tool_call));
                 }
                 code_tool_called = true;
+                code_tool_rounds += 1;
+                if code_tool_rounds >= MAX_CODE_TOOL_ROUNDS {
+                    final_answer_requested = true;
+                }
                 continue;
             }
         }
 
-        let content = message
-            .get("content")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .trim()
-            .to_string();
+        let content = message_content_text(&message);
 
         if !content.is_empty() {
             return Ok(ChatCompletionResponse { content });
         }
+
+        if code_tool_called && !final_answer_requested {
+            final_answer_requested = true;
+            continue;
+        }
     }
 
+    let reason = last_finish_reason
+        .map(|value| format!(" finish_reason={}", value))
+        .unwrap_or_default();
     Err(format!(
-        "{} returned no displayable content.",
-        request.provider_name
+        "{} returned no displayable content.{}",
+        request.provider_name, reason
     ))
 }
 
@@ -464,16 +475,75 @@ fn is_deepseek_provider(provider_name: &str, base_url: &str) -> bool {
         || base_url.to_ascii_lowercase().contains("deepseek")
 }
 
+fn apply_reasoning_payload(payload: &mut Value, is_deepseek: bool, reasoning_effort: Option<&str>) {
+    let trimmed = reasoning_effort.unwrap_or("").trim();
+    let reasoning_enabled = !trimmed.is_empty() && trimmed != "off";
+
+    if is_deepseek {
+        payload["thinking"] = if reasoning_enabled {
+            json!({ "type": "enabled" })
+        } else {
+            json!({ "type": "disabled" })
+        };
+    }
+
+    if reasoning_enabled {
+        payload["reasoning_effort"] = json!(trimmed);
+    }
+}
+
+fn chat_payload_messages(messages: &[Value], final_answer_requested: bool) -> Vec<Value> {
+    let mut payload_messages = messages.to_vec();
+
+    if final_answer_requested {
+        payload_messages.push(json!({
+            "role": "user",
+            "content": FINAL_ANSWER_INSTRUCTION,
+        }));
+    }
+
+    payload_messages
+}
+
+fn first_choice_finish_reason(parsed: &Value) -> Option<String> {
+    parsed
+        .get("choices")
+        .and_then(|choices| choices.get(0))
+        .and_then(|choice| choice.get("finish_reason"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn message_content_text(message: &Value) -> String {
+    match message.get("content") {
+        Some(Value::String(content)) => content.trim().to_string(),
+        Some(Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|part| part.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string(),
+        _ => String::new(),
+    }
+}
+
 fn codegraph_tools_schema(strict: bool) -> Value {
     let mut function = json!({
         "name": "codegraph_explore",
-        "description": "Read the current workspace with CodeGraph. Use it before answering questions about code, files, symbols, call paths, or implementation details.",
+        "description": "Read the current workspace with CodeGraph. Use it before answering questions about code, files, symbols, call paths, or implementation details. The `Found N symbols across M files` line is query-scoped, not the total index file count.",
         "parameters": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
                     "description": "The symbols, files, call flow, or implementation question to inspect."
+                },
+                "maxFiles": {
+                    "type": "integer",
+                    "description": "Optional maximum number of files to include source from. Defaults to 12 and is capped at 24.",
+                    "minimum": 1,
+                    "maximum": 24
                 }
             },
             "required": ["query"]
@@ -547,11 +617,12 @@ fn execute_code_tool_call(workspace: &Path, tool_call: &Value) -> Value {
             .get("query")
             .and_then(Value::as_str)
             .unwrap_or_default();
+        let max_files = parsed_arguments.get("maxFiles").and_then(Value::as_u64);
 
         if query.trim().is_empty() {
             "CodeGraph returned no usable result.".to_string()
         } else {
-            match run_codegraph_explore(workspace, &query) {
+            match run_codegraph_explore(workspace, &query, max_files) {
                 Ok(content) => content,
                 Err(codegraph_error) => {
                     read_local_code_context(workspace, &query)
@@ -679,7 +750,119 @@ fn truncate_text(text: String, max_chars: usize) -> String {
     truncated
 }
 
-fn run_codegraph_explore(workspace: &Path, query: &str) -> Result<String, String> {
+const DEFAULT_CODEGRAPH_MAX_FILES: u64 = 12;
+const MAX_CODEGRAPH_MAX_FILES: u64 = 24;
+const CODEGRAPH_EXPLORE_SCOPE_NOTE: &str = "CodeGraph explore note: `Found N symbols across M files` describes only this query's returned relevant symbols/files. It is not the total CodeGraph index file count, and should not be used as the index health/status summary. If a CodeGraph index status section is present, use that for status questions.";
+
+fn normalize_codegraph_max_files(max_files: Option<u64>) -> u64 {
+    max_files
+        .unwrap_or(DEFAULT_CODEGRAPH_MAX_FILES)
+        .clamp(1, MAX_CODEGRAPH_MAX_FILES)
+}
+
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
+}
+
+fn is_codegraph_status_query(query: &str) -> bool {
+    let lower = query.to_lowercase();
+
+    contains_any(
+        &lower,
+        &[
+            "codegraph status",
+            "status",
+            "health",
+            "statistics",
+            "stats",
+            "coverage",
+            "indexed files",
+            "index coverage",
+            "index statistics",
+            "状态",
+            "健康",
+            "统计",
+            "覆盖",
+            "工作正常",
+            "文件数",
+        ],
+    ) || (lower.contains("index")
+        && contains_any(
+            &lower,
+            &[
+                "up to date",
+                "file count",
+                "files indexed",
+                "how many files",
+                "total files",
+            ],
+        ))
+        || (lower.contains("索引")
+            && contains_any(
+                &lower,
+                &["状态", "统计", "覆盖", "文件", "正常", "健康", "多少"],
+            ))
+}
+
+fn strip_ansi_escape_sequences(text: &str) -> String {
+    let mut cleaned = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if ch == '\x1b' && matches!(chars.peek(), Some('[')) {
+            chars.next();
+            for next in chars.by_ref() {
+                if ('@'..='~').contains(&next) {
+                    break;
+                }
+            }
+            continue;
+        }
+
+        cleaned.push(ch);
+    }
+
+    cleaned
+}
+
+fn run_codegraph_status(workspace: &Path) -> Result<String, String> {
+    let output = run_codegraph_command(workspace, &["status"])?;
+    let stdout = strip_ansi_escape_sequences(&String::from_utf8_lossy(&output.stdout));
+    let stderr = strip_ansi_escape_sequences(&String::from_utf8_lossy(&output.stderr));
+
+    if !output.status.success() || stdout.trim().is_empty() {
+        return Err(if stderr.trim().is_empty() {
+            "CodeGraph status returned no usable result.".to_string()
+        } else {
+            format!("CodeGraph status failed: {}", stderr.trim())
+        });
+    }
+
+    Ok(stdout.trim().to_string())
+}
+
+fn format_codegraph_explore_output(explore_output: &str, status_output: Option<&str>) -> String {
+    let mut sections = vec![CODEGRAPH_EXPLORE_SCOPE_NOTE.to_string()];
+
+    if let Some(status) = status_output
+        .map(str::trim)
+        .filter(|status| !status.is_empty())
+    {
+        sections.push(format!("CodeGraph index status:\n{}", status));
+    }
+
+    sections.push(format!(
+        "CodeGraph explore result:\n{}",
+        explore_output.trim()
+    ));
+    sections.join("\n\n")
+}
+
+fn run_codegraph_explore(
+    workspace: &Path,
+    query: &str,
+    max_files: Option<u64>,
+) -> Result<String, String> {
     if !has_codegraph_index(workspace) {
         return Err(format!(
             "No .codegraph index was found for {}. Select an indexed workspace or run `codegraph init` and `codegraph index` in that project.",
@@ -687,7 +870,11 @@ fn run_codegraph_explore(workspace: &Path, query: &str) -> Result<String, String
         ));
     }
 
-    let output = run_codegraph_command(workspace, &["explore", query])?;
+    let max_files_arg = normalize_codegraph_max_files(max_files).to_string();
+    let output = run_codegraph_command(
+        workspace,
+        &["explore", "--max-files", max_files_arg.as_str(), query],
+    )?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -700,7 +887,19 @@ fn run_codegraph_explore(workspace: &Path, query: &str) -> Result<String, String
         });
     }
 
-    Ok(truncate_text(stdout, 18_000))
+    let status_output =
+        if is_codegraph_status_query(query) {
+            Some(run_codegraph_status(workspace).unwrap_or_else(|error| {
+                format!("CodeGraph index status could not be read: {}", error)
+            }))
+        } else {
+            None
+        };
+
+    Ok(truncate_text(
+        format_codegraph_explore_output(&stdout, status_output.as_deref()),
+        18_000,
+    ))
 }
 
 fn is_code_file(path: &str) -> bool {
@@ -813,7 +1012,7 @@ async fn inspect_code_workspace(
         return Err("Code inspection query cannot be empty.".to_string());
     }
 
-    match run_codegraph_explore(&workspace, query) {
+    match run_codegraph_explore(&workspace, query, None) {
         Ok(content) => Ok(InspectCodeWorkspaceResponse {
             tool: "CodeGraph".to_string(),
             content,
@@ -970,6 +1169,123 @@ async fn apply_patch_proposal(request: ApplyPatchRequest) -> Result<ApplyPatchRe
 
     let _ = fs::remove_file(patch_file);
     result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalizes_codegraph_max_files() {
+        assert_eq!(
+            normalize_codegraph_max_files(None),
+            DEFAULT_CODEGRAPH_MAX_FILES
+        );
+        assert_eq!(normalize_codegraph_max_files(Some(0)), 1);
+        assert_eq!(normalize_codegraph_max_files(Some(7)), 7);
+        assert_eq!(
+            normalize_codegraph_max_files(Some(99)),
+            MAX_CODEGRAPH_MAX_FILES
+        );
+    }
+
+    #[test]
+    fn detects_codegraph_status_queries_without_matching_file_names() {
+        assert!(is_codegraph_status_query("check CodeGraph status"));
+        assert!(is_codegraph_status_query(
+            "show index statistics and file count"
+        ));
+        assert!(!is_codegraph_status_query("open src/i18n/index.ts"));
+    }
+
+    #[test]
+    fn strips_ansi_escape_sequences_from_status_output() {
+        assert_eq!(
+            strip_ansi_escape_sequences("\x1b[1mCodeGraph Status\x1b[0m\n\x1b[32m[OK]\x1b[0m"),
+            "CodeGraph Status\n[OK]"
+        );
+    }
+
+    #[test]
+    fn formatted_codegraph_output_clarifies_query_scope() {
+        let output = format_codegraph_explore_output(
+            "Found 44 symbols across 3 files.\n\n**Source Code**",
+            Some("Index Statistics:\n  Files:     26"),
+        );
+
+        assert!(output.contains("query's returned relevant symbols/files"));
+        assert!(output.contains("not the total CodeGraph index file count"));
+        assert!(output.contains("Files:     26"));
+        assert!(output.contains("CodeGraph explore result:"));
+    }
+
+    #[test]
+    fn deepseek_reasoning_payload_can_disable_thinking() {
+        let mut payload = json!({});
+
+        apply_reasoning_payload(&mut payload, true, Some("off"));
+
+        assert_eq!(payload["thinking"], json!({ "type": "disabled" }));
+        assert!(payload.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn deepseek_reasoning_payload_enables_thinking_with_effort() {
+        let mut payload = json!({});
+
+        apply_reasoning_payload(&mut payload, true, Some("high"));
+
+        assert_eq!(payload["thinking"], json!({ "type": "enabled" }));
+        assert_eq!(payload["reasoning_effort"], json!("high"));
+    }
+
+    #[test]
+    fn final_answer_request_appends_internal_instruction() {
+        let messages = vec![json!({ "role": "user", "content": "question" })];
+        let payload_messages = chat_payload_messages(&messages, true);
+
+        assert_eq!(payload_messages.len(), 2);
+        assert_eq!(payload_messages[0]["content"], json!("question"));
+        assert_eq!(payload_messages[1]["role"], json!("user"));
+        assert!(payload_messages[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("final answer"));
+    }
+
+    #[test]
+    fn extracts_message_content_from_string_and_text_parts() {
+        assert_eq!(
+            message_content_text(&json!({ "content": "  hello  " })),
+            "hello"
+        );
+        assert_eq!(
+            message_content_text(&json!({
+                "content": [
+                    { "type": "text", "text": "hello" },
+                    { "type": "text", "text": "world" }
+                ]
+            })),
+            "hello\nworld"
+        );
+    }
+
+    #[test]
+    fn reads_first_choice_finish_reason() {
+        let parsed = json!({
+            "choices": [
+                {
+                    "finish_reason": "tool_calls",
+                    "message": { "content": "" }
+                }
+            ]
+        });
+
+        assert_eq!(
+            first_choice_finish_reason(&parsed),
+            Some("tool_calls".to_string())
+        );
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

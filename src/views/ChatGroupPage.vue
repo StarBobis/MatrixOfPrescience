@@ -101,6 +101,7 @@ const newGroupMembers = ref<AgentModel[]>([]);
 
 const activeMessages = computed<ChatMessage[]>(() => activeGroup.value?.messages ?? []);
 const activeGroupMembers = computed(() => activeGroup.value?.members ?? []);
+const orderedActiveMembers = computed(() => prioritizeMembers(activeMembers.value));
 const activeGroupAnnouncement = computed({
   get: () => activeGroup.value?.announcement ?? "",
   set: (value: string) => {
@@ -260,11 +261,22 @@ function updateMemberProvider(member: AgentModel) {
   settingsStore.updateMemberProvider(member);
 }
 
+function prioritizeMembers(members: AgentModel[]) {
+  return members
+    .map((member, index) => ({ member, index }))
+    .sort((left, right) => {
+      const adminPriority = Number(right.member.isAdmin) - Number(left.member.isAdmin);
+      return adminPriority || left.index - right.index;
+    })
+    .map(({ member }) => member);
+}
+
 function setSpeakerQueue(members: AgentModel[], status: SpeakerQueueStatus) {
   speakerQueue.value = members.map((member) => ({
     id: member.id,
     name: member.name,
     color: member.color,
+    isAdmin: Boolean(member.isAdmin),
     status,
   }));
 }
@@ -275,6 +287,7 @@ function upsertSpeakerQueueMember(member: AgentModel, status: SpeakerQueueStatus
   if (existing) {
     existing.name = member.name;
     existing.color = member.color;
+    existing.isAdmin = Boolean(member.isAdmin);
     existing.status = status;
     return;
   }
@@ -283,6 +296,7 @@ function upsertSpeakerQueueMember(member: AgentModel, status: SpeakerQueueStatus
     id: member.id,
     name: member.name,
     color: member.color,
+    isAdmin: Boolean(member.isAdmin),
     status,
   });
 }
@@ -831,7 +845,7 @@ async function voteOnAnswer(
 }
 
 async function collectMemberVotes(answer: MemberAnswer, runId: string) {
-  const voters = activeMembers.value.filter((member) => member.id !== answer.member.id);
+  const voters = orderedActiveMembers.value.filter((member) => member.id !== answer.member.id);
   const agreeMemberIds: string[] = [];
   const supplementMemberIds: string[] = [];
   const disagreeMemberIds: string[] = [];
@@ -919,7 +933,7 @@ async function sendMessage() {
     return;
   }
 
-  const missingKey = activeMembers.value.find((member) => !getProvider(member).apiKey.trim());
+  const missingKey = orderedActiveMembers.value.find((member) => !getProvider(member).apiKey.trim());
   if (missingKey) {
     ElMessage.warning(t("messages.configureApiKey", { provider: getProviderLabel(missingKey.provider) }));
     emit("openSettings");
@@ -942,7 +956,7 @@ async function sendMessage() {
     color: ownerProfile.value.color,
   });
 
-  const members = [...activeMembers.value];
+  const members = [...orderedActiveMembers.value];
   setSpeakerQueue(members, "queued");
   const mentionedMembers = parseMentionedMembers(userText, members);
   const waitingMembers: AgentModel[] = [];
@@ -963,8 +977,8 @@ async function sendMessage() {
         await resolveConsensus(answer, runId);
       }
 
-      const observerMembers = members.filter(
-        (member) => !mentionedMembers.some((mentioned) => mentioned.id === member.id),
+      const observerMembers = prioritizeMembers(
+        members.filter((member) => !mentionedMembers.some((mentioned) => mentioned.id === member.id)),
       );
       setSpeakerQueue(observerMembers, "waiting");
 
@@ -1046,7 +1060,7 @@ async function sendMessage() {
           v-model:composer="composer"
           :active-group="activeGroup"
           :active-member-count="activeMembers.length"
-          :active-members="activeMembers"
+          :active-members="orderedActiveMembers"
           :speaker-queue="speakerQueue"
           :messages="activeMessages"
           :patch-proposals="activeGroup?.patchProposals ?? []"
