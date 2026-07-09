@@ -12,6 +12,18 @@ dist
 dist-ssr
 *.local
 
+# Local secrets and runtime-only configuration
+.env
+.env.*
+!.env.example
+*.secret.*
+*.secrets.*
+local.settings.json
+settings.local.json
+
+# Local code intelligence index
+.codegraph/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
