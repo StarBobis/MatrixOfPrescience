@@ -213,6 +213,68 @@ function getActivityIcon(item: ChatMessageActivityItem) {
   return item.kind === "tool" ? Tools : RefreshLeft;
 }
 
+function hasReasoning(message: ChatMessage) {
+  return (message.thoughtSteps ?? []).some((step) => step.trim().length > 0);
+}
+
+function renderReasoningMarkdown(message: ChatMessage) {
+  return props.renderMarkdown((message.thoughtSteps ?? []).join("\n"));
+}
+
+function hasContextUsage(message: ChatMessage) {
+  return Number.isFinite(message.contextUsedTokens) && Number.isFinite(message.contextLimitTokens);
+}
+
+function formatTokenCount(value?: number) {
+  if (!Number.isFinite(value)) {
+    return "-";
+  }
+
+  const tokens = Math.max(0, Math.round(value ?? 0));
+
+  if (tokens >= 1_000_000) {
+    return `${Number((tokens / 1_000_000).toFixed(1))}M`;
+  }
+
+  if (tokens >= 1000) {
+    return `${Number((tokens / 1000).toFixed(1))}k`;
+  }
+
+  return `${tokens}`;
+}
+
+function getContextRingStyle(message: ChatMessage) {
+  const used = Math.max(0, message.contextUsedTokens ?? 0);
+  const limit = Math.max(1, message.contextLimitTokens ?? 1);
+  const ratio = Math.min(1, used / limit);
+
+  return {
+    "--context-deg": `${Math.round(ratio * 360)}deg`,
+  };
+}
+
+function getContextPercent(message: ChatMessage) {
+  const used = Math.max(0, message.contextUsedTokens ?? 0);
+  const limit = Math.max(1, message.contextLimitTokens ?? 1);
+  return Math.min(100, Math.max(0, (used / limit) * 100)).toFixed(1);
+}
+
+function hasCacheUsage(message: ChatMessage) {
+  return (message.contextCacheHitTokens ?? 0) + (message.contextCacheMissTokens ?? 0) > 0;
+}
+
+function getCacheHitRate(message: ChatMessage) {
+  const hit = Math.max(0, message.contextCacheHitTokens ?? 0);
+  const miss = Math.max(0, message.contextCacheMissTokens ?? 0);
+  const total = hit + miss;
+
+  if (total <= 0) {
+    return "";
+  }
+
+  return ((hit / total) * 100).toFixed(1);
+}
+
 defineExpose({
   scrollToBottom,
 });
@@ -327,7 +389,7 @@ defineExpose({
         v-for="message in messages"
         :key="message.id"
         class="message-row"
-        :class="message.role"
+        :class="[message.role, message.status]"
         :style="{ '--accent': message.color }"
       >
         <div class="message-meta">
@@ -366,34 +428,90 @@ defineExpose({
 
         <div class="message-body" v-html="renderMarkdown(message.content)"></div>
 
-        <div
-          v-if="(message.activityItems ?? []).length > 0"
-          class="message-activity-bar"
-          :class="message.status"
-        >
-          <span
-            v-for="item in message.activityItems"
-            :key="item.id"
-            class="activity-chip"
-            :class="[item.kind, item.status]"
-            :title="item.text"
+        <div class="message-status-bar" :class="message.status">
+          <div class="message-activity-feed">
+            <template v-if="(message.activityItems ?? []).length > 0">
+              <template v-for="item in message.activityItems" :key="item.id">
+                <details
+                  v-if="item.kind === 'tool'"
+                  class="activity-chip activity-detail-chip"
+                  :class="[item.kind, item.status]"
+                >
+                  <summary :title="item.text">
+                    <el-icon>
+                      <component :is="getActivityIcon(item)" />
+                    </el-icon>
+                    <span>{{ item.text }}</span>
+                  </summary>
+                  <pre class="activity-detail">{{ item.detail || item.text }}</pre>
+                </details>
+
+                <span
+                  v-else
+                  class="activity-chip"
+                  :class="[item.kind, item.status]"
+                  :title="item.text"
+                >
+                  <el-icon>
+                    <component :is="getActivityIcon(item)" />
+                  </el-icon>
+                  <span>{{ item.text }}</span>
+                </span>
+              </template>
+            </template>
+            <span v-else class="activity-empty">{{ statusText[message.status] }}</span>
+          </div>
+
+          <el-tooltip
+            v-if="hasContextUsage(message)"
+            placement="top"
+            effect="light"
+            :show-after="180"
           >
-            <el-icon>
-              <component :is="getActivityIcon(item)" />
-            </el-icon>
-            <span>{{ item.text }}</span>
-          </span>
+            <template #content>
+              <div class="context-tooltip">
+                <strong>
+                  {{ t("chat.context.used", {
+                    used: formatTokenCount(message.contextUsedTokens),
+                    total: formatTokenCount(message.contextLimitTokens),
+                  }) }}
+                </strong>
+                <span>{{ t("chat.context.percent", { percent: getContextPercent(message) }) }}</span>
+                <span v-if="Number.isFinite(message.contextPromptTokens)">
+                  {{ t("chat.context.prompt", { tokens: formatTokenCount(message.contextPromptTokens) }) }}
+                </span>
+                <span v-if="Number.isFinite(message.contextCompletionTokens)">
+                  {{ t("chat.context.completion", { tokens: formatTokenCount(message.contextCompletionTokens) }) }}
+                </span>
+                <span v-if="hasCacheUsage(message)">
+                  {{ t("chat.context.cache", {
+                    rate: getCacheHitRate(message),
+                    hit: formatTokenCount(message.contextCacheHitTokens),
+                    miss: formatTokenCount(message.contextCacheMissTokens),
+                  }) }}
+                </span>
+              </div>
+            </template>
+            <span class="context-meter" :style="getContextRingStyle(message)">
+              <span class="context-ring"></span>
+              <span class="context-token-label">{{ formatTokenCount(message.contextUsedTokens) }}</span>
+              <span v-if="hasCacheUsage(message)" class="context-cache-label">
+                {{ t("chat.context.cacheShort", { rate: getCacheHitRate(message) }) }}
+              </span>
+            </span>
+          </el-tooltip>
         </div>
 
         <details
-          v-if="(message.thoughtSteps ?? []).length > 0"
-          class="thought-steps"
+          v-if="hasReasoning(message)"
+          class="reasoning-panel"
           :open="message.status === 'thinking'"
         >
-          <summary>{{ t("chat.thoughtSteps") }}</summary>
-          <ol>
-            <li v-for="step in message.thoughtSteps" :key="step">{{ step }}</li>
-          </ol>
+          <summary>
+            <span>{{ t("chat.reasoningPanel") }}</span>
+            <span>{{ t("chat.reasoningLines", { count: message.thoughtSteps?.length ?? 0 }) }}</span>
+          </summary>
+          <div class="reasoning-markdown" v-html="renderReasoningMarkdown(message)"></div>
         </details>
 
         <div class="message-reactions">
@@ -461,23 +579,70 @@ defineExpose({
 </template>
 
 <style scoped>
-.thought-steps {
-  margin-top: 10px;
-  padding: 8px 10px;
-  border-radius: 8px;
-  color: #53615a;
-  background: #f5f8f6;
-  font-size: 12px;
+.message-row.thinking {
+  position: relative;
+  overflow: hidden;
+  border-color: transparent;
 }
 
-.message-activity-bar {
+.message-row.thinking > * {
+  position: relative;
+  z-index: 1;
+}
+
+.message-row.thinking::before {
+  position: absolute;
+  z-index: 0;
+  inset: 0;
+  border-radius: 8px;
+  padding: 1px;
+  animation: thinking-border-flow 5.5s linear infinite;
+  background: linear-gradient(120deg, #b7dfc7, #f0d386, #91c9b0, #d8efe1);
+  background-size: 320% 320%;
+  content: "";
+  pointer-events: none;
+  -webkit-mask:
+    linear-gradient(#000 0 0) content-box,
+    linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+}
+
+@keyframes thinking-border-flow {
+  0% {
+    background-position: 0% 50%;
+  }
+
+  100% {
+    background-position: 320% 50%;
+  }
+}
+
+.message-status-bar {
   display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 34px;
+  margin-top: 10px;
+  padding: 7px 0 0;
+  border-top: 1px solid #edf1ee;
+}
+
+.message-activity-feed {
+  display: flex;
+  min-width: 0;
+  flex: 1;
   flex-wrap: wrap;
   gap: 6px;
-  min-height: 30px;
-  margin-top: 10px;
-  padding: 6px 0 0;
-  border-top: 1px solid #edf1ee;
+}
+
+.activity-empty {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  color: #8a958e;
+  font-size: 12px;
 }
 
 .activity-chip {
@@ -496,12 +661,40 @@ defineExpose({
   line-height: 1.2;
 }
 
+.activity-detail-chip {
+  display: block;
+  padding: 0;
+  border-radius: 8px;
+}
+
+.activity-detail-chip summary {
+  display: inline-flex;
+  max-width: min(100%, 520px);
+  min-height: 24px;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  padding: 3px 8px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.activity-detail-chip summary::-webkit-details-marker {
+  display: none;
+}
+
+.activity-detail-chip[open] {
+  flex-basis: min(100%, 620px);
+  max-width: min(100%, 620px);
+}
+
 .activity-chip .el-icon {
   flex: 0 0 auto;
   font-size: 13px;
 }
 
-.activity-chip span:last-child {
+.activity-chip span:last-child,
+.activity-detail-chip summary span:last-child {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -532,21 +725,160 @@ defineExpose({
   background: #fff0f0;
 }
 
-.thought-steps summary {
-  cursor: pointer;
-  font-weight: 700;
+.activity-detail {
+  max-height: 240px;
+  overflow: auto;
+  margin: 0;
+  border-top: 1px solid rgba(47, 122, 97, 0.16);
+  padding: 8px 10px;
+  color: #304039;
+  background: #fbfdfb;
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
-.thought-steps ol {
+.context-meter {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  border: 1px solid #dfe8e2;
+  border-radius: 999px;
+  padding: 3px 8px 3px 4px;
+  color: #405047;
+  background: #ffffff;
+  cursor: default;
+}
+
+.context-ring {
+  position: relative;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: conic-gradient(#2f7a61 var(--context-deg), #e4ebe6 0deg);
+}
+
+.context-ring::after {
+  position: absolute;
+  inset: 4px;
+  border-radius: 50%;
+  background: #ffffff;
+  content: "";
+}
+
+.context-token-label {
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.context-cache-label {
+  border-left: 1px solid #e1e9e4;
+  padding-left: 6px;
+  color: #2f7a61;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.context-tooltip {
   display: grid;
   gap: 4px;
-  margin: 8px 0 0;
+  color: #334139;
+  font-size: 12px;
+}
+
+.context-tooltip strong {
+  color: #1f2c25;
+}
+
+.reasoning-panel {
+  margin-top: 10px;
+  border: 1px solid #dfe9e3;
+  border-radius: 8px;
+  color: #53615a;
+  background: #f7faf8;
+  font-size: 12px;
+}
+
+.reasoning-panel summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 34px;
+  padding: 7px 10px;
+  cursor: pointer;
+  color: #2f4238;
+  font-weight: 700;
+  list-style: none;
+}
+
+.reasoning-panel summary::-webkit-details-marker {
+  display: none;
+}
+
+.reasoning-panel summary span:last-child {
+  flex: 0 0 auto;
+  color: #7c8a82;
+  font-size: 11px;
+}
+
+.reasoning-markdown {
+  overflow-wrap: anywhere;
+  border-top: 1px solid #e4ede7;
+  padding: 9px 10px 10px;
+  color: #33413a;
+  line-height: 1.6;
+}
+
+.reasoning-markdown :deep(p),
+.reasoning-markdown :deep(ul),
+.reasoning-markdown :deep(ol),
+.reasoning-markdown :deep(pre),
+.reasoning-markdown :deep(blockquote) {
+  margin: 0 0 8px;
+}
+
+.reasoning-markdown :deep(:first-child) {
+  margin-top: 0;
+}
+
+.reasoning-markdown :deep(:last-child) {
+  margin-bottom: 0;
+}
+
+.reasoning-markdown :deep(ul),
+.reasoning-markdown :deep(ol) {
   padding-left: 18px;
 }
 
-.thought-steps li {
-  white-space: pre-wrap;
-  word-break: break-word;
+.reasoning-markdown :deep(code) {
+  border-radius: 5px;
+  padding: 2px 5px;
+  color: #365f51;
+  background: #edf4ef;
+  font-family: "Cascadia Code", "Fira Code", Consolas, monospace;
+  font-size: 12px;
+}
+
+.reasoning-markdown :deep(pre) {
+  overflow: auto;
+  border: 1px solid #dbe4dd;
+  border-radius: 8px;
+  padding: 10px;
+  background: #17201c;
+}
+
+.reasoning-markdown :deep(pre code) {
+  padding: 0;
+  color: #edf6f0;
+  background: transparent;
 }
 
 .approval-dock {

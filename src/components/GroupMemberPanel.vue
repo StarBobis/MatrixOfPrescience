@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { ref } from "vue";
-import { CirclePlus } from "@element-plus/icons-vue";
+import { computed, ref } from "vue";
+import { CirclePlus, EditPen } from "@element-plus/icons-vue";
 import { useI18n } from "vue-i18n";
 import { chooseLocalAvatar, getAvatarSrc } from "../utils/avatar";
 import type { AgentModel, AgentReasoningEffort, OwnerProfile, ProviderId } from "../stores/settings";
@@ -20,6 +20,7 @@ const emit = defineEmits<{
   addHistoricalMember: [memberId: string];
   removeMember: [memberId: string];
   renameMember: [memberId: string, name: string];
+  updateOwnerProfile: [profile: OwnerProfile];
   updateMemberProfile: [member: AgentModel];
   updateMemberProvider: [member: AgentModel];
 }>();
@@ -29,6 +30,16 @@ const editingMemberCardId = ref("");
 const memberNameDrafts = ref<Record<string, string>>({});
 const { t } = useI18n();
 let memberCardCloseTimer: number | undefined;
+
+const sortedMembers = computed(() =>
+  props.members
+    .map((member, index) => ({ member, index }))
+    .sort((left, right) => {
+      const adminPriority = Number(right.member.isAdmin) - Number(left.member.isAdmin);
+      return adminPriority || left.index - right.index;
+    })
+    .map(({ member }) => member),
+);
 
 function getInitial(name: string) {
   return name.trim().slice(0, 1) || "?";
@@ -109,6 +120,17 @@ async function assignLocalAvatar(member: AgentModel) {
     emit("updateMemberProfile", member);
   }
 }
+
+async function assignOwnerAvatar() {
+  const avatar = await chooseLocalAvatar();
+
+  if (avatar) {
+    emit("updateOwnerProfile", {
+      ...props.ownerProfile,
+      avatar,
+    });
+  }
+}
 </script>
 
 <template>
@@ -156,9 +178,20 @@ async function assignLocalAvatar(member: AgentModel) {
 
     <div class="right-member-list">
       <article class="owner-card">
-        <span class="member-avatar owner-avatar" :style="{ background: ownerProfile.color }">
-          <img v-if="ownerProfile.avatar" :src="getAvatarSrc(ownerProfile.avatar)" alt="" />
-          <span v-else>{{ getInitial(ownerProfile.name) }}</span>
+        <span class="member-avatar-shell">
+          <span class="member-avatar owner-avatar" :style="{ background: ownerProfile.color }">
+            <img v-if="ownerProfile.avatar" :src="getAvatarSrc(ownerProfile.avatar)" alt="" />
+            <span v-else>{{ getInitial(ownerProfile.name) }}</span>
+          </span>
+          <button
+            class="avatar-edit-button"
+            type="button"
+            :title="t('members.changeAvatar')"
+            :aria-label="t('members.changeAvatar')"
+            @click.stop="assignOwnerAvatar"
+          >
+            <el-icon><EditPen /></el-icon>
+          </button>
         </span>
         <div class="member-card-copy">
           <div class="member-name-row">
@@ -170,7 +203,7 @@ async function assignLocalAvatar(member: AgentModel) {
       </article>
 
       <el-popover
-        v-for="member in members"
+        v-for="member in sortedMembers"
         :key="member.id"
         :visible="activeMemberCardId === member.id"
         trigger="manual"
@@ -186,9 +219,20 @@ async function assignLocalAvatar(member: AgentModel) {
             @mouseenter="showMemberCard(member.id)"
             @mouseleave="scheduleHideMemberCard(member.id)"
           >
-            <span class="member-avatar" :style="{ background: member.color }">
-              <img v-if="member.avatar" :src="getAvatarSrc(member.avatar)" alt="" />
-              <span v-else>{{ getInitial(member.name) }}</span>
+            <span class="member-avatar-shell">
+              <span class="member-avatar" :style="{ background: member.color }">
+                <img v-if="member.avatar" :src="getAvatarSrc(member.avatar)" alt="" />
+                <span v-else>{{ getInitial(member.name) }}</span>
+              </span>
+              <button
+                class="avatar-edit-button"
+                type="button"
+                :title="t('members.changeAvatar')"
+                :aria-label="t('members.changeAvatar')"
+                @click.stop="assignLocalAvatar(member)"
+              >
+                <el-icon><EditPen /></el-icon>
+              </button>
             </span>
             <div class="member-card-copy">
               <div class="member-name-row">
@@ -296,6 +340,21 @@ async function assignLocalAvatar(member: AgentModel) {
               </el-select>
             </label>
 
+            <div v-if="member.provider === 'deepseek'" class="profile-switch-row">
+              <span>{{ t("members.deepSeekLongContext") }}</span>
+              <el-switch
+                v-model="member.deepSeekLongContext"
+                size="small"
+                inline-prompt
+                :active-text="t('common.yes')"
+                :inactive-text="t('common.no')"
+                :active-value="true"
+                :inactive-value="false"
+                active-color="#2f7a61"
+                @change="emit('updateMemberProfile', member)"
+              />
+            </div>
+
             <label>
               <span>{{ t("common.temperature") }}</span>
               <div class="temperature-control">
@@ -364,9 +423,6 @@ async function assignLocalAvatar(member: AgentModel) {
           </div>
 
           <div class="profile-actions">
-            <el-button size="small" @click="assignLocalAvatar(member)">
-              {{ t("members.localAvatar") }}
-            </el-button>
             <el-button size="small" type="danger" plain @click="emit('removeMember', member.id)">
               {{ t("members.removeTitle") }}
             </el-button>
@@ -522,6 +578,12 @@ async function assignLocalAvatar(member: AgentModel) {
   font-weight: 800;
 }
 
+.member-avatar-shell {
+  position: relative;
+  flex: 0 0 auto;
+  line-height: 0;
+}
+
 .member-avatar img,
 .profile-avatar img {
   width: 100%;
@@ -538,6 +600,40 @@ async function assignLocalAvatar(member: AgentModel) {
 
 .owner-avatar {
   box-shadow: 0 0 0 2px #fff, 0 0 0 3px rgba(181, 133, 29, 0.55);
+}
+
+.avatar-edit-button {
+  position: absolute;
+  right: -4px;
+  bottom: -4px;
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.92);
+  border-radius: 50%;
+  color: #ffffff;
+  background: #2f7a61;
+  box-shadow: 0 4px 10px rgba(31, 43, 36, 0.22);
+  cursor: pointer;
+  opacity: 0;
+  transform: translateY(2px) scale(0.92);
+  transition: opacity 0.16s, transform 0.16s, background 0.16s;
+}
+
+.avatar-edit-button .el-icon {
+  font-size: 12px;
+}
+
+.owner-card:hover .avatar-edit-button,
+.right-member-card:hover .avatar-edit-button,
+.avatar-edit-button:focus-visible {
+  opacity: 1;
+  transform: translateY(0) scale(1);
+}
+
+.avatar-edit-button:hover {
+  background: #25664f;
 }
 
 /* ===== 文案区域 ===== */
@@ -656,7 +752,8 @@ async function assignLocalAvatar(member: AgentModel) {
 
 .profile-details div,
 .profile-muted-row,
-.profile-admin-row {
+.profile-admin-row,
+.profile-switch-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -666,6 +763,7 @@ async function assignLocalAvatar(member: AgentModel) {
 .profile-details dt,
 .profile-muted-row span,
 .profile-admin-row span,
+.profile-switch-row span,
 .profile-prompt span {
   color: #778179;
   font-size: 12px;

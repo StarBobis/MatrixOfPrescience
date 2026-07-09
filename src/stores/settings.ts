@@ -36,6 +36,7 @@ export interface AgentModel {
   temperature: number;
   enabled: boolean;
   isAdmin: boolean;
+  deepSeekLongContext?: boolean;
   color: string;
   avatar?: string;
 }
@@ -45,6 +46,7 @@ export interface ChatMessageActivityItem {
   kind: ChatMessageActivityKind;
   status: ChatMessageActivityStatus;
   text: string;
+  detail?: string;
 }
 
 export interface ChatMessage {
@@ -57,6 +59,12 @@ export interface ChatMessage {
   reasoningEffort?: AgentReasoningEffort;
   startedAt?: number;
   durationMs?: number;
+  contextUsedTokens?: number;
+  contextLimitTokens?: number;
+  contextPromptTokens?: number;
+  contextCompletionTokens?: number;
+  contextCacheHitTokens?: number;
+  contextCacheMissTokens?: number;
   status: MessageStatus;
   content: string;
   time: string;
@@ -140,6 +148,7 @@ const THOUGHT_STEP_LIMIT = 96;
 const THOUGHT_STEP_TEXT_LIMIT = 1200;
 const ACTIVITY_ITEM_LIMIT = 36;
 const ACTIVITY_ITEM_TEXT_LIMIT = 360;
+const ACTIVITY_ITEM_DETAIL_LIMIT = 6000;
 
 type PersistenceMode = "normal" | "compact" | "minimal";
 
@@ -237,6 +246,18 @@ function normalizeGroup(group: ChatGroup): ChatGroup {
       reasoningEffort: normalizeReasoningEffort(message.reasoningEffort),
       startedAt: Number.isFinite(message.startedAt) ? message.startedAt : undefined,
       durationMs: Number.isFinite(message.durationMs) ? message.durationMs : undefined,
+      contextUsedTokens: Number.isFinite(message.contextUsedTokens) ? message.contextUsedTokens : undefined,
+      contextLimitTokens: Number.isFinite(message.contextLimitTokens) ? message.contextLimitTokens : undefined,
+      contextPromptTokens: Number.isFinite(message.contextPromptTokens) ? message.contextPromptTokens : undefined,
+      contextCompletionTokens: Number.isFinite(message.contextCompletionTokens)
+        ? message.contextCompletionTokens
+        : undefined,
+      contextCacheHitTokens: Number.isFinite(message.contextCacheHitTokens)
+        ? message.contextCacheHitTokens
+        : undefined,
+      contextCacheMissTokens: Number.isFinite(message.contextCacheMissTokens)
+        ? message.contextCacheMissTokens
+        : undefined,
       agreeMemberIds: message.agreeMemberIds ?? [],
       supplementMemberIds: message.supplementMemberIds ?? [],
       disagreeMemberIds: message.disagreeMemberIds ?? [],
@@ -257,6 +278,7 @@ function normalizeMember(member: AgentModel): AgentModel {
     reasoningEffort: normalizeReasoningEffort(member.reasoningEffort),
     temperature: Number.isFinite(member.temperature) ? member.temperature : 0.7,
     isAdmin: Boolean(member.isAdmin),
+    deepSeekLongContext: member.provider === "deepseek" ? member.deepSeekLongContext ?? true : false,
   };
 }
 
@@ -308,6 +330,7 @@ function createMember(
     temperature: 0.7,
     enabled: true,
     isAdmin: false,
+    deepSeekLongContext: provider === "deepseek",
     color: getModelColor(provider),
   };
 }
@@ -359,6 +382,7 @@ function toPlainMember(member: AgentModel): AgentModel {
     temperature: member.temperature,
     enabled: member.enabled,
     isAdmin: Boolean(member.isAdmin),
+    deepSeekLongContext: member.provider === "deepseek" ? member.deepSeekLongContext ?? true : false,
     color: member.color,
     avatar: member.avatar,
   };
@@ -381,6 +405,7 @@ function toPersistedMessage(message: ChatMessage, mode: Exclude<PersistenceMode,
     activityItems: (message.activityItems ?? []).slice(-ACTIVITY_ITEM_LIMIT).map((item) => ({
       ...item,
       text: truncateText(item.text, ACTIVITY_ITEM_TEXT_LIMIT),
+      detail: item.detail ? truncateText(item.detail, ACTIVITY_ITEM_DETAIL_LIMIT) : undefined,
     })),
   };
 }
@@ -836,6 +861,7 @@ export const useSettingsStore = defineStore("settings", {
     updateMemberProvider(member: AgentModel) {
       member.model = this.providers[member.provider].defaultModel;
       member.color = getModelColor(member.provider);
+      member.deepSeekLongContext = member.provider === "deepseek";
       this.rememberMember(member);
       this.activeGroup.updatedAt = new Date().toISOString();
     },

@@ -68,6 +68,7 @@ const emit = defineEmits<{
   addHistoricalMember: [memberId: string];
   removeMember: [memberId: string];
   renameMember: [memberId: string, name: string];
+  updateOwnerProfile: [profile: OwnerProfile];
   updateMemberProfile: [member: AgentModel];
   updateMemberProvider: [member: AgentModel];
 }>();
@@ -227,6 +228,7 @@ function finishAnnouncementEdit() {
       @add-historical-member="(memberId) => emit('addHistoricalMember', memberId)"
       @remove-member="(memberId) => emit('removeMember', memberId)"
       @rename-member="(memberId, name) => emit('renameMember', memberId, name)"
+      @update-owner-profile="(profile) => emit('updateOwnerProfile', profile)"
       @update-member-profile="(member) => emit('updateMemberProfile', member)"
       @update-member-provider="(member) => emit('updateMemberProvider', member)"
     />

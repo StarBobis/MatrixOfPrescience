@@ -14,6 +14,7 @@ import {
   type ChatMessageActivityItem,
   type ChatMessageActivityKind,
   type ChatMessageActivityStatus,
+  type OwnerProfile,
   type PatchApprovalStatus,
   type PatchRiskLevel,
   type ProviderId,
@@ -43,18 +44,30 @@ interface ApiChatMessage {
 interface ChatTraceStep {
   kind: "reasoning" | "tool";
   text: string;
+  detail?: string;
+}
+
+interface ChatCompletionUsage {
+  promptTokens?: number;
+  completionTokens?: number;
+  totalTokens?: number;
+  promptCacheHitTokens?: number;
+  promptCacheMissTokens?: number;
 }
 
 interface ChatCompletionResponse {
   content: string;
   traceSteps?: ChatTraceStep[];
+  usage?: ChatCompletionUsage;
 }
 
 interface ChatCompletionStreamEvent {
   streamId: string;
-  eventType: "traceChunk" | "traceStep" | "contentChunk";
+  eventType: "traceChunk" | "traceStep" | "contentChunk" | "usage";
   traceKind?: ChatTraceStep["kind"];
   text: string;
+  detail?: string;
+  usage?: ChatCompletionUsage;
 }
 
 interface ApplyPatchResponse {
@@ -116,6 +129,12 @@ const modelPresets: Record<ProviderId, string[]> = {
   openai: ["gpt-4.1", "gpt-4.1-mini", "gpt-4o", "gpt-4o-mini"],
   deepseek: ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"],
 };
+
+const DEEPSEEK_LONG_CONTEXT_LIMIT = 1_000_000;
+const DEEPSEEK_STANDARD_CONTEXT_LIMIT = 128_000;
+const DEFAULT_CONTEXT_LIMIT = 128_000;
+const CACHE_PREFIX_MESSAGE_COUNT = 4;
+const RECENT_CONVERSATION_MESSAGE_COUNT = 14;
 
 const { t } = useI18n();
 const settingsStore = useSettingsStore();
@@ -192,6 +211,115 @@ function renderMarkdown(source: string) {
   return markdown.render(source);
 }
 
+function estimateTextTokens(text: string) {
+  const normalized = text.trim();
+
+  if (!normalized) {
+    return 0;
+  }
+
+  const cjkChars = normalized.match(/[\u3400-\u9fff]/g)?.length ?? 0;
+  const nonCjkChars = normalized.replace(/[\u3400-\u9fff\s]/g, "").length;
+  return Math.max(1, cjkChars + Math.ceil(nonCjkChars / 4));
+}
+
+function estimateConversationTokens(messages: ApiChatMessage[], systemPrompt = "") {
+  return (
+    estimateTextTokens(systemPrompt) +
+    messages.reduce((total, message) => total + estimateTextTokens(message.content) + 4, 0) +
+    8
+  );
+}
+
+function getModelContextLimit(member: AgentModel) {
+  if (member.provider === "deepseek") {
+    return member.deepSeekLongContext ?? true
+      ? DEEPSEEK_LONG_CONTEXT_LIMIT
+      : DEEPSEEK_STANDARD_CONTEXT_LIMIT;
+  }
+
+  const model = member.model.toLowerCase();
+
+  if (model.includes("gpt-4.1")) {
+    return 1_000_000;
+  }
+
+  return DEFAULT_CONTEXT_LIMIT;
+}
+
+function buildContextUsageSnapshot(
+  member: AgentModel,
+  conversation: ApiChatMessage[],
+  systemPrompt = "",
+) {
+  return {
+    contextUsedTokens: estimateConversationTokens(conversation, systemPrompt),
+    contextLimitTokens: getModelContextLimit(member),
+  };
+}
+
+function usageTotalTokens(usage?: ChatCompletionUsage) {
+  if (!usage) {
+    return undefined;
+  }
+
+  return usage.totalTokens ?? (
+    Number.isFinite(usage.promptTokens) || Number.isFinite(usage.completionTokens)
+      ? (usage.promptTokens ?? 0) + (usage.completionTokens ?? 0)
+      : undefined
+  );
+}
+
+function applyCompletionUsage(messageId: string, usage?: ChatCompletionUsage) {
+  const usedTokens = usageTotalTokens(usage);
+  const promptTokens = usage?.promptTokens;
+  const completionTokens = usage?.completionTokens;
+  const cacheHitTokens = usage?.promptCacheHitTokens;
+  const cacheMissTokens = usage?.promptCacheMissTokens;
+  const hasCacheUsage =
+    Number.isFinite(cacheHitTokens) || Number.isFinite(cacheMissTokens);
+
+  const hasUsedTokens = typeof usedTokens === "number" && Number.isFinite(usedTokens);
+
+  if (!hasUsedTokens && !hasCacheUsage) {
+    return;
+  }
+
+  const patch: Partial<ChatMessage> = {};
+
+  if (hasUsedTokens) {
+    patch.contextUsedTokens = usedTokens;
+  }
+
+  if (typeof promptTokens === "number" && Number.isFinite(promptTokens)) {
+    patch.contextPromptTokens = promptTokens;
+  }
+
+  if (typeof completionTokens === "number" && Number.isFinite(completionTokens)) {
+    patch.contextCompletionTokens = completionTokens;
+  }
+
+  if (typeof cacheHitTokens === "number" && Number.isFinite(cacheHitTokens)) {
+    patch.contextCacheHitTokens = cacheHitTokens;
+  }
+
+  if (typeof cacheMissTokens === "number" && Number.isFinite(cacheMissTokens)) {
+    patch.contextCacheMissTokens = cacheMissTokens;
+  }
+
+  settingsStore.updateMessage(messageId, patch);
+}
+
+function buildUserContextUsageSnapshot(userText: string) {
+  const nextConversation = [...buildConversation(), { role: "user" as const, content: userText }];
+  const activeLimits = orderedActiveMembers.value.map(getModelContextLimit);
+
+  return {
+    contextUsedTokens: estimateConversationTokens(nextConversation),
+    contextLimitTokens: Math.max(DEFAULT_CONTEXT_LIMIT, ...activeLimits),
+  };
+}
+
 function openCreateGroupDialog() {
   newGroupName.value = t("defaults.newGroup.name");
   newGroupDescription.value = t("defaults.newGroup.description");
@@ -245,6 +373,7 @@ function updateDraftMemberProvider(member: AgentModel) {
 
   member.model = provider.defaultModel;
   member.color = member.provider === "openai" ? "#2f76b7" : "#2f7a61";
+  member.deepSeekLongContext = member.provider === "deepseek";
 }
 
 function createGroup() {
@@ -309,6 +438,10 @@ function updateMemberProvider(member: AgentModel) {
   settingsStore.updateMemberProvider(member);
 }
 
+function updateOwnerProfile(profile: OwnerProfile) {
+  ownerProfile.value = profile;
+}
+
 function prioritizeMembers(members: AgentModel[]) {
   return members
     .map((member, index) => ({ member, index }))
@@ -365,14 +498,28 @@ function removeMember(memberId: string) {
 function buildConversation(excludeMessageIds: string[] = []): ApiChatMessage[] {
   const excludedIds = new Set(excludeMessageIds);
 
-  return activeMessages.value
-    .filter(
-      (message) =>
-        !excludedIds.has(message.id) &&
-        message.modelName !== t("common.systemName") &&
-        message.modelName !== legacySystemModelName,
-    )
-    .slice(-12)
+  const visibleMessages = activeMessages.value.filter(
+    (message) =>
+      !excludedIds.has(message.id) &&
+      message.modelName !== t("common.systemName") &&
+      message.modelName !== legacySystemModelName,
+  );
+  const cacheFriendlyMessages =
+    visibleMessages.length <= CACHE_PREFIX_MESSAGE_COUNT + RECENT_CONVERSATION_MESSAGE_COUNT
+      ? visibleMessages
+      : [
+          ...visibleMessages.slice(0, CACHE_PREFIX_MESSAGE_COUNT),
+          ...visibleMessages
+            .slice(-RECENT_CONVERSATION_MESSAGE_COUNT)
+            .filter(
+              (message) =>
+                !visibleMessages
+                  .slice(0, CACHE_PREFIX_MESSAGE_COUNT)
+                  .some((prefixMessage) => prefixMessage.id === message.id),
+            ),
+        ];
+
+  return cacheFriendlyMessages
     .map<ApiChatMessage>((message) => ({
       role: message.role,
       content:
@@ -689,22 +836,20 @@ function addThoughtSteps(messageId: string, steps: string[]) {
   });
 }
 
-function formatTraceStep(step: ChatTraceStep) {
+function formatReasoningStep(step: ChatTraceStep) {
   const text = step.text.trim();
 
   if (!text) {
     return "";
   }
 
-  return step.kind === "tool"
-    ? t("chatRuntime.toolTrace", { step: text })
-    : t("chatRuntime.reasoningTrace", { step: text });
+  return text;
 }
 
 function addResponseTraceSteps(messageId: string, response: ChatCompletionResponse) {
   for (const step of response.traceSteps ?? []) {
     if (step.kind === "tool") {
-      addActivityItem(messageId, "tool", step.text, inferToolActivityStatus(step.text));
+      addActivityItem(messageId, "tool", step.text, inferToolActivityStatus(step.text), step.detail);
     }
   }
 
@@ -712,7 +857,7 @@ function addResponseTraceSteps(messageId: string, response: ChatCompletionRespon
     messageId,
     (response.traceSteps ?? [])
       .filter((step) => step.kind !== "tool")
-      .map(formatTraceStep),
+      .map(formatReasoningStep),
   );
 }
 
@@ -720,12 +865,14 @@ function createActivityItem(
   kind: ChatMessageActivityKind,
   text: string,
   status: ChatMessageActivityStatus = "info",
+  detail = "",
 ): ChatMessageActivityItem {
   return {
     id: crypto.randomUUID(),
     kind,
     status,
     text,
+    detail: detail.trim() || undefined,
   };
 }
 
@@ -734,6 +881,7 @@ function addActivityItem(
   kind: ChatMessageActivityKind,
   text: string,
   status: ChatMessageActivityStatus = "info",
+  detail = "",
 ) {
   const trimmed = text.trim();
 
@@ -745,7 +893,7 @@ function addActivityItem(
   settingsStore.updateMessage(messageId, {
     activityItems: [
       ...(message?.activityItems ?? []),
-      createActivityItem(kind, trimmed, status),
+      createActivityItem(kind, trimmed, status, detail),
     ].slice(-36),
   });
 }
@@ -799,7 +947,7 @@ function appendStreamingTraceText(
 
   next.text += text;
   streamingTraceLines.set(messageId, next);
-  updateThoughtStepAt(messageId, next.index, formatTraceStep({ kind, text: next.text }));
+  updateThoughtStepAt(messageId, next.index, formatReasoningStep({ kind, text: next.text }));
 }
 
 function appendStreamingTraceChunk(
@@ -833,6 +981,11 @@ function appendStreamingContentChunk(messageId: string, chunk: string) {
 }
 
 function applyCompletionStreamEvent(messageId: string, payload: ChatCompletionStreamEvent) {
+  if (payload.eventType === "usage") {
+    applyCompletionUsage(messageId, payload.usage);
+    return;
+  }
+
   if (payload.eventType === "contentChunk") {
     appendStreamingContentChunk(messageId, payload.text);
     return;
@@ -842,7 +995,13 @@ function applyCompletionStreamEvent(messageId: string, payload: ChatCompletionSt
 
   if (traceKind === "tool") {
     flushStreamingTraceLine(messageId);
-    addActivityItem(messageId, "tool", payload.text, inferToolActivityStatus(payload.text));
+    addActivityItem(
+      messageId,
+      "tool",
+      payload.text,
+      inferToolActivityStatus(payload.text),
+      payload.detail,
+    );
     return;
   }
 
@@ -852,7 +1011,7 @@ function applyCompletionStreamEvent(messageId: string, payload: ChatCompletionSt
   }
 
   flushStreamingTraceLine(messageId);
-  addThoughtStep(messageId, formatTraceStep({ kind: traceKind, text: payload.text }));
+  addThoughtStep(messageId, formatReasoningStep({ kind: traceKind, text: payload.text }));
 }
 
 async function invokeStreamingCompletion(
@@ -948,7 +1107,6 @@ function stopGeneration() {
       status: "error",
       content: t("chatRuntime.interruptedContent"),
     });
-    addThoughtStep(messageId, t("chatRuntime.interruptedStep"));
     addActivityItem(messageId, "status", t("chatRuntime.interruptedStep"), "error");
   }
 
@@ -1008,6 +1166,8 @@ async function decideMemberResponse(
       : t("chatRuntime.phaseAfterPeers");
   const conversation = buildConversation();
   const codeToolsEnabled = shouldInspectWorkspace(phaseRule);
+  const systemPrompt = buildSystemPrompt(member, activeGroup.value, phaseRule);
+  const contextUsage = buildContextUsageSnapshot(member, conversation, systemPrompt);
 
   settingsStore.appendPendingMessage({
     id: pendingId,
@@ -1019,10 +1179,11 @@ async function decideMemberResponse(
     reasoningEffort: member.reasoningEffort,
     startedAt,
     durationMs: 0,
+    ...contextUsage,
     status: "thinking",
     content: t("chatRuntime.decisionPendingContent"),
     color: member.color,
-    thoughtSteps: [t("chatRuntime.stepCheckingDecision")],
+    thoughtSteps: [],
     activityItems: [
       createActivityItem("status", t("chatRuntime.stepCheckingDecision"), "running"),
     ],
@@ -1032,11 +1193,6 @@ async function decideMemberResponse(
   await scrollToBottom();
 
   try {
-    addThoughtStep(
-      pendingId,
-      codeToolsEnabled ? t("chatRuntime.stepGotContext") : t("chatRuntime.stepNoContext"),
-    );
-    addThoughtStep(pendingId, t("chatRuntime.stepWaitingModel"));
     addActivityItem(
       pendingId,
       "status",
@@ -1057,7 +1213,7 @@ async function decideMemberResponse(
         temperature: 0,
         workspacePath: activeGroup.value?.workspacePath ?? "",
         codeToolsEnabled,
-        systemPrompt: buildSystemPrompt(member, activeGroup.value, phaseRule),
+        systemPrompt,
         messages: conversation,
       },
       { showContent: false },
@@ -1079,7 +1235,7 @@ async function decideMemberResponse(
         status: "done",
         content: t("chatRuntime.decisionWaitContent"),
       });
-      addThoughtStep(pendingId, t("chatRuntime.stepDecisionWait"));
+      applyCompletionUsage(pendingId, response.usage);
       addActivityItem(pendingId, "status", t("chatRuntime.stepDecisionWait"), "done");
       releasePendingMessage(pendingId, startedAt);
       upsertSpeakerQueueMember(member, "waiting");
@@ -1091,7 +1247,7 @@ async function decideMemberResponse(
       status: "thinking",
       content: t("chatRuntime.pendingContent"),
     });
-    addThoughtStep(pendingId, t("chatRuntime.stepDecisionSpeak"));
+    applyCompletionUsage(pendingId, response.usage);
     addActivityItem(pendingId, "status", t("chatRuntime.stepDecisionSpeak"), "done");
     upsertSpeakerQueueMember(member, "queued");
     return { decision, pendingMessage: { id: pendingId, startedAt } };
@@ -1106,7 +1262,6 @@ async function decideMemberResponse(
       status: "thinking",
       content: t("chatRuntime.pendingContent"),
     });
-    addThoughtStep(pendingId, t("chatRuntime.stepDecisionFallbackSpeak"));
     addActivityItem(pendingId, "status", t("chatRuntime.stepDecisionFallbackSpeak"), "error");
     upsertSpeakerQueueMember(member, "queued");
     return { decision: "speak", pendingMessage: { id: pendingId, startedAt } };
@@ -1130,6 +1285,8 @@ async function askMember(
   const responseRule =
     extraRule ||
     t("chatRuntime.responseRule");
+  const systemPrompt = buildSystemPrompt(member, activeGroup.value, responseRule);
+  const contextUsage = buildContextUsageSnapshot(member, conversation, systemPrompt);
 
   upsertSpeakerQueueMember(member, "speaking");
 
@@ -1139,8 +1296,8 @@ async function askMember(
       content: t("chatRuntime.pendingContent"),
       startedAt,
       durationMs: Math.max(0, Date.now() - startedAt),
+      ...contextUsage,
     });
-    addThoughtStep(pendingId, t("chatRuntime.stepGeneratingAnswer"));
     addActivityItem(pendingId, "status", t("chatRuntime.stepGeneratingAnswer"), "running");
   } else {
     settingsStore.appendPendingMessage({
@@ -1153,10 +1310,11 @@ async function askMember(
       reasoningEffort: member.reasoningEffort,
       startedAt,
       durationMs: 0,
+      ...contextUsage,
       status: "thinking",
       content: t("chatRuntime.pendingContent"),
       color: member.color,
-      thoughtSteps: [t("chatRuntime.stepQueued")],
+      thoughtSteps: [],
       activityItems: [createActivityItem("status", t("chatRuntime.stepQueued"), "running")],
     });
     startSpeakingTimer(pendingId, startedAt);
@@ -1169,11 +1327,6 @@ async function askMember(
 
   try {
     const codeToolsEnabled = shouldInspectWorkspace(responseRule);
-    addThoughtStep(
-      pendingId,
-      codeToolsEnabled ? t("chatRuntime.stepGotContext") : t("chatRuntime.stepNoContext"),
-    );
-    addThoughtStep(pendingId, t("chatRuntime.stepWaitingModel"));
     addActivityItem(
       pendingId,
       "status",
@@ -1193,7 +1346,7 @@ async function askMember(
         temperature: member.temperature,
         workspacePath: activeGroup.value?.workspacePath ?? "",
         codeToolsEnabled,
-        systemPrompt: buildSystemPrompt(member, activeGroup.value, responseRule),
+        systemPrompt,
         messages: conversation,
       },
     );
@@ -1207,11 +1360,11 @@ async function askMember(
       status: "done",
       content: response.content,
     });
+    applyCompletionUsage(pendingId, response.usage);
     releasePendingMessage(pendingId, startedAt);
     if (!sawStreamTrace) {
       addResponseTraceSteps(pendingId, response);
     }
-    addThoughtStep(pendingId, t("chatRuntime.stepDone"));
     addActivityItem(pendingId, "status", t("chatRuntime.stepDone"), "done");
     await maybeCreatePatchProposal(member, response.content);
     return {
@@ -1225,7 +1378,6 @@ async function askMember(
       status: "error",
       content: t("chatRuntime.callFailedContent", { error: String(error) }),
     });
-    addThoughtStep(pendingId, t("chatRuntime.stepFailed"));
     addActivityItem(pendingId, "status", t("chatRuntime.stepFailed"), "error");
     return null;
   } finally {
@@ -1379,6 +1531,7 @@ async function sendMessage() {
   const runId = crypto.randomUUID();
   activeRunId.value = runId;
   pendingMessageIds.value = [];
+  const userContextUsage = buildUserContextUsageSnapshot(userText);
 
   appendMessage({
     role: "user",
@@ -1388,6 +1541,7 @@ async function sendMessage() {
     status: "done",
     content: userText,
     color: ownerProfile.value.color,
+    ...userContextUsage,
   });
 
   const members = [...orderedActiveMembers.value];
@@ -1527,6 +1681,7 @@ async function sendMessage() {
           @add-historical-member="addHistoricalMember"
           @remove-member="removeMember"
           @rename-member="renameMember"
+          @update-owner-profile="updateOwnerProfile"
           @update-member-profile="updateMemberProfile"
           @update-member-provider="updateMemberProvider"
         />

@@ -39,6 +39,17 @@ struct ChatCompletionRequest {
 struct ChatCompletionResponse {
     content: String,
     trace_steps: Vec<ChatTraceStep>,
+    usage: Option<ChatCompletionUsage>,
+}
+
+#[derive(Debug, Serialize, Clone, Default)]
+#[serde(rename_all = "camelCase")]
+struct ChatCompletionUsage {
+    prompt_tokens: Option<u64>,
+    completion_tokens: Option<u64>,
+    total_tokens: Option<u64>,
+    prompt_cache_hit_tokens: Option<u64>,
+    prompt_cache_miss_tokens: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -46,6 +57,7 @@ struct ChatCompletionResponse {
 struct ChatTraceStep {
     kind: String,
     text: String,
+    detail: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -55,6 +67,8 @@ struct ChatCompletionStreamEvent {
     event_type: String,
     trace_kind: Option<String>,
     text: String,
+    detail: Option<String>,
+    usage: Option<ChatCompletionUsage>,
 }
 
 #[derive(Debug, Default)]
@@ -122,6 +136,7 @@ const MAX_CHAT_COMPLETION_TURNS: usize = 8;
 const MAX_CODE_TOOL_ROUNDS: usize = 5;
 const MAX_CHAT_TRACE_STEPS: usize = 160;
 const TRACE_STEP_TEXT_LIMIT: usize = 280;
+const TOOL_TRACE_DETAIL_LIMIT: usize = 6000;
 const CHAT_COMPLETION_STREAM_EVENT: &str = "chat-completion-stream";
 const FINAL_ANSWER_INSTRUCTION: &str = "The code reading tool budget for this response is exhausted. Use the tool results already provided and write the final answer now. Do not request more tool calls.";
 const CACHE_LOCATION_FILE: &str = "cache-location.json";
@@ -401,6 +416,7 @@ async fn chat_completion(
     let mut code_tool_rounds = 0usize;
     let mut final_answer_requested = false;
     let mut last_finish_reason: Option<String> = None;
+    let mut last_usage: Option<ChatCompletionUsage> = None;
     let mut trace_steps: Vec<ChatTraceStep> = Vec::new();
     let stream_id = request
         .stream_id
@@ -425,7 +441,7 @@ async fn chat_completion(
         );
 
         if code_workspace.is_some() && !final_answer_requested {
-            payload["tools"] = codegraph_tools_schema(is_deepseek);
+            payload["tools"] = code_tools_schema(is_deepseek);
             payload["tool_choice"] = if is_deepseek && !code_tool_called {
                 json!("required")
             } else {
@@ -446,7 +462,7 @@ async fn chat_completion(
         {
             Ok(parsed) => parsed,
             Err(error) if strict_tool_schema => {
-                payload["tools"] = codegraph_tools_schema(false);
+                payload["tools"] = code_tools_schema(false);
                 payload["tool_choice"] = json!("auto");
                 send_chat_completion_request_maybe_stream(
                     &app,
@@ -467,6 +483,9 @@ async fn chat_completion(
             }
             Err(error) => return Err(error),
         };
+        if let Some(usage) = usage_from_response(&parsed) {
+            last_usage = Some(usage);
+        }
         last_finish_reason = first_choice_finish_reason(&parsed);
         let message = parsed
             .get("choices")
@@ -507,6 +526,7 @@ async fn chat_completion(
             return Ok(ChatCompletionResponse {
                 content,
                 trace_steps,
+                usage: last_usage,
             });
         }
 
@@ -619,7 +639,37 @@ fn trace_step(kind: &str, text: String) -> ChatTraceStep {
     ChatTraceStep {
         kind: kind.to_string(),
         text,
+        detail: None,
     }
+}
+
+fn trace_step_with_detail(kind: &str, text: String, detail: String) -> ChatTraceStep {
+    ChatTraceStep {
+        kind: kind.to_string(),
+        text,
+        detail: Some(truncate_text(detail, TOOL_TRACE_DETAIL_LIMIT)),
+    }
+}
+
+fn usage_from_response(parsed: &Value) -> Option<ChatCompletionUsage> {
+    let usage = parsed.get("usage")?;
+
+    Some(ChatCompletionUsage {
+        prompt_tokens: usage.get("prompt_tokens").and_then(Value::as_u64),
+        completion_tokens: usage.get("completion_tokens").and_then(Value::as_u64),
+        total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
+        prompt_cache_hit_tokens: usage.get("prompt_cache_hit_tokens").and_then(Value::as_u64),
+        prompt_cache_miss_tokens: usage
+            .get("prompt_cache_miss_tokens")
+            .and_then(Value::as_u64),
+    })
+    .filter(|usage| {
+        usage.prompt_tokens.is_some()
+            || usage.completion_tokens.is_some()
+            || usage.total_tokens.is_some()
+            || usage.prompt_cache_hit_tokens.is_some()
+            || usage.prompt_cache_miss_tokens.is_some()
+    })
 }
 
 fn split_trace_text(text: &str) -> Vec<String> {
@@ -689,6 +739,10 @@ fn compact_trace_json(value: &Value) -> String {
         .unwrap_or_else(|_| "<unreadable arguments>".to_string())
 }
 
+fn pretty_trace_json(value: &Value) -> String {
+    serde_json::to_string_pretty(value).unwrap_or_else(|_| "<unreadable arguments>".to_string())
+}
+
 fn tool_call_trace_step(tool_call: &Value) -> ChatTraceStep {
     let function = tool_call.get("function").unwrap_or(&Value::Null);
     let name = function
@@ -718,7 +772,13 @@ fn tool_call_trace_step(tool_call: &Value) -> ChatTraceStep {
         format!("{} {}", name, compact_trace_json(&arguments))
     };
 
-    trace_step("tool", text)
+    let detail = format!(
+        "Tool: {}\nArguments:\n{}",
+        name,
+        pretty_trace_json(&arguments)
+    );
+
+    trace_step_with_detail("tool", text, detail)
 }
 
 fn tool_result_trace_step(tool_call: &Value, tool_message: &Value) -> ChatTraceStep {
@@ -753,41 +813,170 @@ fn tool_result_trace_step(tool_call: &Value, tool_message: &Value) -> ChatTraceS
         )
     };
 
-    trace_step("tool", text)
+    let detail = format!(
+        "Tool: {}\nResult characters: {}\n\n{}",
+        name,
+        content.chars().count(),
+        content
+    );
+
+    trace_step_with_detail("tool", text, detail)
 }
 
-fn codegraph_tools_schema(strict: bool) -> Value {
-    let mut function = json!({
-        "name": "codegraph_explore",
-        "description": "Read the current workspace with CodeGraph. Use it before answering questions about code, files, symbols, call paths, or implementation details. The `Found N symbols across M files` line is query-scoped, not the total index file count.",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "The symbols, files, call flow, or implementation question to inspect."
-                },
-                "maxFiles": {
-                    "type": "integer",
-                    "description": "Optional maximum number of files to include source from. Defaults to 12 and is capped at 24.",
-                    "minimum": 1,
-                    "maximum": 24
-                }
-            },
-            "required": ["query"]
-        }
-    });
-
+fn finalize_tool_function(mut function: Value, strict: bool) -> Value {
     if strict {
         function["strict"] = json!(true);
         function["parameters"]["additionalProperties"] = json!(false);
     }
 
+    json!({
+        "type": "function",
+        "function": function
+    })
+}
+
+fn code_tools_schema(strict: bool) -> Value {
     json!([
-        {
-            "type": "function",
-            "function": function
-        }
+        finalize_tool_function(
+            json!({
+                "name": "codegraph_explore",
+                "description": "Read the current workspace with CodeGraph for symbols, responsibilities, and call paths. The `Found N symbols across M files` line is query-scoped, not the total index file count.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "The symbols, files, call flow, or implementation question to inspect."
+                        },
+                        "maxFiles": {
+                            "type": "integer",
+                            "description": "Optional maximum number of files to include source from. Defaults to 12 and is capped at 24.",
+                            "minimum": 1,
+                            "maximum": 24
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }),
+            strict
+        ),
+        finalize_tool_function(
+            json!({
+                "name": "read_file",
+                "description": "Read exact file contents from the workspace with line numbers. Use this when CodeGraph output omits implementation details.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file": {
+                            "type": "string",
+                            "description": "Workspace-relative file path."
+                        },
+                        "startLine": {
+                            "type": "integer",
+                            "description": "1-based line to start from. Defaults to 1.",
+                            "minimum": 1
+                        },
+                        "maxLines": {
+                            "type": "integer",
+                            "description": "Maximum lines to read. Defaults to 240 and is capped at 1000.",
+                            "minimum": 1,
+                            "maximum": 1000
+                        }
+                    },
+                    "required": ["file"]
+                }
+            }),
+            strict
+        ),
+        finalize_tool_function(
+            json!({
+                "name": "list_files",
+                "description": "List files under the workspace or a subdirectory. Use this to discover nearby files before reading them.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Optional workspace-relative directory path."
+                        },
+                        "recursive": {
+                            "type": "boolean",
+                            "description": "Whether to recurse. Defaults to true."
+                        },
+                        "maxResults": {
+                            "type": "integer",
+                            "description": "Maximum files to return. Defaults to 120 and is capped at 500.",
+                            "minimum": 1,
+                            "maximum": 500
+                        }
+                    },
+                    "required": []
+                }
+            }),
+            strict
+        ),
+        finalize_tool_function(
+            json!({
+                "name": "search_files",
+                "description": "Search text in workspace files with ripgrep-style output. Use for finding identifiers, errors, strings, and TODOs.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Regex or literal text to search for."
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Optional workspace-relative path to search in."
+                        },
+                        "caseSensitive": {
+                            "type": "boolean",
+                            "description": "Defaults to false."
+                        },
+                        "literal": {
+                            "type": "boolean",
+                            "description": "Treat query as fixed text instead of regex. Defaults to false."
+                        },
+                        "maxResults": {
+                            "type": "integer",
+                            "description": "Maximum matches to return. Defaults to 80 and is capped at 300.",
+                            "minimum": 1,
+                            "maximum": 300
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }),
+            strict
+        ),
+        finalize_tool_function(
+            json!({
+                "name": "glob_files",
+                "description": "Find files by glob pattern, for example `src/**/*.vue` or `**/*.rs`.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pattern": {
+                            "type": "string",
+                            "description": "Glob pattern relative to the workspace."
+                        },
+                        "path": {
+                            "type": "string",
+                            "description": "Optional workspace-relative directory to search from."
+                        },
+                        "maxResults": {
+                            "type": "integer",
+                            "description": "Maximum files to return. Defaults to 120 and is capped at 500.",
+                            "minimum": 1,
+                            "maximum": 500
+                        }
+                    },
+                    "required": ["pattern"]
+                }
+            }),
+            strict
+        )
     ])
 }
 
@@ -854,6 +1043,8 @@ fn emit_stream_event(
     event_type: &str,
     trace_kind: Option<&str>,
     text: impl Into<String>,
+    detail: Option<String>,
+    usage: Option<ChatCompletionUsage>,
 ) {
     let Some(stream_id) = stream_id else {
         return;
@@ -866,6 +1057,8 @@ fn emit_stream_event(
             event_type: event_type.to_string(),
             trace_kind: trace_kind.map(str::to_string),
             text: text.into(),
+            detail,
+            usage,
         },
     );
 }
@@ -877,15 +1070,29 @@ fn emit_trace_step(app: &AppHandle, stream_id: Option<&str>, step: &ChatTraceSte
         "traceStep",
         Some(&step.kind),
         step.text.clone(),
+        step.detail.clone(),
+        None,
     );
 }
 
 fn emit_trace_chunk(app: &AppHandle, stream_id: &str, trace_kind: &str, text: &str) {
-    emit_stream_event(app, Some(stream_id), "traceChunk", Some(trace_kind), text);
+    emit_stream_event(
+        app,
+        Some(stream_id),
+        "traceChunk",
+        Some(trace_kind),
+        text,
+        None,
+        None,
+    );
 }
 
 fn emit_content_chunk(app: &AppHandle, stream_id: &str, text: &str) {
-    emit_stream_event(app, Some(stream_id), "contentChunk", None, text);
+    emit_stream_event(app, Some(stream_id), "contentChunk", None, text, None, None);
+}
+
+fn emit_usage_event(app: &AppHandle, stream_id: &str, usage: ChatCompletionUsage) {
+    emit_stream_event(app, Some(stream_id), "usage", None, "", None, Some(usage));
 }
 
 fn sse_event_separator(buffer: &str) -> Option<(usize, usize)> {
@@ -979,7 +1186,13 @@ fn apply_stream_delta(
     reasoning: &mut String,
     tool_calls: &mut Vec<ToolCallAccumulator>,
     finish_reason: &mut Option<String>,
+    usage: &mut Option<ChatCompletionUsage>,
 ) {
+    if let Some(next_usage) = usage_from_response(parsed) {
+        emit_usage_event(app, stream_id, next_usage.clone());
+        *usage = Some(next_usage);
+    }
+
     let Some(choices) = parsed.get("choices").and_then(Value::as_array) else {
         return;
     };
@@ -1027,6 +1240,7 @@ async fn send_chat_completion_stream_request(
 ) -> Result<Value, String> {
     let mut payload = payload.clone();
     payload["stream"] = json!(true);
+    payload["stream_options"] = json!({ "include_usage": true });
 
     let response = client
         .post(endpoint)
@@ -1054,6 +1268,7 @@ async fn send_chat_completion_stream_request(
     let mut reasoning = String::new();
     let mut tool_calls: Vec<ToolCallAccumulator> = Vec::new();
     let mut finish_reason: Option<String> = None;
+    let mut usage: Option<ChatCompletionUsage> = None;
     let mut buffer = String::new();
     let mut stream = response.bytes_stream();
 
@@ -1082,6 +1297,7 @@ async fn send_chat_completion_stream_request(
                     &mut reasoning,
                     &mut tool_calls,
                     &mut finish_reason,
+                    &mut usage,
                 );
             }
         }
@@ -1107,6 +1323,7 @@ async fn send_chat_completion_stream_request(
                 &mut reasoning,
                 &mut tool_calls,
                 &mut finish_reason,
+                &mut usage,
             );
         }
     }
@@ -1132,7 +1349,8 @@ async fn send_chat_completion_stream_request(
                 "message": message,
                 "finish_reason": finish_reason,
             }
-        ]
+        ],
+        "usage": usage
     }))
 }
 
@@ -1143,54 +1361,363 @@ fn execute_code_tool_call(workspace: &Path, tool_call: &Value) -> Value {
         .unwrap_or("codegraph-tool-call");
     let function = tool_call.get("function").unwrap_or(&Value::Null);
     let name = function.get("name").and_then(Value::as_str).unwrap_or("");
-    let arguments = function
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| json!("{}"));
+    let arguments = parsed_tool_arguments(function);
 
-    let content = if name == "codegraph_explore" {
-        let parsed_arguments = if let Some(arguments_text) = arguments.as_str() {
-            serde_json::from_str::<Value>(arguments_text).unwrap_or(Value::Null)
-        } else {
-            arguments
-        };
-        let query = parsed_arguments
-            .get("query")
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let max_files = parsed_arguments.get("maxFiles").and_then(Value::as_u64);
-
-        if query.trim().is_empty() {
-            "CodeGraph returned no usable result.".to_string()
-        } else {
-            match run_codegraph_explore(workspace, &query, max_files) {
-                Ok(content) => content,
-                Err(codegraph_error) => {
-                    read_local_code_context(workspace, &query)
-                        .map(|fallback| {
-                            format!(
-                                "CodeGraph tool was called, but CodeGraph execution failed and local fallback was used.\nCodeGraph error: {}\n\n{}",
-                                codegraph_error, fallback
-                            )
-                        })
-                        .unwrap_or_else(|fallback_error| {
-                            format!(
-                                "CodeGraph tool was called, but CodeGraph could not read this workspace: {}\nLocal fallback failed: {}",
-                                codegraph_error, fallback_error
-                            )
-                        })
-                }
-            }
-        }
-    } else {
-        format!("Unknown tool: {}", name)
+    let content = match name {
+        "codegraph_explore" => execute_codegraph_explore_tool(workspace, &arguments),
+        "read_file" => read_workspace_file_tool(workspace, &arguments),
+        "list_files" => list_workspace_files_tool(workspace, &arguments),
+        "search_files" => search_workspace_files_tool(workspace, &arguments),
+        "glob_files" => glob_workspace_files_tool(workspace, &arguments),
+        _ => Err(format!("Unknown tool: {}", name)),
     };
 
     json!({
         "role": "tool",
         "tool_call_id": tool_call_id,
-        "content": content,
+        "content": content.unwrap_or_else(|error| format!("Tool {} failed: {}", name, error)),
     })
+}
+
+fn execute_codegraph_explore_tool(workspace: &Path, arguments: &Value) -> Result<String, String> {
+    let query = arguments
+        .get("query")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let max_files = arguments.get("maxFiles").and_then(Value::as_u64);
+
+    if query.trim().is_empty() {
+        return Err("CodeGraph query cannot be empty.".to_string());
+    }
+
+    match run_codegraph_explore(workspace, query, max_files) {
+        Ok(content) => Ok(content),
+        Err(codegraph_error) => read_local_code_context(workspace, query)
+            .map(|fallback| {
+                format!(
+                    "CodeGraph tool was called, but CodeGraph execution failed and local fallback was used.\nCodeGraph error: {}\n\n{}",
+                    codegraph_error, fallback
+                )
+            })
+            .map_err(|fallback_error| {
+                format!(
+                    "CodeGraph could not read this workspace: {}. Local fallback failed: {}",
+                    codegraph_error, fallback_error
+                )
+            }),
+    }
+}
+
+fn tool_arg_string<'a>(arguments: &'a Value, key: &str) -> &'a str {
+    arguments
+        .get(key)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .unwrap_or("")
+}
+
+fn tool_arg_bool(arguments: &Value, key: &str, default: bool) -> bool {
+    arguments
+        .get(key)
+        .and_then(Value::as_bool)
+        .unwrap_or(default)
+}
+
+fn tool_arg_usize(arguments: &Value, key: &str, default: usize, min: usize, max: usize) -> usize {
+    arguments
+        .get(key)
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+        .unwrap_or(default)
+        .clamp(min, max)
+}
+
+fn resolve_workspace_relative_path(workspace: &Path, raw_path: &str) -> Result<PathBuf, String> {
+    let normalized = raw_path.trim().replace('\\', "/");
+
+    if normalized.is_empty() {
+        return Ok(workspace.to_path_buf());
+    }
+
+    let relative = Path::new(&normalized);
+
+    if relative.is_absolute() {
+        return Err(format!("Absolute paths are not allowed: {}", normalized));
+    }
+
+    for component in relative.components() {
+        if matches!(
+            component,
+            Component::ParentDir | Component::RootDir | Component::Prefix(_)
+        ) {
+            return Err(format!("Path traversal is not allowed: {}", normalized));
+        }
+    }
+
+    let target = fs::canonicalize(workspace.join(relative))
+        .map_err(|error| format!("Path does not exist: {} ({})", normalized, error))?;
+
+    if !target.starts_with(workspace) {
+        return Err(format!("Path escapes workspace: {}", normalized));
+    }
+
+    Ok(target)
+}
+
+fn workspace_relative_display(workspace: &Path, path: &Path) -> String {
+    path.strip_prefix(workspace)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn is_skipped_directory(path: &Path) -> bool {
+    path.components().any(|component| {
+        component
+            .as_os_str()
+            .to_str()
+            .map(|part| matches!(part, ".git" | "node_modules" | "dist" | "target"))
+            .unwrap_or(false)
+    })
+}
+
+fn collect_workspace_files(
+    workspace: &Path,
+    directory: &Path,
+    recursive: bool,
+    files: &mut Vec<String>,
+    max_results: usize,
+) -> Result<(), String> {
+    if files.len() >= max_results || is_skipped_directory(directory) {
+        return Ok(());
+    }
+
+    let entries = fs::read_dir(directory)
+        .map_err(|error| format!("Failed to list {}: {}", directory.display(), error))?;
+
+    for entry in entries {
+        if files.len() >= max_results {
+            break;
+        }
+
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+
+        if path.is_dir() {
+            if recursive {
+                collect_workspace_files(workspace, &path, recursive, files, max_results)?;
+            }
+            continue;
+        }
+
+        if path.is_file() {
+            files.push(workspace_relative_display(workspace, &path));
+        }
+    }
+
+    Ok(())
+}
+
+fn list_workspace_files_tool(workspace: &Path, arguments: &Value) -> Result<String, String> {
+    let path = resolve_workspace_relative_path(workspace, tool_arg_string(arguments, "path"))?;
+    let recursive = tool_arg_bool(arguments, "recursive", true);
+    let max_results = tool_arg_usize(arguments, "maxResults", 120, 1, 500);
+
+    if !path.is_dir() {
+        return Err("list_files path must be a directory.".to_string());
+    }
+
+    let mut files = Vec::new();
+    collect_workspace_files(workspace, &path, recursive, &mut files, max_results)?;
+    files.sort();
+
+    if files.is_empty() {
+        return Ok("No files found.".to_string());
+    }
+
+    Ok(format!(
+        "Files under {} (showing up to {}):\n{}",
+        workspace_relative_display(workspace, &path),
+        max_results,
+        files.join("\n")
+    ))
+}
+
+fn read_workspace_file_tool(workspace: &Path, arguments: &Value) -> Result<String, String> {
+    let file = tool_arg_string(arguments, "file");
+
+    if file.is_empty() {
+        return Err("read_file requires a file path.".to_string());
+    }
+
+    let path = resolve_workspace_relative_path(workspace, file)?;
+
+    if !path.is_file() {
+        return Err(format!("Not a file: {}", file));
+    }
+
+    let metadata = fs::metadata(&path).map_err(|error| error.to_string())?;
+
+    if metadata.len() > 5_000_000 {
+        return Err("File is too large to read directly; use search_files first.".to_string());
+    }
+
+    let start_line = tool_arg_usize(arguments, "startLine", 1, 1, usize::MAX);
+    let max_lines = tool_arg_usize(arguments, "maxLines", 240, 1, 1000);
+    let content =
+        fs::read_to_string(&path).map_err(|error| format!("Failed to read {}: {}", file, error))?;
+    let lines: Vec<&str> = content.lines().collect();
+
+    if start_line > lines.len().max(1) {
+        return Ok(format!(
+            "{} has {} lines; startLine {} is past the end.",
+            workspace_relative_display(workspace, &path),
+            lines.len(),
+            start_line
+        ));
+    }
+
+    let start_index = start_line.saturating_sub(1);
+    let end_index = (start_index + max_lines).min(lines.len());
+    let numbered = lines[start_index..end_index]
+        .iter()
+        .enumerate()
+        .map(|(index, line)| format!("{}\t{}", start_index + index + 1, line))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok(format!(
+        "{} lines {}-{} of {}:\n{}",
+        workspace_relative_display(workspace, &path),
+        start_line,
+        end_index,
+        lines.len(),
+        truncate_text(numbered, 18_000)
+    ))
+}
+
+fn run_rg_files(workspace: &Path, args: &[String]) -> Result<String, String> {
+    let output = Command::new("rg")
+        .current_dir(workspace)
+        .args(args)
+        .output()
+        .map_err(|error| format!("Failed to run rg: {}", error))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() && output.status.code() != Some(1) && stdout.trim().is_empty() {
+        return Err(if stderr.trim().is_empty() {
+            "rg returned no usable result.".to_string()
+        } else {
+            stderr.trim().to_string()
+        });
+    }
+
+    Ok(stdout)
+}
+
+fn rg_exclude_args() -> Vec<String> {
+    vec![
+        "--glob".to_string(),
+        "!node_modules".to_string(),
+        "--glob".to_string(),
+        "!dist".to_string(),
+        "--glob".to_string(),
+        "!target".to_string(),
+        "--glob".to_string(),
+        "!.git".to_string(),
+    ]
+}
+
+fn search_workspace_files_tool(workspace: &Path, arguments: &Value) -> Result<String, String> {
+    let query = tool_arg_string(arguments, "query");
+
+    if query.is_empty() {
+        return Err("search_files requires a query.".to_string());
+    }
+
+    let max_results = tool_arg_usize(arguments, "maxResults", 80, 1, 300);
+    let mut args = vec![
+        "--line-number".to_string(),
+        "--no-heading".to_string(),
+        "--color".to_string(),
+        "never".to_string(),
+    ];
+    args.extend(rg_exclude_args());
+
+    if !tool_arg_bool(arguments, "caseSensitive", false) {
+        args.push("--ignore-case".to_string());
+    }
+
+    if tool_arg_bool(arguments, "literal", false) {
+        args.push("--fixed-strings".to_string());
+    }
+
+    args.push(query.to_string());
+
+    let path_arg = tool_arg_string(arguments, "path");
+    if !path_arg.is_empty() {
+        let path = resolve_workspace_relative_path(workspace, path_arg)?;
+        args.push(workspace_relative_display(workspace, &path));
+    }
+
+    let stdout = run_rg_files(workspace, &args)?;
+    let lines = stdout
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .take(max_results)
+        .collect::<Vec<_>>();
+
+    if lines.is_empty() {
+        return Ok(format!("No matches for `{}`.", query));
+    }
+
+    Ok(format!(
+        "Matches for `{}` (showing up to {}):\n{}",
+        query,
+        max_results,
+        truncate_text(lines.join("\n"), 18_000)
+    ))
+}
+
+fn glob_workspace_files_tool(workspace: &Path, arguments: &Value) -> Result<String, String> {
+    let pattern = tool_arg_string(arguments, "pattern");
+
+    if pattern.is_empty() {
+        return Err("glob_files requires a pattern.".to_string());
+    }
+
+    let max_results = tool_arg_usize(arguments, "maxResults", 120, 1, 500);
+    let mut args = vec!["--files".to_string()];
+    args.extend(rg_exclude_args());
+    args.push("--glob".to_string());
+    args.push(pattern.to_string());
+
+    let path_arg = tool_arg_string(arguments, "path");
+    if !path_arg.is_empty() {
+        let path = resolve_workspace_relative_path(workspace, path_arg)?;
+        args.push(workspace_relative_display(workspace, &path));
+    }
+
+    let stdout = run_rg_files(workspace, &args)?;
+    let files = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .take(max_results)
+        .collect::<Vec<_>>();
+
+    if files.is_empty() {
+        return Ok(format!("No files matched `{}`.", pattern));
+    }
+
+    Ok(format!(
+        "Files matching `{}` (showing up to {}):\n{}",
+        pattern,
+        max_results,
+        files.join("\n")
+    ))
 }
 
 fn validate_workspace(workspace_path: &str) -> Result<PathBuf, String> {
@@ -1820,6 +2347,65 @@ mod tests {
             })),
             "line one\nline two"
         );
+    }
+
+    #[test]
+    fn extracts_deepseek_prompt_cache_usage() {
+        let usage = usage_from_response(&json!({
+            "usage": {
+                "prompt_tokens": 120,
+                "completion_tokens": 30,
+                "total_tokens": 150,
+                "prompt_cache_hit_tokens": 90,
+                "prompt_cache_miss_tokens": 30
+            }
+        }))
+        .expect("usage should parse");
+
+        assert_eq!(usage.prompt_tokens, Some(120));
+        assert_eq!(usage.prompt_cache_hit_tokens, Some(90));
+        assert_eq!(usage.prompt_cache_miss_tokens, Some(30));
+    }
+
+    #[test]
+    fn code_tools_schema_includes_file_search_tools() {
+        let schema = code_tools_schema(true);
+        let names = schema
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool.get("function")?.get("name")?.as_str())
+            .collect::<Vec<_>>();
+
+        assert!(names.contains(&"codegraph_explore"));
+        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"list_files"));
+        assert!(names.contains(&"search_files"));
+        assert!(names.contains(&"glob_files"));
+    }
+
+    #[test]
+    fn read_file_tool_reads_line_ranges_and_blocks_traversal() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("matrix-tool-test-{}", stamp));
+        let src_dir = workspace.join("src");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::write(src_dir.join("main.rs"), "one\ntwo\nthree\n").unwrap();
+        let workspace = fs::canonicalize(&workspace).unwrap();
+
+        let content = read_workspace_file_tool(
+            &workspace,
+            &json!({ "file": "src/main.rs", "startLine": 2, "maxLines": 1 }),
+        )
+        .unwrap();
+
+        assert!(content.contains("2\ttwo"));
+        assert!(resolve_workspace_relative_path(&workspace, "../outside").is_err());
+
+        let _ = fs::remove_dir_all(&workspace);
     }
 
     #[test]
