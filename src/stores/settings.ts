@@ -95,6 +95,7 @@ export interface PatchSafetyCheck {
 interface PersistedSettings {
   providers?: Partial<Record<ProviderId, ProviderConfig>>;
   agentModels?: AgentModel[];
+  memberLibrary?: AgentModel[];
   groups?: ChatGroup[];
   activeGroupId?: string;
   ownerProfile?: Partial<OwnerProfile>;
@@ -229,6 +230,41 @@ function createMember(
   };
 }
 
+function normalizeName(name: string) {
+  return name.trim().toLocaleLowerCase();
+}
+
+function makeUniqueMemberName(name: string, members: AgentModel[], exceptId = "") {
+  const base = name.trim() || "群友";
+  const usedNames = new Set(
+    members
+      .filter((member) => member.id !== exceptId)
+      .map((member) => normalizeName(member.name)),
+  );
+
+  if (!usedNames.has(normalizeName(base))) {
+    return base;
+  }
+
+  let index = 2;
+  let nextName = `${base} ${index}`;
+
+  while (usedNames.has(normalizeName(nextName))) {
+    index += 1;
+    nextName = `${base} ${index}`;
+  }
+
+  return nextName;
+}
+
+function cloneMember(member: AgentModel, members: AgentModel[] = []) {
+  return {
+    ...structuredClone(member),
+    id: crypto.randomUUID(),
+    name: makeUniqueMemberName(member.name, members),
+  };
+}
+
 function createDefaultMembers(): AgentModel[] {
   return [
     createMember(
@@ -272,6 +308,7 @@ export const useSettingsStore = defineStore("settings", {
     return {
       providers: structuredClone(providerDefaults),
       groups: [defaultGroup] as ChatGroup[],
+      memberLibrary: createDefaultMembers() as AgentModel[],
       activeGroupId: defaultGroup.id,
       ownerProfile: structuredClone(defaultOwnerProfile),
     };
@@ -283,6 +320,20 @@ export const useSettingsStore = defineStore("settings", {
 
     activeMembers(): AgentModel[] {
       return this.activeGroup?.members.filter((member) => member.enabled) ?? [];
+    },
+
+    historicalMembers(): AgentModel[] {
+      const members = [...this.memberLibrary];
+
+      for (const group of this.groups) {
+        for (const member of group.members) {
+          if (!members.some((item) => normalizeName(item.name) === normalizeName(member.name))) {
+            members.push(member);
+          }
+        }
+      }
+
+      return members;
     },
   },
 
@@ -312,6 +363,7 @@ export const useSettingsStore = defineStore("settings", {
 
       if (Array.isArray(parsed.groups) && parsed.groups.length > 0) {
         this.groups = parsed.groups.map((group) => normalizeGroup(group));
+        this.memberLibrary = this.buildMemberLibrary(parsed.memberLibrary ?? []);
         this.activeGroupId = parsed.activeGroupId ?? parsed.groups[0].id;
         return;
       }
@@ -321,6 +373,7 @@ export const useSettingsStore = defineStore("settings", {
         migratedGroup.name = "迁移的模型群";
         migratedGroup.members = parsed.agentModels;
         this.groups = [migratedGroup];
+        this.memberLibrary = this.buildMemberLibrary(parsed.agentModels);
         this.activeGroupId = migratedGroup.id;
       }
     },
@@ -330,11 +383,57 @@ export const useSettingsStore = defineStore("settings", {
         STORAGE_KEY,
         JSON.stringify({
           providers: this.providers,
+          memberLibrary: this.buildMemberLibrary(this.memberLibrary),
           groups: this.groups,
           activeGroupId: this.activeGroupId,
           ownerProfile: this.ownerProfile,
         }),
       );
+    },
+
+    buildMemberLibrary(seed: AgentModel[] = []) {
+      const members: AgentModel[] = [];
+
+      for (const member of [...seed, ...this.groups.flatMap((group) => group.members)]) {
+        const name = makeUniqueMemberName(member.name, members);
+        members.push({
+          ...structuredClone(member),
+          id: member.id,
+          name,
+        });
+      }
+
+      const seen = new Set<string>();
+      return members.filter((member) => {
+        const key = normalizeName(member.name);
+
+        if (seen.has(key)) {
+          return false;
+        }
+
+        seen.add(key);
+        return true;
+      });
+    },
+
+    rememberMember(member: AgentModel) {
+      const existing = this.memberLibrary.find(
+        (item) => normalizeName(item.name) === normalizeName(member.name),
+      );
+
+      if (existing) {
+        Object.assign(existing, structuredClone(member), { id: existing.id });
+        return existing;
+      }
+
+      const libraryMember = {
+        ...structuredClone(member),
+        id: crypto.randomUUID(),
+        name: makeUniqueMemberName(member.name, this.memberLibrary),
+      };
+
+      this.memberLibrary.push(libraryMember);
+      return libraryMember;
     },
 
     startPersistence() {
@@ -364,7 +463,10 @@ export const useSettingsStore = defineStore("settings", {
         workspacePath: "",
         agentConfig: structuredClone(defaultAgentConfig),
         patchProposals: [],
-        members,
+        members: members.map((member, index, list) => ({
+          ...member,
+          name: makeUniqueMemberName(member.name, list.slice(0, index)),
+        })),
         messages: [
           createSystemMessage(
             `群「${name}」已创建。当前有 ${members.length} 个虚拟群友，可以开始对话。`,
@@ -374,6 +476,9 @@ export const useSettingsStore = defineStore("settings", {
       };
 
       this.groups.unshift(group);
+      for (const member of group.members) {
+        this.rememberMember(member);
+      }
       this.activeGroupId = group.id;
     },
 
@@ -395,16 +500,37 @@ export const useSettingsStore = defineStore("settings", {
       const group = this.activeGroup;
       const providerConfig = this.providers[provider];
       const nextIndex = group.members.length + 1;
-
-      group.members.push(
-        createMember(
-          provider,
-          `${providerConfig.name} 群友 ${nextIndex}`,
-          providerConfig.defaultModel,
-          "你是这个群里的虚拟群友，请基于自己的核心角色独立回答用户问题。",
-        ),
+      const member = createMember(
+        provider,
+        makeUniqueMemberName(`${providerConfig.name} 群友 ${nextIndex}`, [
+          ...group.members,
+          ...this.memberLibrary,
+        ]),
+        providerConfig.defaultModel,
+        "你是这个群里的虚拟群友，请基于自己的核心角色独立回答用户问题。",
       );
+
+      group.members.push(member);
+      this.rememberMember(member);
       group.updatedAt = new Date().toISOString();
+    },
+
+    addMemberFromHistory(memberId: string) {
+      const source = this.historicalMembers.find((member) => member.id === memberId);
+
+      if (!source) {
+        return false;
+      }
+
+      const group = this.activeGroup;
+
+      if (group.members.some((member) => normalizeName(member.name) === normalizeName(source.name))) {
+        return false;
+      }
+
+      group.members.push(cloneMember(source, group.members));
+      group.updatedAt = new Date().toISOString();
+      return true;
     },
 
     duplicateMember(member: AgentModel) {
@@ -413,8 +539,21 @@ export const useSettingsStore = defineStore("settings", {
       group.members.push({
         ...member,
         id: crypto.randomUUID(),
-        name: `${member.name} 副本`,
+        name: makeUniqueMemberName(`${member.name} 副本`, group.members),
       });
+      group.updatedAt = new Date().toISOString();
+    },
+
+    renameMember(memberId: string, name: string) {
+      const group = this.activeGroup;
+      const member = group.members.find((item) => item.id === memberId);
+
+      if (!member) {
+        return;
+      }
+
+      member.name = makeUniqueMemberName(name, group.members, memberId);
+      this.rememberMember(member);
       group.updatedAt = new Date().toISOString();
     },
 
@@ -497,10 +636,15 @@ export const useSettingsStore = defineStore("settings", {
 
       return createMember(
         provider,
-        `${providerConfig.name} 群友`,
+        makeUniqueMemberName(`${providerConfig.name} 群友`, this.historicalMembers),
         providerConfig.defaultModel,
         "你是这个群里的虚拟群友，请基于自己的核心角色独立回答用户问题。",
       );
+    },
+
+    cloneHistoricalMember(memberId: string, members: AgentModel[] = []) {
+      const source = this.historicalMembers.find((member) => member.id === memberId);
+      return source ? cloneMember(source, members) : null;
     },
   },
 });

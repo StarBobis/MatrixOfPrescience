@@ -9,6 +9,7 @@ defineProps<{
   description: string;
   announcement: string;
   members: AgentModel[];
+  historicalMembers: AgentModel[];
   providerOptions: Array<{ label: string; value: ProviderId }>;
   modelPresets: Record<ProviderId, string[]>;
 }>();
@@ -18,6 +19,7 @@ const emit = defineEmits<{
   "update:description": [value: string];
   "update:announcement": [value: string];
   addDraftMember: [provider: ProviderId];
+  addDraftMemberFromHistory: [memberId: string];
   removeDraftMember: [memberId: string];
   updateDraftMemberProvider: [member: AgentModel];
   createGroup: [];
@@ -48,6 +50,25 @@ const emit = defineEmits<{
     </el-form>
 
     <div class="settings-toolbar">
+      <el-select
+        class="history-member-select"
+        placeholder="从历史群友添加"
+        filterable
+        clearable
+        @change="(memberId: string) => memberId && emit('addDraftMemberFromHistory', memberId)"
+      >
+        <el-option
+          v-for="member in historicalMembers"
+          :key="member.id"
+          :label="member.name"
+          :value="member.id"
+          :disabled="
+            members.some(
+              (item) => item.name.trim().toLocaleLowerCase() === member.name.trim().toLocaleLowerCase(),
+            )
+          "
+        />
+      </el-select>
       <el-button type="primary" :icon="CirclePlus" @click="emit('addDraftMember', 'openai')">
         添加 ChatGPT 群友
       </el-button>
@@ -109,3 +130,16 @@ const emit = defineEmits<{
     </template>
   </el-dialog>
 </template>
+
+<style scoped>
+.settings-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+
+.history-member-select {
+  width: 220px;
+}
+</style>

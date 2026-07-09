@@ -6,13 +6,16 @@ import type { AgentModel, OwnerProfile, ProviderId } from "../stores/settings";
 
 defineProps<{
   members: AgentModel[];
+  historicalMembers: AgentModel[];
   ownerProfile: OwnerProfile;
   getProviderLabel: (provider: ProviderId) => string;
 }>();
 
 const emit = defineEmits<{
   addMember: [provider: ProviderId];
+  addHistoricalMember: [memberId: string];
   removeMember: [memberId: string];
+  renameMember: [memberId: string, name: string];
 }>();
 
 const activeMemberCardId = ref("");
@@ -80,11 +83,30 @@ async function assignLocalAvatar(member: AgentModel) {
 
           <div class="add-member-card">
             <strong>添加群友</strong>
+            <el-select
+              placeholder="从历史群友添加"
+              filterable
+              clearable
+              @change="(memberId: string) => memberId && emit('addHistoricalMember', memberId)"
+            >
+              <el-option
+                v-for="member in historicalMembers"
+                :key="member.id"
+                :label="member.name"
+                :value="member.id"
+                :disabled="
+                  members.some(
+                    (item) =>
+                      item.name.trim().toLocaleLowerCase() === member.name.trim().toLocaleLowerCase(),
+                  )
+                "
+              />
+            </el-select>
             <el-button type="primary" plain @click="emit('addMember', 'openai')">
-              ChatGPT 群友
+              新建 ChatGPT 群友
             </el-button>
             <el-button plain @click="emit('addMember', 'deepseek')">
-              DeepSeek 群友
+              新建 DeepSeek 群友
             </el-button>
           </div>
         </el-popover>
@@ -153,6 +175,7 @@ async function assignLocalAvatar(member: AgentModel) {
                 v-model="member.name"
                 size="small"
                 @focus="startMemberCardEdit(member.id)"
+                @change="emit('renameMember', member.id, member.name)"
                 @blur="finishMemberCardEdit(member.id)"
               />
               <span>{{ member.enabled ? "未禁言" : "已禁言" }}</span>

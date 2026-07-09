@@ -44,13 +44,16 @@ const safetyModelOptions: Array<{ label: string; value: AgentSafetyModel }> = [
 
 defineProps<{
   members: AgentModel[];
+  historicalMembers: AgentModel[];
   ownerProfile: OwnerProfile;
   getProviderLabel: (provider: ProviderId) => string;
 }>();
 
 const emit = defineEmits<{
   addMember: [provider: ProviderId];
+  addHistoricalMember: [memberId: string];
   removeMember: [memberId: string];
+  renameMember: [memberId: string, name: string];
 }>();
 
 function syncEditBeforeAsk(value: boolean) {
@@ -198,10 +201,13 @@ function finishAnnouncementEdit() {
 
     <GroupMemberPanel
       :members="members"
+      :historical-members="historicalMembers"
       :owner-profile="ownerProfile"
       :get-provider-label="getProviderLabel"
       @add-member="(provider) => emit('addMember', provider)"
+      @add-historical-member="(memberId) => emit('addHistoricalMember', memberId)"
       @remove-member="(memberId) => emit('removeMember', memberId)"
+      @rename-member="(memberId, name) => emit('renameMember', memberId, name)"
     />
   </aside>
 </template>

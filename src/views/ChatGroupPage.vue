@@ -19,6 +19,7 @@ import CreateGroupDialog from "../components/CreateGroupDialog.vue";
 import GroupSidebar from "../components/GroupSidebar.vue";
 import GroupRightPanel from "../components/GroupRightPanel.vue";
 import ResizableGroupLayout from "../components/ResizableGroupLayout.vue";
+import { makeMemberNameUnique } from "../utils/memberNames";
 import { evaluatePatchSafety } from "../utils/patchSafety";
 
 type ChatRole = "user" | "assistant";
@@ -85,7 +86,8 @@ const statusText: Record<MessageStatus, string> = {
 };
 
 const settingsStore = useSettingsStore();
-const { providers, groups, activeGroup, activeMembers, ownerProfile } = storeToRefs(settingsStore);
+const { providers, groups, activeGroup, activeMembers, ownerProfile, historicalMembers } =
+  storeToRefs(settingsStore);
 
 const composer = ref("");
 const groupDialogOpen = ref(false);
@@ -158,7 +160,31 @@ function openCreateGroupDialog() {
 }
 
 function addDraftMember(provider: ProviderId = "openai") {
-  newGroupMembers.value.push(settingsStore.createMemberDraft(provider));
+  const member = settingsStore.createMemberDraft(provider);
+  makeMemberNameUnique(member, newGroupMembers.value);
+  newGroupMembers.value.push(member);
+}
+
+function addDraftMemberFromHistory(memberId: string) {
+  const source = historicalMembers.value.find((member) => member.id === memberId);
+
+  if (
+    source &&
+    newGroupMembers.value.some(
+      (item) => item.name.trim().toLocaleLowerCase() === source.name.trim().toLocaleLowerCase(),
+    )
+  ) {
+    ElMessage.warning("这个群友已经在新群里了");
+    return;
+  }
+
+  const member = settingsStore.cloneHistoricalMember(memberId, newGroupMembers.value);
+
+  if (!member) {
+    return;
+  }
+
+  newGroupMembers.value.push(member);
 }
 
 function removeDraftMember(memberId: string) {
@@ -179,10 +205,27 @@ function updateDraftMemberProvider(member: AgentModel) {
 
 function createGroup() {
   const groupName = newGroupName.value.trim();
+  const memberNames = new Set<string>();
 
   if (!groupName) {
     ElMessage.warning("请输入群名称");
     return;
+  }
+
+  for (const member of newGroupMembers.value) {
+    const normalizedName = member.name.trim().toLocaleLowerCase();
+
+    if (!normalizedName) {
+      ElMessage.warning("群友名称不能为空");
+      return;
+    }
+
+    if (memberNames.has(normalizedName)) {
+      ElMessage.warning("群友名称必须不同");
+      return;
+    }
+
+    memberNames.add(normalizedName);
   }
 
   settingsStore.createGroup(
@@ -202,6 +245,16 @@ function selectGroup(groupId: string) {
 
 function addMember(provider: ProviderId = "openai") {
   settingsStore.addMember(provider);
+}
+
+function addHistoricalMember(memberId: string) {
+  if (!settingsStore.addMemberFromHistory(memberId)) {
+    ElMessage.warning("这个群友已经在当前群里了");
+  }
+}
+
+function renameMember(memberId: string, name: string) {
+  settingsStore.renameMember(memberId, name);
 }
 
 function removeMember(memberId: string) {
@@ -900,10 +953,13 @@ onMounted(() => {
           v-model:announcement="activeGroupAnnouncement"
           v-model:agent-config="activeGroupAgentConfig"
           :members="activeGroupMembers"
+          :historical-members="historicalMembers"
           :owner-profile="ownerProfile"
           :get-provider-label="getProviderLabel"
           @add-member="addMember"
+          @add-historical-member="addHistoricalMember"
           @remove-member="removeMember"
+          @rename-member="renameMember"
         />
       </template>
     </ResizableGroupLayout>
@@ -914,9 +970,11 @@ onMounted(() => {
       v-model:description="newGroupDescription"
       v-model:announcement="newGroupAnnouncement"
       :members="newGroupMembers"
+      :historical-members="historicalMembers"
       :provider-options="providerOptions"
       :model-presets="modelPresets"
       @add-draft-member="addDraftMember"
+      @add-draft-member-from-history="addDraftMemberFromHistory"
       @remove-draft-member="removeDraftMember"
       @update-draft-member-provider="updateDraftMemberProvider"
       @create-group="createGroup"
