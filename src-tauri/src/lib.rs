@@ -2,10 +2,11 @@ use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    env,
     fs,
     io::Write,
     path::{Component, Path, PathBuf},
-    process::Command,
+    process::{Command, Output},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Manager};
@@ -553,12 +554,19 @@ fn execute_code_tool_call(workspace: &Path, tool_call: &Value) -> Value {
             match run_codegraph_explore(workspace, &query) {
                 Ok(content) => content,
                 Err(codegraph_error) => {
-                    read_local_code_context(workspace, &query).unwrap_or_else(|fallback_error| {
-                        format!(
-                            "CodeGraph tool was called, but CodeGraph could not read this workspace: {}\nLocal fallback failed: {}",
-                            codegraph_error, fallback_error
-                        )
-                    })
+                    read_local_code_context(workspace, &query)
+                        .map(|fallback| {
+                            format!(
+                                "CodeGraph tool was called, but CodeGraph execution failed and local fallback was used.\nCodeGraph error: {}\n\n{}",
+                                codegraph_error, fallback
+                            )
+                        })
+                        .unwrap_or_else(|fallback_error| {
+                            format!(
+                                "CodeGraph tool was called, but CodeGraph could not read this workspace: {}\nLocal fallback failed: {}",
+                                codegraph_error, fallback_error
+                            )
+                        })
                 }
             }
         }
@@ -600,6 +608,67 @@ fn has_codegraph_index(workspace: &Path) -> bool {
         .any(|path| path.join(".codegraph").is_dir())
 }
 
+fn codegraph_command_candidates() -> Vec<PathBuf> {
+    let mut candidates = vec![PathBuf::from("codegraph"), PathBuf::from("codegraph.cmd")];
+
+    if let Ok(app_data) = env::var("APPDATA") {
+        candidates.push(PathBuf::from(app_data).join("npm").join("codegraph.cmd"));
+    }
+
+    if let Ok(user_profile) = env::var("USERPROFILE") {
+        candidates.push(
+            PathBuf::from(user_profile)
+                .join("AppData")
+                .join("Roaming")
+                .join("npm")
+                .join("codegraph.cmd"),
+        );
+    }
+
+    candidates
+}
+
+fn run_script_command(script: &Path, workspace: &Path, args: &[&str]) -> Result<Output, String> {
+    let extension = script
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase);
+
+    if matches!(extension.as_deref(), Some("cmd" | "bat")) {
+        let mut command = Command::new("cmd");
+        command.current_dir(workspace).arg("/C").arg(script);
+        for arg in args {
+            command.arg(arg);
+        }
+        return command.output().map_err(|error| error.to_string());
+    }
+
+    let mut command = Command::new(script);
+    command.current_dir(workspace);
+    for arg in args {
+        command.arg(arg);
+    }
+    command.output().map_err(|error| error.to_string())
+}
+
+fn run_codegraph_command(workspace: &Path, args: &[&str]) -> Result<Output, String> {
+    let mut errors = Vec::new();
+
+    for candidate in codegraph_command_candidates() {
+        let output = run_script_command(&candidate, workspace, args);
+
+        match output {
+            Ok(output) => return Ok(output),
+            Err(error) => errors.push(format!("{}: {}", candidate.display(), error)),
+        }
+    }
+
+    Err(format!(
+        "Failed to start CodeGraph. Tried: {}",
+        errors.join("; ")
+    ))
+}
+
 fn truncate_text(text: String, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text;
@@ -618,12 +687,7 @@ fn run_codegraph_explore(workspace: &Path, query: &str) -> Result<String, String
         ));
     }
 
-    let output = Command::new("codegraph")
-        .current_dir(workspace)
-        .arg("explore")
-        .arg(query)
-        .output()
-        .map_err(|error| format!("Failed to start CodeGraph: {}", error))?;
+    let output = run_codegraph_command(workspace, &["explore", query])?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -708,7 +772,7 @@ fn read_local_code_context(workspace: &Path, query: &str) -> Result<String, Stri
     }
 
     let mut sections = vec![
-        "CodeGraph tool was called, but this query is using a local command fallback. If the target workspace has no .codegraph folder, initialize and index it before expecting full CodeGraph results.".to_string(),
+        "Local command fallback content follows. This is not a CodeGraph result and has no symbol graph analysis.".to_string(),
         "File list:".to_string(),
         files
             .iter()
