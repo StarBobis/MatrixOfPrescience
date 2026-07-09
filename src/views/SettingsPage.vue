@@ -1,11 +1,20 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import { storeToRefs } from "pinia";
 import { Setting, UserFilled } from "@element-plus/icons-vue";
 import { type ProviderId, useSettingsStore } from "../stores/settings";
 import { chooseLocalAvatar, getAvatarSrc } from "../utils/avatar";
+import { useI18n } from "vue-i18n";
+import type { AppLocale } from "../i18n/locales";
 
 const settingsStore = useSettingsStore();
-const { providers, ownerProfile } = storeToRefs(settingsStore);
+const { providers, ownerProfile, locale } = storeToRefs(settingsStore);
+const { t } = useI18n();
+
+const languageOptions = computed<Array<{ label: string; value: AppLocale }>>(() => [
+  { label: t("settings.languageOptions.en"), value: "en" },
+  { label: t("settings.languageOptions.zhCN"), value: "zh-CN" },
+]);
 
 const providerOptions = [
   {
@@ -41,16 +50,16 @@ async function chooseOwnerAvatar() {
         </el-icon>
       </div>
       <div>
-        <p class="settings-eyebrow">Settings</p>
-        <h1>全局设置</h1>
+        <p class="settings-eyebrow">{{ t("common.settings") }}</p>
+        <h1>{{ t("settings.title") }}</h1>
       </div>
     </section>
 
     <div class="settings-layout">
       <section class="settings-panel">
         <div class="settings-panel-head">
-          <strong>我的资料</strong>
-          <el-tag size="small" type="success">群主</el-tag>
+          <strong>{{ t("settings.profile.title") }}</strong>
+          <el-tag size="small" type="success">{{ t("common.ownerRole") }}</el-tag>
         </div>
 
         <div class="owner-preview">
@@ -61,23 +70,33 @@ async function chooseOwnerAvatar() {
             </el-icon>
           </span>
           <div>
-            <strong>{{ ownerProfile.name || "我" }}</strong>
-            <span>所有群聊中固定为群主</span>
+            <strong>{{ ownerProfile.name || t("common.ownerName") }}</strong>
+            <span>{{ t("settings.profile.ownerScope") }}</span>
           </div>
         </div>
 
         <el-form label-position="top">
-          <el-form-item label="名称">
-            <el-input v-model="ownerProfile.name" placeholder="我" />
+          <el-form-item :label="t('common.language')">
+            <el-select v-model="locale">
+              <el-option
+                v-for="option in languageOptions"
+                :key="option.value"
+                :label="option.label"
+                :value="option.value"
+              />
+            </el-select>
           </el-form-item>
-          <el-form-item label="头像">
-            <el-input v-model="ownerProfile.avatar" placeholder="选择本地图片或输入图片路径">
+          <el-form-item :label="t('settings.profile.name')">
+            <el-input v-model="ownerProfile.name" :placeholder="t('common.ownerName')" />
+          </el-form-item>
+          <el-form-item :label="t('settings.profile.avatar')">
+            <el-input v-model="ownerProfile.avatar" :placeholder="t('settings.profile.avatarPlaceholder')">
               <template #append>
-                <el-button @click="chooseOwnerAvatar">选择</el-button>
+                <el-button @click="chooseOwnerAvatar">{{ t("common.choose") }}</el-button>
               </template>
             </el-input>
           </el-form-item>
-          <el-form-item label="头像底色">
+          <el-form-item :label="t('settings.profile.avatarColor')">
             <el-color-picker v-model="ownerProfile.color" />
           </el-form-item>
         </el-form>
@@ -85,7 +104,7 @@ async function chooseOwnerAvatar() {
 
       <section class="settings-panel">
         <div class="settings-panel-head">
-          <strong>Provider Key</strong>
+          <strong>{{ t("settings.providers.title") }}</strong>
           <el-tag size="small">{{ providerOptions.length }}</el-tag>
         </div>
 
@@ -97,7 +116,7 @@ async function chooseOwnerAvatar() {
             </div>
 
             <el-form label-position="top">
-              <el-form-item label="API Key">
+              <el-form-item :label="t('common.apiKey')">
                 <el-input
                   v-model="provider.apiKey"
                   type="password"
@@ -105,10 +124,10 @@ async function chooseOwnerAvatar() {
                   placeholder="sk-..."
                 />
               </el-form-item>
-              <el-form-item label="Base URL">
+              <el-form-item :label="t('common.baseUrl')">
                 <el-input v-model="provider.baseUrl" />
               </el-form-item>
-              <el-form-item label="默认模型">
+              <el-form-item :label="t('settings.providers.defaultModel')">
                 <el-select
                   v-model="provider.defaultModel"
                   filterable

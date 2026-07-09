@@ -1,6 +1,7 @@
 import { convertFileSrc, isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readFile } from "@tauri-apps/plugin-fs";
+import { translate as t } from "../i18n";
 
 const avatarMimeTypes: Record<string, string> = {
   bmp: "image/bmp",
@@ -34,10 +35,10 @@ export async function chooseLocalAvatar() {
   const selected = await open({
     directory: false,
     multiple: false,
-    title: "选择头像图片",
+    title: t("avatar.chooseTitle"),
     filters: [
       {
-        name: "图片",
+        name: t("avatar.filterImages"),
         extensions: ["png", "jpg", "jpeg", "webp", "gif", "bmp", "svg"],
       },
     ],

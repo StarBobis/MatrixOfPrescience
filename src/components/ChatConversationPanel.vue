@@ -2,13 +2,24 @@
 import { computed, nextTick, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import { FolderOpened, Promotion } from "@element-plus/icons-vue";
+import { useI18n } from "vue-i18n";
 import PatchApprovalPanel from "./PatchApprovalPanel.vue";
 import type { AgentModel, ChatGroup, ChatMessage, PatchApprovalStatus } from "../stores/settings";
+
+export type SpeakerQueueStatus = "queued" | "checking" | "waiting" | "speaking";
+
+export interface SpeakerQueueItem {
+  id: string;
+  name: string;
+  color: string;
+  status: SpeakerQueueStatus;
+}
 
 const props = defineProps<{
   activeGroup?: ChatGroup;
   activeMemberCount: number;
   activeMembers: AgentModel[];
+  speakerQueue: SpeakerQueueItem[];
   messages: ChatMessage[];
   patchProposals: ChatGroup["patchProposals"];
   composer: string;
@@ -29,6 +40,7 @@ const emit = defineEmits<{
 }>();
 
 const messagesPanel = ref<HTMLElement | null>(null);
+const { t } = useI18n();
 
 const mentionMatch = computed(() => {
   const match = props.composer.match(/(?:^|\s)@([^@\s]*)$/);
@@ -44,6 +56,13 @@ const mentionCandidates = computed(() => {
     .slice(0, 8);
 });
 
+const speakerQueueStatusType: Record<SpeakerQueueStatus, "info" | "warning" | "success" | "primary"> = {
+  queued: "info",
+  checking: "warning",
+  waiting: "info",
+  speaking: "success",
+};
+
 async function scrollToBottom() {
   await nextTick();
 
@@ -56,7 +75,7 @@ async function chooseWorkspacePath() {
   const selected = await open({
     directory: true,
     multiple: false,
-    title: "选择当前群工作文件夹",
+    title: t("chat.workspace.pickDialogTitle"),
   });
 
   if (typeof selected === "string") {
@@ -87,25 +106,50 @@ defineExpose({
           <p v-if="activeGroup?.description" class="chat-group-desc">{{ activeGroup?.description }}</p>
         </div>
         <div class="chat-header-meta">
-          <el-tag type="info" size="small">{{ activeMemberCount }} 群友在线</el-tag>
+          <el-tag type="info" size="small">
+            {{ t("chat.onlineMembers", { count: activeMemberCount }) }}
+          </el-tag>
         </div>
       </div>
       <div class="chat-header-tools">
-        <span class="workspace-label">工作文件夹</span>
+        <span class="workspace-label">{{ t("chat.workspace.label") }}</span>
         <el-input
           class="workspace-input"
           :model-value="workspacePath"
-          placeholder="选择或输入路径…"
+          :placeholder="t('chat.workspace.placeholder')"
           size="small"
           clearable
           @update:model-value="emit('update:workspacePath', String($event))"
         >
           <template #append>
-            <el-button :icon="FolderOpened" size="small" title="选择工作文件夹" @click="chooseWorkspacePath" />
+            <el-button
+              :icon="FolderOpened"
+              size="small"
+              :title="t('chat.chooseWorkspaceTitle')"
+              @click="chooseWorkspacePath"
+            />
           </template>
         </el-input>
       </div>
     </header>
+
+    <section v-if="speakerQueue.length > 0" class="speaker-queue">
+      <span class="speaker-queue-title">{{ t("chat.queue.title") }}</span>
+      <div class="speaker-queue-list">
+        <span
+          v-for="member in speakerQueue"
+          :key="member.id"
+          class="speaker-queue-pill"
+          :style="{ '--queue-accent': member.color }"
+        >
+          <span class="queue-dot"></span>
+          <strong>{{ member.name }}</strong>
+          <el-tag size="small" :type="speakerQueueStatusType[member.status]">
+            {{ t(`chat.queue.status.${member.status}`) }}
+          </el-tag>
+        </span>
+      </div>
+    </section>
 
     <section ref="messagesPanel" class="messages-panel">
       <PatchApprovalPanel
@@ -140,7 +184,7 @@ defineExpose({
           class="thought-steps"
           :open="message.status === 'thinking'"
         >
-          <summary>思考过程</summary>
+          <summary>{{ t("chat.thoughtSteps") }}</summary>
           <ol>
             <li v-for="step in message.thoughtSteps" :key="step">{{ step }}</li>
           </ol>
@@ -148,10 +192,13 @@ defineExpose({
 
         <div class="message-reactions">
           <span class="reaction-pill agree">
-            同意 {{ (message.agreeMemberIds ?? []).length }}
+            {{ t("chat.agree", { count: (message.agreeMemberIds ?? []).length }) }}
+          </span>
+          <span class="reaction-pill supplement">
+            {{ t("chat.supplement", { count: (message.supplementMemberIds ?? []).length }) }}
           </span>
           <span class="reaction-pill disagree">
-            不同意 {{ (message.disagreeMemberIds ?? []).length }}
+            {{ t("chat.disagree", { count: (message.disagreeMemberIds ?? []).length }) }}
           </span>
         </div>
       </article>
@@ -177,7 +224,7 @@ defineExpose({
         type="textarea"
         :autosize="{ minRows: 3, maxRows: 7 }"
         resize="none"
-        placeholder="输入消息，Enter 发送，Shift + Enter 换行"
+        :placeholder="t('chat.composerPlaceholder')"
         @update:model-value="emit('update:composer', String($event))"
         @keydown.enter.exact.prevent="emit('sendMessage')"
       />
@@ -188,7 +235,7 @@ defineExpose({
         plain
         @click="emit('stopGeneration')"
       >
-        中断
+        {{ t("chat.stop") }}
       </el-button>
 
       <el-button
@@ -198,7 +245,7 @@ defineExpose({
         :icon="Promotion"
         @click="emit('sendMessage')"
       >
-        发给 {{ activeMemberCount }} 个群友
+        {{ t("chat.sendToMembers", { count: activeMemberCount }) }}
       </el-button>
     </footer>
   </main>
@@ -224,6 +271,58 @@ defineExpose({
   gap: 4px;
   margin: 8px 0 0;
   padding-left: 18px;
+}
+
+.speaker-queue {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid #e1e7e2;
+  background: #f8fbf9;
+}
+
+.speaker-queue-title {
+  flex: 0 0 auto;
+  color: #647169;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.speaker-queue-list {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.speaker-queue-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 220px;
+  padding: 4px 6px;
+  border: 1px solid #dbe5de;
+  border-radius: 8px;
+  background: #ffffff;
+  font-size: 12px;
+}
+
+.speaker-queue-pill strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #26322b;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--queue-accent);
 }
 
 .mention-menu {

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import { CirclePlus, Close } from "@element-plus/icons-vue";
+import { useI18n } from "vue-i18n";
 import { chooseLocalAvatar, getAvatarSrc } from "../utils/avatar";
 import type { AgentModel, OwnerProfile, ProviderId } from "../stores/settings";
 
@@ -21,6 +22,7 @@ const emit = defineEmits<{
 
 const activeMemberCardId = ref("");
 const editingMemberCardId = ref("");
+const { t } = useI18n();
 let memberCardCloseTimer: number | undefined;
 
 function getInitial(name: string) {
@@ -75,7 +77,7 @@ async function assignLocalAvatar(member: AgentModel) {
 <template>
   <section class="member-panel">
     <div class="section-heading">
-      <span>群友列表</span>
+      <span>{{ t("members.listTitle") }}</span>
       <div class="member-heading-actions">
         <el-tag size="small" type="success">{{ members.length + 1 }}</el-tag>
         <el-popover trigger="click" placement="left-start" :width="220">
@@ -84,9 +86,9 @@ async function assignLocalAvatar(member: AgentModel) {
           </template>
 
           <div class="add-member-card">
-            <strong>添加群友</strong>
+            <strong>{{ t("members.addTitle") }}</strong>
             <el-select
-              placeholder="从历史群友添加"
+              :placeholder="t('members.addFromHistory')"
               filterable
               clearable
               @change="(memberId: string) => memberId && emit('addHistoricalMember', memberId)"
@@ -105,10 +107,10 @@ async function assignLocalAvatar(member: AgentModel) {
               />
             </el-select>
             <el-button type="primary" plain @click="emit('addMember', 'openai')">
-              新建 ChatGPT 群友
+              {{ t("members.addOpenAIMember") }}
             </el-button>
             <el-button plain @click="emit('addMember', 'deepseek')">
-              新建 DeepSeek 群友
+              {{ t("members.addDeepSeekMember") }}
             </el-button>
           </div>
         </el-popover>
@@ -122,8 +124,8 @@ async function assignLocalAvatar(member: AgentModel) {
           <span v-else>{{ getInitial(ownerProfile.name) }}</span>
         </span>
         <div class="member-card-copy">
-          <strong>{{ ownerProfile.name || "我" }}</strong>
-          <span>群主</span>
+          <strong>{{ ownerProfile.name || t("common.ownerName") }}</strong>
+          <span>{{ t("common.ownerRole") }}</span>
         </div>
       </article>
 
@@ -149,12 +151,12 @@ async function assignLocalAvatar(member: AgentModel) {
             </span>
             <div class="member-card-copy">
               <strong>{{ member.name }}</strong>
-              <span>{{ member.enabled ? "未禁言" : "已禁言" }}</span>
+              <span v-if="!member.enabled">{{ t("members.muted") }}</span>
             </div>
             <button
               class="member-remove-btn"
               type="button"
-              title="踢出群友"
+              :title="t('members.removeTitle')"
               @click.stop="emit('removeMember', member.id)"
             >
               <el-icon><Close /></el-icon>
@@ -180,7 +182,7 @@ async function assignLocalAvatar(member: AgentModel) {
               @input="emit('renameMember', member.id, member.name)"
               @blur="finishMemberCardEdit(member.id)"
             />
-              <span>{{ member.enabled ? "未禁言" : "已禁言" }}</span>
+              <span v-if="!member.enabled">{{ t("members.muted") }}</span>
             </div>
           </div>
 
@@ -190,23 +192,23 @@ async function assignLocalAvatar(member: AgentModel) {
               <dd>{{ getProviderLabel(member.provider) }}</dd>
             </div>
             <div>
-              <dt>模型</dt>
+              <dt>{{ t("common.model") }}</dt>
               <dd>{{ member.model }}</dd>
             </div>
             <div>
-              <dt>温度</dt>
+              <dt>{{ t("common.temperature") }}</dt>
               <dd>{{ member.temperature.toFixed(1) }}</dd>
             </div>
           </dl>
 
           <div class="profile-muted-row">
-            <span>是否禁言</span>
+            <span>{{ t("members.muteQuestion") }}</span>
             <el-switch
               v-model="member.enabled"
               size="small"
               inline-prompt
-              active-text="是"
-              inactive-text="否"
+              :active-text="t('common.yes')"
+              :inactive-text="t('common.no')"
               active-color="#c45656"
               :active-value="false"
               :inactive-value="true"
@@ -215,13 +217,13 @@ async function assignLocalAvatar(member: AgentModel) {
           </div>
 
           <div class="profile-prompt">
-            <span>角色身份</span>
+            <span>{{ t("members.roleIdentity") }}</span>
             <el-input
               v-model="member.systemPrompt"
               type="textarea"
               :autosize="{ minRows: 3 }"
               resize="none"
-              placeholder="描述这个群友的分工、立场和回答边界"
+              :placeholder="t('members.rolePlaceholder')"
               @focus="startMemberCardEdit(member.id)"
               @input="emit('updateMemberProfile', member)"
               @blur="finishMemberCardEdit(member.id)"
@@ -229,9 +231,11 @@ async function assignLocalAvatar(member: AgentModel) {
           </div>
 
           <div class="profile-actions">
-            <el-button size="small" @click="assignLocalAvatar(member)">本地头像</el-button>
+            <el-button size="small" @click="assignLocalAvatar(member)">
+              {{ t("members.localAvatar") }}
+            </el-button>
             <el-button size="small" type="danger" plain @click="emit('removeMember', member.id)">
-              踢出群友
+              {{ t("members.removeTitle") }}
             </el-button>
           </div>
         </div>

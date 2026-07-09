@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
+import { useI18n } from "vue-i18n";
 import GroupMemberPanel from "./GroupMemberPanel.vue";
 import type {
   AgentCollaborationConfig,
@@ -15,12 +16,13 @@ import type {
 const announcement = defineModel<string>("announcement", { default: "" });
 const agentConfig = defineModel<AgentCollaborationConfig>("agentConfig", { required: true });
 const editingAnnouncement = ref(false);
+const { t } = useI18n();
 
-const agentModeOptions: Array<{ label: string; value: AgentMode }> = [
-  { label: "聊天讨论", value: "chat" },
-  { label: "本地 Agent", value: "local-agent" },
-  { label: "Architect", value: "architect" },
-];
+const agentModeOptions = computed<Array<{ label: string; value: AgentMode }>>(() => [
+  { label: t("rightPanel.agentModeOptions.chat"), value: "chat" },
+  { label: t("rightPanel.agentModeOptions.localAgent"), value: "local-agent" },
+  { label: t("rightPanel.agentModeOptions.architect"), value: "architect" },
+]);
 
 const workflowModeOptions: Array<{ label: string; value: AgentWorkflowMode }> = [
   { label: "Ask", value: "ask" },
@@ -29,11 +31,11 @@ const workflowModeOptions: Array<{ label: string; value: AgentWorkflowMode }> = 
   { label: "YOLO", value: "yolo" },
 ];
 
-const approvalModeOptions: Array<{ label: string; value: AgentApprovalMode }> = [
-  { label: "手动确认", value: "manual" },
-  { label: "高风险确认", value: "confirm-risky" },
-  { label: "自动批准", value: "auto" },
-];
+const approvalModeOptions = computed<Array<{ label: string; value: AgentApprovalMode }>>(() => [
+  { label: t("rightPanel.approvalModeOptions.manual"), value: "manual" },
+  { label: t("rightPanel.approvalModeOptions.confirmRisky"), value: "confirm-risky" },
+  { label: t("rightPanel.approvalModeOptions.auto"), value: "auto" },
+]);
 
 const safetyModelOptions: Array<{ label: string; value: AgentSafetyModel }> = [
   { label: "Strict", value: "strict" },
@@ -105,16 +107,16 @@ function finishAnnouncementEdit() {
   <aside class="right-panel">
     <section class="announcement-panel">
       <div class="section-heading">
-        <span>群公告</span>
-        <el-tag size="small" type="warning">基础约定</el-tag>
+        <span>{{ t("rightPanel.announcement.title") }}</span>
+        <el-tag size="small" type="warning">{{ t("rightPanel.announcement.tag") }}</el-tag>
       </div>
       <div
         v-if="!editingAnnouncement"
         class="announcement-view"
-        title="双击编辑群公告"
+        :title="t('rightPanel.announcement.editTitle')"
         @dblclick="editingAnnouncement = true"
       >
-        {{ announcement || "双击编辑群公告" }}
+        {{ announcement || t("rightPanel.announcement.empty") }}
       </div>
       <el-input
         v-else
@@ -122,7 +124,7 @@ function finishAnnouncementEdit() {
         type="textarea"
         :autosize="{ minRows: 7, maxRows: 12 }"
         resize="none"
-        placeholder="写给所有群友的基础约定提示词"
+        :placeholder="t('rightPanel.announcement.placeholder')"
         @blur="finishAnnouncementEdit"
         @keydown.ctrl.enter.prevent="finishAnnouncementEdit"
       />
@@ -130,13 +132,13 @@ function finishAnnouncementEdit() {
 
     <section class="agent-panel">
       <div class="section-heading">
-        <span>Agent 协作</span>
+        <span>{{ t("rightPanel.collaborationTitle") }}</span>
         <el-tag size="small" type="info">{{ agentConfig.agentMode }}</el-tag>
       </div>
 
       <el-form label-position="top" class="agent-settings-form">
         <div class="agent-settings-grid">
-          <el-form-item label="Agent 模式">
+          <el-form-item :label="t('rightPanel.agentMode')">
             <el-select v-model="agentConfig.agentMode">
               <el-option
                 v-for="option in agentModeOptions"
@@ -147,7 +149,7 @@ function finishAnnouncementEdit() {
             </el-select>
           </el-form-item>
 
-          <el-form-item label="工作流">
+          <el-form-item :label="t('rightPanel.workflow')">
             <el-select v-model="agentConfig.workflowMode" @change="syncWorkflowMode">
               <el-option
                 v-for="option in workflowModeOptions"
@@ -160,7 +162,7 @@ function finishAnnouncementEdit() {
         </div>
 
         <div class="agent-settings-grid">
-          <el-form-item label="审批模式">
+          <el-form-item :label="t('rightPanel.approvalMode')">
             <el-select v-model="agentConfig.approvalMode">
               <el-option
                 v-for="option in approvalModeOptions"
@@ -171,7 +173,7 @@ function finishAnnouncementEdit() {
             </el-select>
           </el-form-item>
 
-          <el-form-item label="安全模型">
+          <el-form-item :label="t('rightPanel.safetyModel')">
             <el-select v-model="agentConfig.safetyModel">
               <el-option
                 v-for="option in safetyModelOptions"
@@ -194,7 +196,7 @@ function finishAnnouncementEdit() {
             v-model="agentConfig.yoloMode"
             @change="(value: boolean) => syncYoloMode(value)"
           >
-            YOLO 模式
+            {{ t("rightPanel.yoloMode") }}
           </el-checkbox>
         </div>
       </el-form>

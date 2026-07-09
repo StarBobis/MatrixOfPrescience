@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { Close, FullScreen, MagicStick, Minus, Setting } from "@element-plus/icons-vue";
+import { useI18n } from "vue-i18n";
 
 defineProps<{
   settingsActive: boolean;
@@ -10,6 +11,8 @@ const emit = defineEmits<{
   home: [];
   toggleSettings: [];
 }>();
+
+const { t } = useI18n();
 
 async function minimizeWindow() {
   await getCurrentWindow().minimize();
@@ -39,7 +42,7 @@ async function closeWindow() {
       <button
         class="window-button"
         :class="{ active: settingsActive }"
-        title="设置"
+        :title="t('common.settings')"
         @click="emit('toggleSettings')"
       >
         <el-icon>

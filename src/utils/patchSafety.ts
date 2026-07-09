@@ -1,4 +1,5 @@
 import type { AgentSafetyModel, PatchRiskLevel } from "../stores/settings";
+import { translate as t } from "../i18n";
 
 export type PatchSafetyVerdict = "allow" | "needs-confirmation" | "blocked";
 
@@ -62,49 +63,49 @@ export function evaluatePatchSafety(input: PatchSafetyInput): PatchSafetyCheck {
   const searchable = `${input.content}\n${input.patchText}\n${files.join("\n")}`;
 
   if (!workspacePath) {
-    reasons.push("未设置当前群工作文件夹，不能确认补丁边界。");
+    reasons.push(t("patchSafety.noWorkspace"));
   }
 
   if (files.length === 0) {
-    warnings.push("未识别具体文件，应用前需要人工确认目标文件。");
+    warnings.push(t("patchSafety.noFiles"));
   }
 
   for (const file of files) {
     if (isAbsolutePath(file)) {
-      reasons.push(`补丁包含绝对路径：${file}`);
+      reasons.push(t("patchSafety.absolutePath", { file }));
     }
 
     if (forbiddenPathPatterns.some((pattern) => pattern.test(file))) {
-      reasons.push(`补丁目标路径不在常规源码边界内：${file}`);
+      reasons.push(t("patchSafety.forbiddenPath", { file }));
     }
 
     if (secretPatterns.some((pattern) => pattern.test(file))) {
-      reasons.push(`补丁可能触及敏感文件或密钥：${file}`);
+      reasons.push(t("patchSafety.secretPath", { file }));
     }
   }
 
   if (secretPatterns.some((pattern) => pattern.test(searchable))) {
-    warnings.push("内容疑似涉及密钥、令牌或密码。");
+    warnings.push(t("patchSafety.secretContent"));
   }
 
   if (destructivePatterns.some((pattern) => pattern.test(searchable))) {
-    reasons.push("内容包含删除、数据库破坏或高危权限命令。");
+    reasons.push(t("patchSafety.destructiveContent"));
   }
 
   if (input.riskLevel === "high") {
-    warnings.push("风险等级为 high，需要人工复核。");
+    warnings.push(t("patchSafety.highRisk"));
   }
 
   if (input.safetyModel === "strict" && input.riskLevel !== "low") {
-    reasons.push("Strict 安全模型要求中高风险补丁先阻止自动批准。");
+    reasons.push(t("patchSafety.strictBlocks"));
   }
 
   if (input.safetyModel === "security-analyzer" && warnings.length > 0) {
-    reasons.push("Security Analyzer 模式要求先处理全部安全警告。");
+    reasons.push(t("patchSafety.analyzerBlocks"));
   }
 
   if (input.safetyModel === "sandbox-yolo" && input.riskLevel === "high") {
-    reasons.push("Sandbox YOLO 也不允许自动推进高风险补丁。");
+    reasons.push(t("patchSafety.sandboxYoloBlocks"));
   }
 
   if (reasons.length > 0) {
@@ -117,7 +118,7 @@ export function evaluatePatchSafety(input: PatchSafetyInput): PatchSafetyCheck {
 
   return {
     verdict: "allow",
-    reasons: ["补丁通过工作区边界和基础风险检查。"],
+    reasons: [t("patchSafety.allow")],
     warnings,
   };
 }

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { useI18n } from "vue-i18n";
 import type { AgentPatchProposal, PatchApprovalStatus } from "../stores/settings";
 
 const props = defineProps<{
@@ -10,6 +11,8 @@ const emit = defineEmits<{
   updatePatchStatus: [proposalId: string, status: PatchApprovalStatus];
   removePatchProposal: [proposalId: string];
 }>();
+
+const { t } = useI18n();
 
 const pendingPatchCount = computed(
   () => props.patchProposals.filter((proposal) => proposal.status === "pending").length,
@@ -28,11 +31,11 @@ const patchStatusType: Record<PatchApprovalStatus, "info" | "success" | "danger"
   discarded: "info",
 };
 
-const patchStatusText: Record<PatchApprovalStatus, string> = {
-  pending: "待审批",
-  approved: "已应用",
-  rejected: "已拒绝",
-  discarded: "已丢弃",
+const patchStatusTextKey: Record<PatchApprovalStatus, string> = {
+  pending: "patch.status.pending",
+  approved: "patch.status.approved",
+  rejected: "patch.status.rejected",
+  discarded: "patch.status.discarded",
 };
 
 const safetyVerdictType: Record<
@@ -44,19 +47,19 @@ const safetyVerdictType: Record<
   blocked: "danger",
 };
 
-const safetyVerdictText: Record<AgentPatchProposal["safetyCheck"]["verdict"], string> = {
-  allow: "允许",
-  "needs-confirmation": "需确认",
-  blocked: "已阻止",
+const safetyVerdictTextKey: Record<AgentPatchProposal["safetyCheck"]["verdict"], string> = {
+  allow: "patch.verdict.allow",
+  "needs-confirmation": "patch.verdict.needsConfirmation",
+  blocked: "patch.verdict.blocked",
 };
 </script>
 
 <template>
   <section v-if="patchProposals.length > 0" class="patch-panel">
     <div class="patch-panel-head">
-      <strong>审批提示</strong>
+      <strong>{{ t("patch.panelTitle") }}</strong>
       <el-tag size="small" :type="pendingPatchCount > 0 ? 'warning' : 'info'">
-        {{ pendingPatchCount }} 待处理
+        {{ t("patch.pendingCount", { count: pendingPatchCount }) }}
       </el-tag>
     </div>
 
@@ -77,10 +80,10 @@ const safetyVerdictText: Record<AgentPatchProposal["safetyCheck"]["verdict"], st
               {{ proposal.riskLevel }}
             </el-tag>
             <el-tag size="small" :type="patchStatusType[proposal.status]">
-              {{ patchStatusText[proposal.status] }}
+              {{ t(patchStatusTextKey[proposal.status]) }}
             </el-tag>
             <el-tag size="small" :type="safetyVerdictType[proposal.safetyCheck.verdict]">
-              {{ safetyVerdictText[proposal.safetyCheck.verdict] }}
+              {{ t(safetyVerdictTextKey[proposal.safetyCheck.verdict]) }}
             </el-tag>
           </div>
         </div>
@@ -88,7 +91,7 @@ const safetyVerdictText: Record<AgentPatchProposal["safetyCheck"]["verdict"], st
         <p class="patch-summary">{{ proposal.summary }}</p>
 
         <div class="patch-safety">
-          <strong>安全校验</strong>
+          <strong>{{ t("patch.safetyTitle") }}</strong>
           <ul>
             <li v-for="reason in proposal.safetyCheck.reasons" :key="reason">
               {{ reason }}
@@ -102,7 +105,7 @@ const safetyVerdictText: Record<AgentPatchProposal["safetyCheck"]["verdict"], st
         <div v-if="proposal.files.length > 0" class="patch-files">
           <span v-for="file in proposal.files" :key="file">{{ file }}</span>
         </div>
-        <div v-else class="patch-files muted">未识别具体文件</div>
+        <div v-else class="patch-files muted">{{ t("patch.noFiles") }}</div>
 
         <pre v-if="proposal.patchText" class="patch-preview">{{ proposal.patchText }}</pre>
 
@@ -114,7 +117,7 @@ const safetyVerdictText: Record<AgentPatchProposal["safetyCheck"]["verdict"], st
               :disabled="proposal.safetyCheck.verdict === 'blocked' || !proposal.patchText"
               @click="emit('updatePatchStatus', proposal.id, 'approved')"
             >
-              批准并应用
+              {{ t("patch.approveAndApply") }}
             </el-button>
             <el-button
               size="small"
@@ -122,11 +125,11 @@ const safetyVerdictText: Record<AgentPatchProposal["safetyCheck"]["verdict"], st
               plain
               @click="emit('updatePatchStatus', proposal.id, 'rejected')"
             >
-              拒绝
+              {{ t("common.reject") }}
             </el-button>
           </template>
           <el-button size="small" plain @click="emit('removePatchProposal', proposal.id)">
-            丢弃
+            {{ t("common.discard") }}
           </el-button>
         </div>
       </article>

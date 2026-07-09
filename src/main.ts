@@ -3,5 +3,24 @@ import { createPinia } from "pinia";
 import ElementPlus from "element-plus";
 import "element-plus/dist/index.css";
 import App from "./App.vue";
+import { bindI18nLocaleToSettings, i18n } from "./i18n";
+import { useSettingsStore } from "./stores/settings";
 
-createApp(App).use(createPinia()).use(ElementPlus).mount("#app");
+const pinia = createPinia();
+const app = createApp(App);
+
+app.use(pinia);
+
+const settingsStore = useSettingsStore();
+
+bindI18nLocaleToSettings(settingsStore);
+
+try {
+  settingsStore.hydrate();
+} catch (error) {
+  console.warn("Failed to hydrate settings; defaults will be used.", error);
+}
+
+settingsStore.startPersistence();
+
+app.use(i18n).use(ElementPlus).mount("#app");

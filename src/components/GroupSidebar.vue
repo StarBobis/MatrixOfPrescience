@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ChatDotRound, CirclePlus, MagicStick } from "@element-plus/icons-vue";
+import { useI18n } from "vue-i18n";
 import type { ChatGroup } from "../stores/settings";
 
 defineProps<{
@@ -11,6 +12,8 @@ const emit = defineEmits<{
   selectGroup: [groupId: string];
   createGroup: [];
 }>();
+
+const { t } = useI18n();
 </script>
 
 <template>
@@ -22,15 +25,15 @@ const emit = defineEmits<{
         </el-icon>
       </div>
       <div>
-        <p class="eyebrow">Matrix Of Prescience</p>
+        <p class="eyebrow">{{ t("common.appName") }}</p>
         <div class="brand-title-row">
-          <h1>Agent 群聊</h1>
+          <h1>{{ t("groups.brandTitle") }}</h1>
           <el-button
             class="group-create-icon"
             circle
             type="primary"
             :icon="CirclePlus"
-            title="新建聊天群"
+            :title="t('groups.createTitle')"
             @click="emit('createGroup')"
           />
         </div>
@@ -39,7 +42,7 @@ const emit = defineEmits<{
 
     <section class="section-block">
       <div class="section-heading">
-        <span>聊天群</span>
+        <span>{{ t("groups.listTitle") }}</span>
         <el-tag size="small" type="success">{{ groups.length }}</el-tag>
       </div>
 
@@ -58,7 +61,9 @@ const emit = defineEmits<{
           </div>
           <div class="group-main">
             <strong>{{ group.name }}</strong>
-            <span>{{ group.members.length }} 个群友 · {{ group.messages.length }} 条消息</span>
+            <span>
+              {{ t("groups.meta", { members: group.members.length, messages: group.messages.length }) }}
+            </span>
           </div>
         </button>
       </div>

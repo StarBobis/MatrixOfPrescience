@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { CirclePlus, Delete } from "@element-plus/icons-vue";
+import { useI18n } from "vue-i18n";
 import type { AgentModel, ProviderId } from "../stores/settings";
 
 const open = defineModel<boolean>("open", { required: true });
@@ -24,21 +25,23 @@ const emit = defineEmits<{
   updateDraftMemberProvider: [member: AgentModel];
   createGroup: [];
 }>();
+
+const { t } = useI18n();
 </script>
 
 <template>
-  <el-dialog v-model="open" title="新建聊天群" width="720px">
+  <el-dialog v-model="open" :title="t('createGroup.title')" width="720px">
     <el-form label-position="top">
-      <el-form-item label="群名称">
+      <el-form-item :label="t('createGroup.name')">
         <el-input :model-value="name" @update:model-value="emit('update:name', String($event))" />
       </el-form-item>
-      <el-form-item label="群简介">
+      <el-form-item :label="t('createGroup.description')">
         <el-input
           :model-value="description"
           @update:model-value="emit('update:description', String($event))"
         />
       </el-form-item>
-      <el-form-item label="群公告">
+      <el-form-item :label="t('createGroup.announcement')">
         <el-input
           :model-value="announcement"
           type="textarea"
@@ -52,7 +55,7 @@ const emit = defineEmits<{
     <div class="settings-toolbar">
       <el-select
         class="history-member-select"
-        placeholder="从历史群友添加"
+        :placeholder="t('members.addFromHistory')"
         filterable
         clearable
         @change="(memberId: string) => memberId && emit('addDraftMemberFromHistory', memberId)"
@@ -70,10 +73,10 @@ const emit = defineEmits<{
         />
       </el-select>
       <el-button type="primary" :icon="CirclePlus" @click="emit('addDraftMember', 'openai')">
-        添加 ChatGPT 群友
+        {{ t("createGroup.addOpenAIMember") }}
       </el-button>
       <el-button :icon="CirclePlus" @click="emit('addDraftMember', 'deepseek')">
-        添加 DeepSeek 群友
+        {{ t("createGroup.addDeepSeekMember") }}
       </el-button>
     </div>
 
@@ -85,7 +88,7 @@ const emit = defineEmits<{
         </div>
 
         <div class="member-grid">
-          <el-form-item label="API">
+          <el-form-item :label="t('common.api')">
             <el-select v-model="member.provider" @change="emit('updateDraftMemberProvider', member)">
               <el-option
                 v-for="option in providerOptions"
@@ -95,7 +98,7 @@ const emit = defineEmits<{
               />
             </el-select>
           </el-form-item>
-          <el-form-item label="模型">
+          <el-form-item :label="t('common.model')">
             <el-select v-model="member.model" filterable allow-create default-first-option>
               <el-option
                 v-for="preset in modelPresets[member.provider]"
@@ -107,7 +110,7 @@ const emit = defineEmits<{
           </el-form-item>
         </div>
 
-        <el-form-item label="核心角色">
+        <el-form-item :label="t('common.coreRole')">
           <el-input
             v-model="member.systemPrompt"
             type="textarea"
@@ -118,15 +121,15 @@ const emit = defineEmits<{
 
         <div class="card-actions">
           <el-button type="danger" plain :icon="Delete" @click="emit('removeDraftMember', member.id)">
-            删除群友
+            {{ t("common.deleteMember") }}
           </el-button>
         </div>
       </section>
     </div>
 
     <template #footer>
-      <el-button @click="open = false">取消</el-button>
-      <el-button type="primary" @click="emit('createGroup')">创建群聊</el-button>
+      <el-button @click="open = false">{{ t("common.cancel") }}</el-button>
+      <el-button type="primary" @click="emit('createGroup')">{{ t("createGroup.create") }}</el-button>
     </template>
   </el-dialog>
 </template>

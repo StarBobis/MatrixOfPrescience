@@ -1,0 +1,295 @@
+{
+  "common": {
+    "appName": "Matrix Of Prescience",
+    "api": "API",
+    "apiKey": "API Key",
+    "baseUrl": "Base URL",
+    "cancel": "取消",
+    "choose": "选择",
+    "coreRole": "核心角色",
+    "deleteMember": "删除群友",
+    "discard": "丢弃",
+    "language": "语言",
+    "memberFallback": "群友",
+    "model": "模型",
+    "no": "否",
+    "ownerName": "我",
+    "ownerRole": "群主",
+    "reject": "拒绝",
+    "settings": "设置",
+    "systemName": "系统",
+    "temperature": "温度",
+    "yes": "是"
+  },
+  "settings": {
+    "title": "全局设置",
+    "profile": {
+      "avatar": "头像",
+      "avatarColor": "头像底色",
+      "avatarPlaceholder": "选择本地图片或输入图片路径",
+      "name": "名称",
+      "ownerScope": "所有群聊中固定为群主",
+      "title": "我的资料"
+    },
+    "providers": {
+      "defaultModel": "默认模型",
+      "title": "Provider Key"
+    },
+    "languageOptions": {
+      "en": "英文",
+      "zhCN": "简体中文"
+    }
+  },
+  "groups": {
+    "brandTitle": "Agent 群聊",
+    "createTitle": "新建聊天群",
+    "listTitle": "聊天群",
+    "meta": "{members} 个群友 · {messages} 条消息"
+  },
+  "createGroup": {
+    "addDeepSeekMember": "添加 DeepSeek 群友",
+    "addOpenAIMember": "添加 ChatGPT 群友",
+    "announcement": "群公告",
+    "create": "创建群聊",
+    "description": "群简介",
+    "name": "群名称",
+    "title": "新建聊天群"
+  },
+  "members": {
+    "addDeepSeekMember": "新建 DeepSeek 群友",
+    "addFromHistory": "从历史群友添加",
+    "addOpenAIMember": "新建 ChatGPT 群友",
+    "addTitle": "添加群友",
+    "enabled": "未禁言",
+    "listTitle": "群友列表",
+    "localAvatar": "本地头像",
+    "muted": "已禁言",
+    "muteQuestion": "是否禁言",
+    "removeTitle": "踢出群友",
+    "roleIdentity": "角色身份",
+    "rolePlaceholder": "描述这个群友的分工、立场和回答边界"
+  },
+  "rightPanel": {
+    "agentMode": "Agent 模式",
+    "announcement": {
+      "editTitle": "双击编辑群公告",
+      "empty": "双击编辑群公告",
+      "placeholder": "写给所有群友的基础约定提示词",
+      "tag": "基础约定",
+      "title": "群公告"
+    },
+    "approvalMode": "审批模式",
+    "collaborationTitle": "Agent 协作",
+    "safetyModel": "安全模型",
+    "workflow": "工作流",
+    "yoloMode": "YOLO 模式",
+    "agentModeOptions": {
+      "architect": "Architect",
+      "chat": "聊天讨论",
+      "localAgent": "本地 Agent"
+    },
+    "approvalModeOptions": {
+      "auto": "自动批准",
+      "confirmRisky": "高风险确认",
+      "manual": "手动确认"
+    }
+  },
+  "chat": {
+    "agree": "同意 {count}",
+    "chooseWorkspaceTitle": "选择工作文件夹",
+    "composerPlaceholder": "输入消息，Enter 发送，Shift + Enter 换行",
+    "disagree": "不同意 {count}",
+    "onlineMembers": "{count} 群友在线",
+    "queue": {
+      "status": {
+        "checking": "判断中",
+        "queued": "排队中",
+        "speaking": "发言中",
+        "waiting": "观望中"
+      },
+      "title": "发言队列"
+    },
+    "sendToMembers": "发给 {count} 个群友",
+    "status": {
+      "done": "完成",
+      "error": "错误",
+      "thinking": "生成中"
+    },
+    "stop": "中断",
+    "supplement": "需补充 {count}",
+    "thoughtSteps": "思考过程",
+    "workspace": {
+      "label": "工作文件夹",
+      "pickDialogTitle": "选择当前群工作文件夹",
+      "placeholder": "选择或输入路径..."
+    }
+  },
+  "patch": {
+    "approveAndApply": "批准并应用",
+    "confirmApply": {
+      "cancel": "取消",
+      "confirm": "批准并应用",
+      "message": "该补丁需要人工确认。确认后会在当前群工作文件夹内执行 git apply。",
+      "title": "确认应用补丁"
+    },
+    "noFiles": "未识别具体文件",
+    "panelTitle": "审批提示",
+    "pendingCount": "{count} 待处理",
+    "proposalTitle": "{name} 的编辑提案",
+    "safetyTitle": "安全校验",
+    "status": {
+      "approved": "已应用",
+      "discarded": "已丢弃",
+      "pending": "待审批",
+      "rejected": "已拒绝"
+    },
+    "verdict": {
+      "allow": "允许",
+      "blocked": "已阻止",
+      "needsConfirmation": "需确认"
+    }
+  },
+  "messages": {
+    "configureApiKey": "请先配置 {provider} API Key",
+    "draftMemberAlreadyInNewGroup": "这个群友已经在新群里了",
+    "enterGroupName": "请输入群名称",
+    "hydrateFailed": "本地群聊配置读取失败，已使用默认配置",
+    "keepOneMember": "至少保留一个虚拟群友",
+    "memberAlreadyInCurrentGroup": "这个群友已经在当前群里了",
+    "memberNameRequired": "群友名称不能为空",
+    "memberNamesUnique": "群友名称必须不同",
+    "newGroupNeedsMember": "新群至少需要一个虚拟群友",
+    "patchApplied": "补丁已应用",
+    "patchApplyFailed": "补丁应用失败",
+    "patchBlocked": "该补丁被安全模型阻止，不能批准",
+    "patchFailedLogged": "补丁应用失败，详情已写入聊天记录",
+    "patchMissingDiff": "该提案没有可应用的 diff 补丁",
+    "unmuteOneMember": "请至少解除一个虚拟群友的禁言"
+  },
+  "defaults": {
+    "group": {
+      "announcement": "群公告：所有群友需要基于事实、清晰表达；先说明判断，再给出可执行建议。不同群友可以保留分歧，但必须指出依据。",
+      "createdMessage": "群「{name}」已创建。当前有 {count} 个虚拟群友，可以开始对话。",
+      "description": "多模型协作讨论群",
+      "migratedName": "迁移的模型群",
+      "name": "默认 Agent 群",
+      "welcome": "这是一个 Agent 聊天群。每个虚拟群友都有自己的 API、模型和核心角色；你发出一条消息后，未禁言的群友会共享同一个上下文并分别回复。"
+    },
+    "member": {
+      "copyName": "{name} 副本",
+      "defaultPrompt": "你是这个群里的虚拟群友，请基于自己的核心角色独立回答用户问题。",
+      "draftName": "{provider} 群友",
+      "nameWithIndex": "{provider} 群友 {index}",
+      "productManagerName": "产品经理",
+      "productManagerPrompt": "你是这个群里的产品经理，负责澄清目标、拆解需求和约束范围。",
+      "technicalAdvisorName": "技术顾问",
+      "technicalAdvisorPrompt": "你是这个群里的技术顾问，负责分析实现路径、风险和工程细节。"
+    },
+    "newGroup": {
+      "announcement": "群公告：所有群友需要先独立判断，再给出清晰、可执行的建议。",
+      "description": "一个新的多模型讨论群",
+      "name": "新 Agent 群"
+    }
+  },
+  "avatar": {
+    "chooseTitle": "选择头像图片",
+    "filterImages": "图片"
+  },
+  "patchSafety": {
+    "absolutePath": "补丁包含绝对路径：{file}",
+    "allow": "补丁通过工作区边界和基础风险检查。",
+    "analyzerBlocks": "Security Analyzer 模式要求先处理全部安全警告。",
+    "destructiveContent": "内容包含删除、数据库破坏或高危权限命令。",
+    "forbiddenPath": "补丁目标路径不在常规源码边界内：{file}",
+    "highRisk": "风险等级为 high，需要人工复核。",
+    "legacyBlocked": "旧提案缺少安全校验结果，已按高风险阻止。",
+    "legacyWarning": "旧提案缺少安全校验结果，需要重新人工复核。",
+    "noFiles": "未识别具体文件，应用前需要人工确认目标文件。",
+    "noWorkspace": "未设置当前群工作文件夹，不能确认补丁边界。",
+    "sandboxYoloBlocks": "Sandbox YOLO 也不允许自动推进高风险补丁。",
+    "secretContent": "内容疑似涉及密钥、令牌或密码。",
+    "secretPath": "补丁可能触及敏感文件或密钥：{file}",
+    "strictBlocks": "Strict 安全模型要求中高风险补丁先阻止自动批准。"
+  },
+  "agentPrompt": {
+    "collaborationRule": "群聊协作规则：你能看到用户和其它群友已经发出的消息。不要只各说各话；需要回应、补充、质疑或修正其它群友观点时，请明确指出。若你的专业分工暂时不该发言，可以等待其它群友先说。",
+    "codeContextGuide": "你可以基于以下工具输出讨论代码。优先信任 CodeGraph；如果结果来自 LocalCommands，需要说明这是降级读取。",
+    "codeContextTitle": "代码阅读工具结果：",
+    "coreRole": "你的核心角色：",
+    "localModeTitle": "本地 Agent 协作模式：",
+    "modeAgent": "- Agent 模式：{value}",
+    "modeApproval": "- 审批模式：{value}",
+    "modeEditBeforeAsk": "- EditBeforeAsk：{value}",
+    "modeSafety": "- 安全模型：{value}",
+    "modeWorkflow": "- 工作流：{value}",
+    "modeYolo": "- YOLO 模式：{value}",
+    "off": "关闭",
+    "on": "开启",
+    "workspaceMissing": "当前聊天群尚未设置工作文件夹。涉及代码编辑时，请先要求设置工作文件夹。",
+    "workspaceSet": "当前聊天群工作文件夹：{path}",
+    "approval": {
+      "auto": "- 审批：自动推进前仍要在回复中记录将要改动的文件和风险。",
+      "confirmRisky": "- 审批：低风险步骤可合并建议，高风险步骤必须用户确认。",
+      "manual": "- 审批：每个编辑或命令步骤都需要用户确认。"
+    },
+    "safety": {
+      "balanced": "- Balanced：低风险阅读/小补丁可先建议，高风险操作必须确认。",
+      "commonTitle": "代码协作安全边界：",
+      "ruleBoundary": "- 只能围绕当前聊天群工作文件夹进行分析和编辑计划。",
+      "ruleNoFabrication": "- 不要编造已执行的文件修改；只有审批队列显示补丁已应用后，才可以声称文件已写入。",
+      "rulePatchQueue": "- 输出 diff 或补丁会进入审批队列；批准并应用前不得声称已经写入文件。",
+      "ruleRisk": "- 涉及删除、覆盖、迁移、大范围重命名、运行外部命令、网络请求、密钥或权限变更时，必须显式标记风险。",
+      "ruleTool": "- 涉及代码阅读时，软件会优先调用 CodeGraph；CodeGraph 不可用时才降级为本地命令。你必须基于“代码阅读工具结果”回答，不能声称只能看到路径。",
+      "sandboxYolo": "- Sandbox YOLO：可自动推进低中风险改动计划，但必须假设运行在隔离工作区；禁止越过工作文件夹、删除用户数据或处理密钥。",
+      "securityAnalyzer": "- Security Analyzer：先进行风险分类，输出允许/需确认/禁止三类结论，再给出编辑建议。",
+      "strict": "- Strict：所有文件写入、命令执行和依赖安装都必须先给出计划并等待确认。"
+    },
+    "workflow": {
+      "ask": "- Ask：默认解释、诊断、提问，不主动写补丁。",
+      "code": "- Code：优先给出可执行的代码修改计划和补丁。",
+      "editBeforeAsk": "- EditBeforeAsk：先给出最小可行补丁方案，再列出需要用户确认的问题。",
+      "yolo": "- YOLO：尽量减少打断，但仍必须遵守安全模型和工作文件夹边界。"
+    }
+  },
+  "chatRuntime": {
+    "callFailedContent": "调用失败：{error}",
+    "consensusLimit": "本轮讨论达到共识轮次上限，仍存在分歧。请人工收束问题或调整群友角色后继续。",
+    "disagreementRule1": "你刚才不同意上一条发言。请明确指出分歧点，并给出能推动集体达成一致的修正方案。",
+    "disagreementRule2": "不要重复已经说过的内容；优先提出可被其它群友同意的结论。",
+    "inspectFailed": "代码阅读工具调用失败：{error}",
+    "inspectInstruction": "请围绕最近群聊问题读取相关代码。优先定位符号、调用链、文件职责和影响范围。",
+    "inspectMember": "当前群友：{name}",
+    "inspectRole": "角色身份：{role}",
+    "inspectTool": "工具：{tool}",
+    "interruptedContent": "已中断生成。",
+    "interruptedStep": "用户中断，本轮停止。",
+    "mentionedRule": "用户明确 @ 了你。请你先回答；其它群友会先观望，等你回答完再判断是否需要补充。",
+    "observerRule": "你刚才处于观望状态。现在被 @ 的群友已经回答，请判断是否需要补充、反驳或帮助收束共识。",
+    "pendingContent": "正在生成回复...",
+    "phaseAfterPeers": "现在你已经看到其它群友本轮的新增发言。请判断你是否需要补充、反驳、总结或继续等待。只回复一个词：SPEAK 或 WAIT。",
+    "phaseFirst": "现在用户刚发言。请判断你是否应该立刻发言，还是等待其它群友先发言。只回复一个词：SPEAK 或 WAIT。",
+    "responseRule": "请基于当前完整群聊历史发言。优先回应用户需求，同时可以补充、质疑或修正其它群友已经说过的内容。",
+    "stepDone": "生成完成。",
+    "stepFailed": "调用失败。",
+    "stepGotContext": "已获取代码阅读工具结果。",
+    "stepInspect": "检查是否需要读取代码上下文。",
+    "stepNoContext": "本轮不需要读取代码上下文。",
+    "stepQueued": "进入发言队列。",
+    "stepWaitingModel": "等待模型返回。",
+    "voteAgreeRule": "如果结论、方案或关键依据可以接受，且你没有重要补充，只回复 AGREE。",
+    "voteDisagreeRule": "如果你认为存在需要继续讨论的分歧，只回复 DISAGREE。",
+    "voteQuestion": "请判断你是否同意 {name} 的上一条发言。"
+    ,"voteSupplementRule": "如果你整体同意，但有重要上下文需要补充，只回复 SUPPLEMENT。"
+  },
+  "patchRuntime": {
+    "appliedContent": "补丁「{title}」已应用。",
+    "appliedFiles": "涉及文件：{files}",
+    "failedContent": "补丁「{title}」应用失败：{error}",
+    "output": "输出：{output}",
+    "stderr": "提示：{stderr}"
+  },
+  "resizable": {
+    "left": "调整左侧区域宽度",
+    "right": "调整右侧区域宽度"
+  }
+}

@@ -1,10 +1,11 @@
 ﻿<script setup lang="ts">
 import "./ChatGroupPage.css";
-import { computed, onMounted, ref } from "vue";
+import { computed, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import MarkdownIt from "markdown-it";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { storeToRefs } from "pinia";
+import { useI18n } from "vue-i18n";
 import {
   type AgentModel,
   type AgentPatchProposal,
@@ -14,7 +15,10 @@ import {
   type ProviderId,
   useSettingsStore,
 } from "../stores/settings";
-import ChatConversationPanel from "../components/ChatConversationPanel.vue";
+import ChatConversationPanel, {
+  type SpeakerQueueItem,
+  type SpeakerQueueStatus,
+} from "../components/ChatConversationPanel.vue";
 import CreateGroupDialog from "../components/CreateGroupDialog.vue";
 import GroupSidebar from "../components/GroupSidebar.vue";
 import GroupRightPanel from "../components/GroupRightPanel.vue";
@@ -43,7 +47,7 @@ interface ApplyPatchResponse {
 interface InspectCodeWorkspaceResponse { tool: string; content: string }
 
 type MemberDecision = "speak" | "wait";
-type MemberVote = "agree" | "disagree";
+type MemberVote = "agree" | "supplement" | "disagree";
 
 interface MemberAnswer { messageId: string; member: AgentModel; content: string }
 
@@ -72,24 +76,28 @@ const modelPresets: Record<ProviderId, string[]> = {
   deepseek: ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"],
 };
 
-const statusText: Record<MessageStatus, string> = { done: "完成", thinking: "生成中", error: "错误" };
-
+const { t } = useI18n();
 const settingsStore = useSettingsStore();
 const { providers, groups, activeGroup, activeMembers, ownerProfile, historicalMembers } =
   storeToRefs(settingsStore);
+const legacySystemModelName = "\u7cfb\u7edf";
+const statusText = computed<Record<MessageStatus, string>>(() => ({
+  done: t("chat.status.done"),
+  thinking: t("chat.status.thinking"),
+  error: t("chat.status.error"),
+}));
 
 const composer = ref("");
 const groupDialogOpen = ref(false);
 const sending = ref(false);
 const activeRunId = ref("");
 const pendingMessageIds = ref<string[]>([]);
+const speakerQueue = ref<SpeakerQueueItem[]>([]);
 const chatPanel = ref<InstanceType<typeof ChatConversationPanel> | null>(null);
 
-const newGroupName = ref("新 Agent 群");
-const newGroupDescription = ref("一个新的多模型讨论群");
-const newGroupAnnouncement = ref(
-  "群公告：所有群友需要先独立判断，再给出清晰、可执行的建议。",
-);
+const newGroupName = ref(t("defaults.newGroup.name"));
+const newGroupDescription = ref(t("defaults.newGroup.description"));
+const newGroupAnnouncement = ref(t("defaults.newGroup.announcement"));
 const newGroupMembers = ref<AgentModel[]>([]);
 
 const activeMessages = computed<ChatMessage[]>(() => activeGroup.value?.messages ?? []);
@@ -137,10 +145,9 @@ function renderMarkdown(source: string) {
 }
 
 function openCreateGroupDialog() {
-  newGroupName.value = "新 Agent 群";
-  newGroupDescription.value = "一个新的多模型讨论群";
-  newGroupAnnouncement.value =
-    "群公告：所有群友需要先独立判断，再给出清晰、可执行的建议。";
+  newGroupName.value = t("defaults.newGroup.name");
+  newGroupDescription.value = t("defaults.newGroup.description");
+  newGroupAnnouncement.value = t("defaults.newGroup.announcement");
   newGroupMembers.value = [
     settingsStore.createMemberDraft("openai"),
     settingsStore.createMemberDraft("deepseek"),
@@ -163,7 +170,7 @@ function addDraftMemberFromHistory(memberId: string) {
       (item) => item.name.trim().toLocaleLowerCase() === source.name.trim().toLocaleLowerCase(),
     )
   ) {
-    ElMessage.warning("这个群友已经在新群里了");
+    ElMessage.warning(t("messages.draftMemberAlreadyInNewGroup"));
     return;
   }
 
@@ -178,7 +185,7 @@ function addDraftMemberFromHistory(memberId: string) {
 
 function removeDraftMember(memberId: string) {
   if (newGroupMembers.value.length <= 1) {
-    ElMessage.warning("新群至少需要一个虚拟群友");
+    ElMessage.warning(t("messages.newGroupNeedsMember"));
     return;
   }
 
@@ -197,7 +204,7 @@ function createGroup() {
   const memberNames = new Set<string>();
 
   if (!groupName) {
-    ElMessage.warning("请输入群名称");
+    ElMessage.warning(t("messages.enterGroupName"));
     return;
   }
 
@@ -205,12 +212,12 @@ function createGroup() {
     const normalizedName = member.name.trim().toLocaleLowerCase();
 
     if (!normalizedName) {
-      ElMessage.warning("群友名称不能为空");
+      ElMessage.warning(t("messages.memberNameRequired"));
       return;
     }
 
     if (memberNames.has(normalizedName)) {
-      ElMessage.warning("群友名称必须不同");
+      ElMessage.warning(t("messages.memberNamesUnique"));
       return;
     }
 
@@ -238,7 +245,7 @@ function addMember(provider: ProviderId = "openai") {
 
 function addHistoricalMember(memberId: string) {
   if (!settingsStore.addMemberFromHistory(memberId)) {
-    ElMessage.warning("这个群友已经在当前群里了");
+    ElMessage.warning(t("messages.memberAlreadyInCurrentGroup"));
   }
 }
 
@@ -250,9 +257,40 @@ function updateMemberProfile(member: AgentModel) {
   settingsStore.updateMemberProfile(member);
 }
 
+function setSpeakerQueue(members: AgentModel[], status: SpeakerQueueStatus) {
+  speakerQueue.value = members.map((member) => ({
+    id: member.id,
+    name: member.name,
+    color: member.color,
+    status,
+  }));
+}
+
+function upsertSpeakerQueueMember(member: AgentModel, status: SpeakerQueueStatus) {
+  const existing = speakerQueue.value.find((item) => item.id === member.id);
+
+  if (existing) {
+    existing.name = member.name;
+    existing.color = member.color;
+    existing.status = status;
+    return;
+  }
+
+  speakerQueue.value.push({
+    id: member.id,
+    name: member.name,
+    color: member.color,
+    status,
+  });
+}
+
+function removeSpeakerQueueMember(memberId: string) {
+  speakerQueue.value = speakerQueue.value.filter((member) => member.id !== memberId);
+}
+
 function removeMember(memberId: string) {
   if (activeGroupMembers.value.length <= 1) {
-    ElMessage.warning("至少保留一个虚拟群友");
+    ElMessage.warning(t("messages.keepOneMember"));
     return;
   }
 
@@ -261,13 +299,16 @@ function removeMember(memberId: string) {
 
 function buildConversation(): ApiChatMessage[] {
   return activeMessages.value
-    .filter((message) => message.modelName !== "系统")
+    .filter(
+      (message) =>
+        message.modelName !== t("common.systemName") && message.modelName !== legacySystemModelName,
+    )
     .slice(-12)
     .map<ApiChatMessage>((message) => ({
       role: message.role,
       content:
         message.role === "assistant"
-          ? `${message.modelName}：${message.content}`
+          ? `${message.modelName}: ${message.content}`
           : message.content,
     }));
 }
@@ -299,12 +340,12 @@ async function inspectWorkspaceForMember(member: AgentModel, extraRule: string) 
 
   const workspacePath = activeGroup.value?.workspacePath?.trim() ?? "";
   const query = [
-    `当前群友：${member.name}`,
-    `角色身份：${member.systemPrompt}`,
-    "请围绕最近群聊问题读取相关代码。优先定位符号、调用链、文件职责和影响范围。",
+    t("chatRuntime.inspectMember", { name: member.name }),
+    t("chatRuntime.inspectRole", { role: member.systemPrompt }),
+    t("chatRuntime.inspectInstruction"),
     activeMessages.value
       .slice(-6)
-      .map((message) => `${message.modelName}：${message.content}`)
+      .map((message) => `${message.modelName}: ${message.content}`)
       .join("\n"),
     extraRule,
   ]
@@ -319,9 +360,9 @@ async function inspectWorkspaceForMember(member: AgentModel, extraRule: string) 
       },
     });
 
-    return [`工具：${result.tool}`, result.content].join("\n\n");
+    return [t("chatRuntime.inspectTool", { tool: result.tool }), result.content].join("\n\n");
   } catch (error) {
-    return `代码阅读工具调用失败：${String(error)}`;
+    return t("chatRuntime.inspectFailed", { error: String(error) });
   }
 }
 
@@ -397,7 +438,7 @@ async function maybeCreatePatchProposal(member: AgentModel, content: string) {
   const workspacePath = activeGroup.value?.workspacePath ?? "";
 
   const proposal = {
-    title: `${member.name} 的编辑提案`,
+    title: t("patch.proposalTitle", { name: member.name }),
     proposerName: member.name,
     riskLevel,
     workspacePath,
@@ -434,23 +475,23 @@ async function updatePatchProposalStatus(proposalId: string, status: PatchApprov
 
   if (status === "approved") {
     if (proposal.safetyCheck.verdict === "blocked") {
-      ElMessage.error("该补丁被安全模型阻止，不能批准");
+      ElMessage.error(t("messages.patchBlocked"));
       return;
     }
 
     if (!proposal.patchText.trim()) {
-      ElMessage.error("该提案没有可应用的 diff 补丁");
+      ElMessage.error(t("messages.patchMissingDiff"));
       return;
     }
 
     if (proposal.safetyCheck.verdict === "needs-confirmation") {
       try {
         await ElMessageBox.confirm(
-          "该补丁需要人工确认。确认后会在当前群工作文件夹内执行 git apply。",
-          "确认应用补丁",
+          t("patch.confirmApply.message"),
+          t("patch.confirmApply.title"),
           {
-            confirmButtonText: "批准并应用",
-            cancelButtonText: "取消",
+            confirmButtonText: t("patch.confirmApply.confirm"),
+            cancelButtonText: t("patch.confirmApply.cancel"),
             type: "warning",
           },
         );
@@ -484,28 +525,30 @@ async function applyPatchProposal(proposal: AgentPatchProposal) {
 
     appendMessage({
       role: "assistant",
-      modelName: "系统",
+      modelName: t("common.systemName"),
       status: "done",
       color: "#6c6f75",
       content: [
-        `补丁「${proposal.title}」已应用。`,
-        result.appliedFiles.length > 0 ? `涉及文件：${result.appliedFiles.join("、")}` : "",
-        result.stdout.trim() ? `输出：${result.stdout.trim()}` : "",
-        result.stderr.trim() ? `提示：${result.stderr.trim()}` : "",
+        t("patchRuntime.appliedContent", { title: proposal.title }),
+        result.appliedFiles.length > 0
+          ? t("patchRuntime.appliedFiles", { files: result.appliedFiles.join(", ") })
+          : "",
+        result.stdout.trim() ? t("patchRuntime.output", { output: result.stdout.trim() }) : "",
+        result.stderr.trim() ? t("patchRuntime.stderr", { stderr: result.stderr.trim() }) : "",
       ]
         .filter(Boolean)
         .join("\n"),
     });
-    ElMessage.success("补丁已应用");
+    ElMessage.success(t("messages.patchApplied"));
   } catch (error) {
     appendMessage({
       role: "assistant",
-      modelName: "系统",
+      modelName: t("common.systemName"),
       status: "error",
       color: "#c45656",
-      content: `补丁「${proposal.title}」应用失败：${String(error)}`,
+      content: t("patchRuntime.failedContent", { title: proposal.title, error: String(error) }),
     });
-    ElMessage.error("补丁应用失败，详情已写入聊天记录");
+    ElMessage.error(t("messages.patchFailedLogged"));
     throw error;
   }
 }
@@ -536,6 +579,14 @@ function parseMemberVote(content: string): MemberVote {
     return "disagree";
   }
 
+  if (
+    normalized.includes("SUPPLEMENT") ||
+    normalized.includes("补充") ||
+    normalized.includes("需要补")
+  ) {
+    return "supplement";
+  }
+
   return "agree";
 }
 
@@ -561,12 +612,13 @@ function stopGeneration() {
   for (const messageId of pendingMessageIds.value) {
     settingsStore.updateMessage(messageId, {
       status: "error",
-      content: "已中断生成。",
+      content: t("chatRuntime.interruptedContent"),
     });
-    addThoughtStep(messageId, "用户中断，本轮停止。");
+    addThoughtStep(messageId, t("chatRuntime.interruptedStep"));
   }
 
   pendingMessageIds.value = [];
+  speakerQueue.value = [];
 }
 
 async function decideMemberResponse(
@@ -578,11 +630,12 @@ async function decideMemberResponse(
     return "wait";
   }
 
+  upsertSpeakerQueueMember(member, "checking");
   const provider = getProvider(member);
   const phaseRule =
     phase === "first"
-      ? "现在用户刚发言。请判断你是否应该立刻发言，还是等待其它群友先发言。只回复一个词：SPEAK 或 WAIT。"
-      : "现在你已经看到其它群友本轮的新增发言。请判断你是否需要补充、反驳、总结或继续等待。只回复一个词：SPEAK 或 WAIT。";
+      ? t("chatRuntime.phaseFirst")
+      : t("chatRuntime.phaseAfterPeers");
 
   try {
     const response = await invoke<ChatCompletionResponse>("chat_completion", {
@@ -601,8 +654,11 @@ async function decideMemberResponse(
       return "wait";
     }
 
-    return parseMemberDecision(response.content);
+    const decision = parseMemberDecision(response.content);
+    upsertSpeakerQueueMember(member, decision === "wait" ? "waiting" : "queued");
+    return decision;
   } catch {
+    upsertSpeakerQueueMember(member, "queued");
     return "speak";
   }
 }
@@ -621,23 +677,24 @@ async function askMember(
   const conversation = buildConversation();
   const responseRule =
     extraRule ||
-    "请基于当前完整群聊历史发言。优先回应用户需求，同时可以补充、质疑或修正其它群友已经说过的内容。";
+    t("chatRuntime.responseRule");
 
+  upsertSpeakerQueueMember(member, "speaking");
   settingsStore.appendPendingMessage({
     id: pendingId,
     role: "assistant",
     modelName: member.name,
     providerName: getProviderLabel(member.provider),
     status: "thinking",
-    content: "正在生成回复...",
+    content: t("chatRuntime.pendingContent"),
     color: member.color,
-    thoughtSteps: ["进入发言队列。"],
+    thoughtSteps: [t("chatRuntime.stepQueued")],
   });
   pendingMessageIds.value = [...pendingMessageIds.value, pendingId];
   await scrollToBottom();
 
   try {
-    addThoughtStep(pendingId, "检查是否需要读取代码上下文。");
+    addThoughtStep(pendingId, t("chatRuntime.stepInspect"));
     const codeContext = await inspectWorkspaceForMember(member, responseRule);
 
     if (isRunInterrupted(runId)) {
@@ -646,9 +703,9 @@ async function askMember(
 
     addThoughtStep(
       pendingId,
-      codeContext ? "已获取代码阅读工具结果。" : "本轮不需要读取代码上下文。",
+      codeContext ? t("chatRuntime.stepGotContext") : t("chatRuntime.stepNoContext"),
     );
-    addThoughtStep(pendingId, "等待模型返回。");
+    addThoughtStep(pendingId, t("chatRuntime.stepWaitingModel"));
     const response = await invoke<ChatCompletionResponse>("chat_completion", {
       request: {
         providerName: provider.name,
@@ -669,7 +726,7 @@ async function askMember(
       status: "done",
       content: response.content,
     });
-    addThoughtStep(pendingId, "生成完成。");
+    addThoughtStep(pendingId, t("chatRuntime.stepDone"));
     await maybeCreatePatchProposal(member, response.content);
     return {
       messageId: pendingId,
@@ -679,11 +736,12 @@ async function askMember(
   } catch (error) {
     settingsStore.updateMessage(pendingId, {
       status: "error",
-      content: `调用失败：${String(error)}`,
+      content: t("chatRuntime.callFailedContent", { error: String(error) }),
     });
-    addThoughtStep(pendingId, "调用失败。");
+    addThoughtStep(pendingId, t("chatRuntime.stepFailed"));
     return null;
   } finally {
+    removeSpeakerQueueMember(member.id);
     pendingMessageIds.value = pendingMessageIds.value.filter((id) => id !== pendingId);
     await scrollToBottom();
   }
@@ -712,9 +770,10 @@ async function voteOnAnswer(
           voter,
           activeGroup.value,
           [
-            `请判断你是否同意 ${answer.member.name} 的上一条发言。`,
-            "如果结论、方案或关键依据可以接受，只回复 AGREE。",
-            "如果你认为存在需要继续讨论的分歧，只回复 DISAGREE。",
+            t("chatRuntime.voteQuestion", { name: answer.member.name }),
+            t("chatRuntime.voteAgreeRule"),
+            t("chatRuntime.voteSupplementRule"),
+            t("chatRuntime.voteDisagreeRule"),
           ].join("\n"),
         ),
         messages: buildConversation(),
@@ -734,6 +793,7 @@ async function voteOnAnswer(
 async function collectMemberVotes(answer: MemberAnswer, runId: string) {
   const voters = activeMembers.value.filter((member) => member.id !== answer.member.id);
   const agreeMemberIds: string[] = [];
+  const supplementMemberIds: string[] = [];
   const disagreeMemberIds: string[] = [];
 
   for (const voter of voters) {
@@ -745,6 +805,8 @@ async function collectMemberVotes(answer: MemberAnswer, runId: string) {
 
     if (vote === "disagree") {
       disagreeMemberIds.push(voter.id);
+    } else if (vote === "supplement") {
+      supplementMemberIds.push(voter.id);
     } else {
       agreeMemberIds.push(voter.id);
     }
@@ -752,10 +814,13 @@ async function collectMemberVotes(answer: MemberAnswer, runId: string) {
 
   settingsStore.updateMessage(answer.messageId, {
     agreeMemberIds,
+    supplementMemberIds,
     disagreeMemberIds,
   });
 
-  return voters.filter((member) => disagreeMemberIds.includes(member.id));
+  return voters.filter(
+    (member) => supplementMemberIds.includes(member.id) || disagreeMemberIds.includes(member.id),
+  );
 }
 
 async function resolveConsensus(initialAnswer: MemberAnswer | null, runId: string) {
@@ -767,13 +832,13 @@ async function resolveConsensus(initialAnswer: MemberAnswer | null, runId: strin
       return;
     }
 
-    const disagreeingMembers = await collectMemberVotes(currentAnswer, runId);
+    const membersNeedingFollowUp = await collectMemberVotes(currentAnswer, runId);
 
-    if (disagreeingMembers.length === 0) {
+    if (membersNeedingFollowUp.length === 0) {
       return;
     }
 
-    for (const member of disagreeingMembers) {
+    for (const member of membersNeedingFollowUp) {
       round += 1;
 
       if (round > maxConsensusRounds) {
@@ -783,8 +848,8 @@ async function resolveConsensus(initialAnswer: MemberAnswer | null, runId: strin
       currentAnswer = await askMember(
         member,
         [
-          "你刚才不同意上一条发言。请明确指出分歧点，并给出能推动集体达成一致的修正方案。",
-          "不要重复已经说过的内容；优先提出可被其它群友同意的结论。",
+          t("chatRuntime.disagreementRule1"),
+          t("chatRuntime.disagreementRule2"),
         ].join("\n"),
         runId,
       );
@@ -794,10 +859,10 @@ async function resolveConsensus(initialAnswer: MemberAnswer | null, runId: strin
   if (round >= maxConsensusRounds) {
     appendMessage({
       role: "assistant",
-      modelName: "系统",
+      modelName: t("common.systemName"),
       status: "error",
       color: "#c45656",
-      content: "本轮讨论达到共识轮次上限，仍存在分歧。请人工收束问题或调整群友角色后继续。",
+      content: t("chatRuntime.consensusLimit"),
     });
   }
 }
@@ -810,13 +875,13 @@ async function sendMessage() {
   }
 
   if (activeMembers.value.length === 0) {
-    ElMessage.warning("请至少解除一个虚拟群友的禁言");
+    ElMessage.warning(t("messages.unmuteOneMember"));
     return;
   }
 
   const missingKey = activeMembers.value.find((member) => !getProvider(member).apiKey.trim());
   if (missingKey) {
-    ElMessage.warning(`请先配置 ${getProviderLabel(missingKey.provider)} API Key`);
+    ElMessage.warning(t("messages.configureApiKey", { provider: getProviderLabel(missingKey.provider) }));
     emit("openSettings");
     return;
   }
@@ -829,18 +894,20 @@ async function sendMessage() {
 
   appendMessage({
     role: "user",
-    modelName: "我",
+    modelName: ownerProfile.value.name || t("common.ownerName"),
     status: "done",
     content: userText,
     color: ownerProfile.value.color,
   });
 
   const members = [...activeMembers.value];
+  setSpeakerQueue(members, "queued");
   const mentionedMembers = parseMentionedMembers(userText, members);
   const waitingMembers: AgentModel[] = [];
 
   try {
     if (mentionedMembers.length > 0) {
+      setSpeakerQueue(mentionedMembers, "queued");
       for (const member of mentionedMembers) {
         if (isRunInterrupted(runId)) {
           return;
@@ -848,7 +915,7 @@ async function sendMessage() {
 
         const answer = await askMember(
           member,
-          "用户明确 @ 了你。请你先回答；其它群友会先观望，等你回答完再判断是否需要补充。",
+          t("chatRuntime.mentionedRule"),
           runId,
         );
         await resolveConsensus(answer, runId);
@@ -857,6 +924,7 @@ async function sendMessage() {
       const observerMembers = members.filter(
         (member) => !mentionedMembers.some((mentioned) => mentioned.id === member.id),
       );
+      setSpeakerQueue(observerMembers, "waiting");
 
       for (const member of observerMembers) {
         if (isRunInterrupted(runId)) {
@@ -868,7 +936,7 @@ async function sendMessage() {
         if (decision === "speak") {
           const answer = await askMember(
             member,
-            "你刚才处于观望状态。现在被 @ 的群友已经回答，请判断是否需要补充、反驳或帮助收束共识。",
+            t("chatRuntime.observerRule"),
             runId,
           );
           await resolveConsensus(answer, runId);
@@ -911,19 +979,11 @@ async function sendMessage() {
       activeRunId.value = "";
       sending.value = false;
       pendingMessageIds.value = [];
+      speakerQueue.value = [];
     }
   }
 }
 
-onMounted(() => {
-  try {
-    settingsStore.hydrate();
-    settingsStore.startPersistence();
-  } catch {
-    ElMessage.warning("本地群聊配置读取失败，已使用默认配置");
-    settingsStore.startPersistence();
-  }
-});
 </script>
 
 <template>
@@ -945,6 +1005,7 @@ onMounted(() => {
           :active-group="activeGroup"
           :active-member-count="activeMembers.length"
           :active-members="activeMembers"
+          :speaker-queue="speakerQueue"
           :messages="activeMessages"
           :patch-proposals="activeGroup?.patchProposals ?? []"
           v-model:workspace-path="activeGroupWorkspacePath"

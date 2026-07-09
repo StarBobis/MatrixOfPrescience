@@ -1,7 +1,9 @@
 <script setup lang="ts">
+import { useI18n } from "vue-i18n";
 import { useResizableColumns } from "../composables/useResizableColumns";
 
 const { layoutStyle, resizing, startResize } = useResizableColumns();
+const { t } = useI18n();
 </script>
 
 <template>
@@ -13,7 +15,7 @@ const { layoutStyle, resizing, startResize } = useResizableColumns();
     <button
       class="layout-resizer"
       type="button"
-      aria-label="调整左侧区域宽度"
+      :aria-label="t('resizable.left')"
       @pointerdown.prevent="startResize('left', $event)"
     ></button>
 
@@ -24,7 +26,7 @@ const { layoutStyle, resizing, startResize } = useResizableColumns();
     <button
       class="layout-resizer"
       type="button"
-      aria-label="调整右侧区域宽度"
+      :aria-label="t('resizable.right')"
       @pointerdown.prevent="startResize('right', $event)"
     ></button>
 

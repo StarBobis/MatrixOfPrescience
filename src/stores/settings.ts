@@ -1,4 +1,6 @@
 import { defineStore } from "pinia";
+import { getI18nLocale, translate as t } from "../i18n";
+import { defaultLocale, normalizeLocale, type AppLocale } from "../i18n/locales";
 
 export type ProviderId = "openai" | "deepseek";
 export type ChatRole = "user" | "assistant";
@@ -42,6 +44,7 @@ export interface ChatMessage {
   time: string;
   color: string;
   agreeMemberIds?: string[];
+  supplementMemberIds?: string[];
   disagreeMemberIds?: string[];
   thoughtSteps?: string[];
 }
@@ -95,6 +98,7 @@ export interface PatchSafetyCheck {
 }
 
 interface PersistedSettings {
+  locale?: unknown;
   providers?: Partial<Record<ProviderId, ProviderConfig>>;
   agentModels?: AgentModel[];
   memberLibrary?: AgentModel[];
@@ -104,6 +108,18 @@ interface PersistedSettings {
 }
 
 const STORAGE_KEY = "matrix-of-prescience-settings";
+const MAX_PERSISTED_GROUPS = 12;
+const NORMAL_MESSAGE_LIMIT = 80;
+const COMPACT_MESSAGE_LIMIT = 20;
+const NORMAL_MESSAGE_CONTENT_LIMIT = 12000;
+const COMPACT_MESSAGE_CONTENT_LIMIT = 4000;
+const NORMAL_PATCH_LIMIT = 8;
+const NORMAL_PATCH_TEXT_LIMIT = 20000;
+const COMPACT_PATCH_LIMIT = 3;
+const THOUGHT_STEP_LIMIT = 12;
+const THOUGHT_STEP_TEXT_LIMIT = 500;
+
+type PersistenceMode = "normal" | "compact" | "minimal";
 
 const providerDefaults: Record<ProviderId, ProviderConfig> = {
   openai: {
@@ -122,14 +138,17 @@ const providerDefaults: Record<ProviderId, ProviderConfig> = {
   },
 };
 
-const defaultAnnouncement =
-  "群公告：所有群友需要基于事实、清晰表达；先说明判断，再给出可执行建议。不同群友可以保留分歧，但必须指出依据。";
+function getDefaultAnnouncement() {
+  return t("defaults.group.announcement");
+}
 
-const defaultOwnerProfile: OwnerProfile = {
-  name: "我",
-  avatar: "",
-  color: "#4d5a61",
-};
+function createDefaultOwnerProfile(): OwnerProfile {
+  return {
+    name: t("common.ownerName"),
+    avatar: "",
+    color: "#4d5a61",
+  };
+}
 
 const defaultAgentConfig: AgentCollaborationConfig = {
   agentMode: "chat",
@@ -166,7 +185,7 @@ function normalizeGroup(group: ChatGroup): ChatGroup {
 
   return {
     ...group,
-    announcement: group.announcement ?? defaultAnnouncement,
+    announcement: group.announcement ?? getDefaultAnnouncement(),
     workspacePath,
     agentConfig: normalizeAgentConfig(group.agentConfig),
     patchProposals: (group.patchProposals ?? []).map((proposal) => ({
@@ -176,9 +195,9 @@ function normalizeGroup(group: ChatGroup): ChatGroup {
         verdict: proposal.riskLevel === "high" ? "blocked" : "needs-confirmation",
         reasons:
           proposal.riskLevel === "high"
-            ? ["旧提案缺少安全校验结果，已按高风险阻止。"]
+            ? [t("patchSafety.legacyBlocked")]
             : [],
-        warnings: ["旧提案缺少安全校验结果，需要重新人工复核。"],
+        warnings: [t("patchSafety.legacyWarning")],
       },
     })),
     members: group.members.map((member) => ({
@@ -188,6 +207,7 @@ function normalizeGroup(group: ChatGroup): ChatGroup {
     messages: group.messages.map((message) => ({
       ...message,
       agreeMemberIds: message.agreeMemberIds ?? [],
+      supplementMemberIds: message.supplementMemberIds ?? [],
       disagreeMemberIds: message.disagreeMemberIds ?? [],
       thoughtSteps: message.thoughtSteps ?? [],
     })),
@@ -195,7 +215,7 @@ function normalizeGroup(group: ChatGroup): ChatGroup {
 }
 
 function nowText() {
-  return new Intl.DateTimeFormat("zh-CN", {
+  return new Intl.DateTimeFormat(getI18nLocale(), {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date());
@@ -205,12 +225,13 @@ function createSystemMessage(content: string): ChatMessage {
   return {
     id: crypto.randomUUID(),
     role: "assistant",
-    modelName: "系统",
+    modelName: t("common.systemName"),
     status: "done",
     content,
     time: nowText(),
     color: "#6c6f75",
     agreeMemberIds: [],
+    supplementMemberIds: [],
     disagreeMemberIds: [],
     thoughtSteps: [],
   };
@@ -244,7 +265,7 @@ function normalizeName(name: string) {
 }
 
 function makeUniqueMemberName(name: string, members: AgentModel[], exceptId = "") {
-  const base = name.trim() || "群友";
+  const base = name.trim() || t("common.memberFallback");
   const usedNames = new Set(
     members
       .filter((member) => member.id !== exceptId)
@@ -289,19 +310,48 @@ function toPlainMember(member: AgentModel): AgentModel {
   };
 }
 
+function truncateText(value: string, maxLength: number) {
+  return value.length > maxLength ? `${value.slice(0, maxLength)}...` : value;
+}
+
+function toPersistedMessage(message: ChatMessage, mode: Exclude<PersistenceMode, "minimal">) {
+  const contentLimit =
+    mode === "normal" ? NORMAL_MESSAGE_CONTENT_LIMIT : COMPACT_MESSAGE_CONTENT_LIMIT;
+
+  return {
+    ...message,
+    content: truncateText(message.content, contentLimit),
+    thoughtSteps: (message.thoughtSteps ?? [])
+      .slice(-THOUGHT_STEP_LIMIT)
+      .map((step) => truncateText(step, THOUGHT_STEP_TEXT_LIMIT)),
+  };
+}
+
+function toPersistedPatchProposal(
+  proposal: AgentPatchProposal,
+  mode: Exclude<PersistenceMode, "minimal">,
+) {
+  return {
+    ...proposal,
+    summary: truncateText(proposal.summary, mode === "normal" ? 2000 : 500),
+    patchText:
+      mode === "normal" ? truncateText(proposal.patchText, NORMAL_PATCH_TEXT_LIMIT) : "",
+  };
+}
+
 function createDefaultMembers(): AgentModel[] {
   return [
     createMember(
       "openai",
-      "产品经理",
+      t("defaults.member.productManagerName"),
       "gpt-4.1-mini",
-      "你是这个群里的产品经理，负责澄清目标、拆解需求和约束范围。",
+      t("defaults.member.productManagerPrompt"),
     ),
     createMember(
       "deepseek",
-      "技术顾问",
+      t("defaults.member.technicalAdvisorName"),
       "deepseek-v4-flash",
-      "你是这个群里的技术顾问，负责分析实现路径、风险和工程细节。",
+      t("defaults.member.technicalAdvisorPrompt"),
     ),
   ];
 }
@@ -309,16 +359,16 @@ function createDefaultMembers(): AgentModel[] {
 function createDefaultGroup(): ChatGroup {
   return {
     id: crypto.randomUUID(),
-    name: "默认 Agent 群",
-    description: "多模型协作讨论群",
-    announcement: defaultAnnouncement,
+    name: t("defaults.group.name"),
+    description: t("defaults.group.description"),
+    announcement: getDefaultAnnouncement(),
     workspacePath: "",
     agentConfig: structuredClone(defaultAgentConfig),
     patchProposals: [],
     members: createDefaultMembers(),
     messages: [
       createSystemMessage(
-        "这是一个 Agent 聊天群。每个虚拟群友都有自己的 API、模型和核心角色；你发出一条消息后，未禁言的群友会共享同一个上下文并分别回复。",
+        t("defaults.group.welcome"),
       ),
     ],
     updatedAt: new Date().toISOString(),
@@ -334,7 +384,8 @@ export const useSettingsStore = defineStore("settings", {
       groups: [defaultGroup] as ChatGroup[],
       memberLibrary: createDefaultMembers() as AgentModel[],
       activeGroupId: defaultGroup.id,
-      ownerProfile: structuredClone(defaultOwnerProfile),
+      ownerProfile: createDefaultOwnerProfile(),
+      locale: defaultLocale as AppLocale,
     };
   },
 
@@ -376,6 +427,7 @@ export const useSettingsStore = defineStore("settings", {
       }
 
       const parsed = JSON.parse(raw) as PersistedSettings;
+      this.locale = normalizeLocale(parsed.locale);
 
       if (parsed.providers) {
         this.providers = {
@@ -386,7 +438,7 @@ export const useSettingsStore = defineStore("settings", {
 
       if (parsed.ownerProfile) {
         this.ownerProfile = {
-          ...structuredClone(defaultOwnerProfile),
+          ...createDefaultOwnerProfile(),
           ...parsed.ownerProfile,
         };
       }
@@ -400,7 +452,7 @@ export const useSettingsStore = defineStore("settings", {
 
       if (Array.isArray(parsed.agentModels) && parsed.agentModels.length > 0) {
         const migratedGroup = createDefaultGroup();
-        migratedGroup.name = "迁移的模型群";
+        migratedGroup.name = t("defaults.group.migratedName");
         migratedGroup.members = parsed.agentModels;
         this.groups = [migratedGroup];
         this.memberLibrary = this.buildMemberLibrary(parsed.agentModels);
@@ -408,20 +460,67 @@ export const useSettingsStore = defineStore("settings", {
       }
     },
 
+    buildPersistencePayload(mode: PersistenceMode): PersistedSettings {
+      const messageLimit =
+        mode === "normal"
+          ? NORMAL_MESSAGE_LIMIT
+          : mode === "compact"
+            ? COMPACT_MESSAGE_LIMIT
+            : 0;
+      const patchLimit =
+        mode === "normal"
+          ? NORMAL_PATCH_LIMIT
+          : mode === "compact"
+            ? COMPACT_PATCH_LIMIT
+            : 0;
+
+      return {
+        providers: this.providers,
+        memberLibrary: this.buildMemberLibrary(this.memberLibrary),
+        groups: this.groups.slice(0, MAX_PERSISTED_GROUPS).map((group) => ({
+          ...group,
+          patchProposals:
+            mode === "minimal"
+              ? []
+              : group.patchProposals
+                  .slice(0, patchLimit)
+                  .map((proposal) => toPersistedPatchProposal(proposal, mode)),
+          members: group.members.map((member) => toPlainMember(member)),
+          messages:
+            mode === "minimal"
+              ? []
+              : group.messages
+                  .slice(-messageLimit)
+                  .map((message) => toPersistedMessage(message, mode)),
+        })),
+        activeGroupId: this.activeGroupId,
+        ownerProfile: this.ownerProfile,
+        locale: this.locale,
+      };
+    },
+
     persist() {
-      localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify({
-          providers: this.providers,
-          memberLibrary: this.buildMemberLibrary(this.memberLibrary),
-          groups: this.groups.map((group) => ({
-            ...group,
-            members: group.members.map((member) => toPlainMember(member)),
-          })),
-          activeGroupId: this.activeGroupId,
-          ownerProfile: this.ownerProfile,
-        }),
-      );
+      const modes: PersistenceMode[] = ["normal", "compact", "minimal"];
+
+      for (const mode of modes) {
+        try {
+          localStorage.setItem(STORAGE_KEY, JSON.stringify(this.buildPersistencePayload(mode)));
+          return;
+        } catch (error) {
+          if (mode === "minimal") {
+            try {
+              localStorage.removeItem(STORAGE_KEY);
+              localStorage.setItem(STORAGE_KEY, JSON.stringify(this.buildPersistencePayload(mode)));
+              return;
+            } catch (fallbackError) {
+              console.warn("Failed to persist settings.", fallbackError);
+              return;
+            }
+          }
+
+          console.warn(`Failed to persist settings in ${mode} mode; retrying smaller.`, error);
+        }
+      }
     },
 
     buildMemberLibrary(seed: AgentModel[] = []) {
@@ -502,7 +601,7 @@ export const useSettingsStore = defineStore("settings", {
         id: crypto.randomUUID(),
         name,
         description,
-        announcement: announcement.trim() || defaultAnnouncement,
+        announcement: announcement.trim() || getDefaultAnnouncement(),
         workspacePath: "",
         agentConfig: structuredClone(defaultAgentConfig),
         patchProposals: [],
@@ -512,7 +611,7 @@ export const useSettingsStore = defineStore("settings", {
         })),
         messages: [
           createSystemMessage(
-            `群「${name}」已创建。当前有 ${members.length} 个虚拟群友，可以开始对话。`,
+            t("defaults.group.createdMessage", { name, count: members.length }),
           ),
         ],
         updatedAt: new Date().toISOString(),
@@ -545,12 +644,15 @@ export const useSettingsStore = defineStore("settings", {
       const nextIndex = group.members.length + 1;
       const member = createMember(
         provider,
-        makeUniqueMemberName(`${providerConfig.name} 群友 ${nextIndex}`, [
-          ...group.members,
-          ...this.memberLibrary,
-        ]),
+        makeUniqueMemberName(
+          t("defaults.member.nameWithIndex", {
+            provider: providerConfig.name,
+            index: nextIndex,
+          }),
+          [...group.members, ...this.memberLibrary],
+        ),
         providerConfig.defaultModel,
-        "你是这个群里的虚拟群友，请基于自己的核心角色独立回答用户问题。",
+        t("defaults.member.defaultPrompt"),
       );
 
       group.members.push(member);
@@ -583,7 +685,7 @@ export const useSettingsStore = defineStore("settings", {
       group.members.push({
         ...member,
         id: crypto.randomUUID(),
-        name: makeUniqueMemberName(`${member.name} 副本`, group.members),
+        name: makeUniqueMemberName(t("defaults.member.copyName", { name: member.name }), group.members),
       });
       group.updatedAt = new Date().toISOString();
     },
@@ -626,6 +728,7 @@ export const useSettingsStore = defineStore("settings", {
         id: crypto.randomUUID(),
         time: nowText(),
         agreeMemberIds: message.agreeMemberIds ?? [],
+        supplementMemberIds: message.supplementMemberIds ?? [],
         disagreeMemberIds: message.disagreeMemberIds ?? [],
         thoughtSteps: message.thoughtSteps ?? [],
       });
@@ -639,6 +742,7 @@ export const useSettingsStore = defineStore("settings", {
         ...message,
         time: nowText(),
         agreeMemberIds: message.agreeMemberIds ?? [],
+        supplementMemberIds: message.supplementMemberIds ?? [],
         disagreeMemberIds: message.disagreeMemberIds ?? [],
         thoughtSteps: message.thoughtSteps ?? [],
       });
@@ -687,9 +791,12 @@ export const useSettingsStore = defineStore("settings", {
 
       return createMember(
         provider,
-        makeUniqueMemberName(`${providerConfig.name} 群友`, this.historicalMembers),
+        makeUniqueMemberName(
+          t("defaults.member.draftName", { provider: providerConfig.name }),
+          this.historicalMembers,
+        ),
         providerConfig.defaultModel,
-        "你是这个群里的虚拟群友，请基于自己的核心角色独立回答用户问题。",
+        t("defaults.member.defaultPrompt"),
       );
     },
 

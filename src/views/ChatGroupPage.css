@@ -483,6 +483,11 @@ h2 {
   background: #e8f4ed;
 }
 
+.reaction-pill.supplement {
+  color: #81611d;
+  background: #fff4d9;
+}
+
 .reaction-pill.disagree {
   color: #a13f3f;
   background: #fdecec;
@@ -623,5 +628,4 @@ h2 {
     flex-basis: calc(100% - 16px);
   }
 }
-
 

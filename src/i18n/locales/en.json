@@ -1,0 +1,295 @@
+{
+  "common": {
+    "appName": "Matrix Of Prescience",
+    "api": "API",
+    "apiKey": "API Key",
+    "baseUrl": "Base URL",
+    "cancel": "Cancel",
+    "choose": "Choose",
+    "coreRole": "Core role",
+    "deleteMember": "Delete member",
+    "discard": "Discard",
+    "language": "Language",
+    "memberFallback": "Member",
+    "model": "Model",
+    "no": "No",
+    "ownerName": "Me",
+    "ownerRole": "Owner",
+    "reject": "Reject",
+    "settings": "Settings",
+    "systemName": "System",
+    "temperature": "Temperature",
+    "yes": "Yes"
+  },
+  "settings": {
+    "title": "Global Settings",
+    "profile": {
+      "avatar": "Avatar",
+      "avatarColor": "Avatar color",
+      "avatarPlaceholder": "Choose a local image or enter an image path",
+      "name": "Name",
+      "ownerScope": "Always the owner in every group chat",
+      "title": "My Profile"
+    },
+    "providers": {
+      "defaultModel": "Default model",
+      "title": "Provider Keys"
+    },
+    "languageOptions": {
+      "en": "English",
+      "zhCN": "Simplified Chinese"
+    }
+  },
+  "groups": {
+    "brandTitle": "Agent Chats",
+    "createTitle": "New chat group",
+    "listTitle": "Chat groups",
+    "meta": "{members} members · {messages} messages"
+  },
+  "createGroup": {
+    "addDeepSeekMember": "Add DeepSeek member",
+    "addOpenAIMember": "Add ChatGPT member",
+    "announcement": "Announcement",
+    "create": "Create group chat",
+    "description": "Description",
+    "name": "Group name",
+    "title": "New chat group"
+  },
+  "members": {
+    "addDeepSeekMember": "New DeepSeek member",
+    "addFromHistory": "Add from history",
+    "addOpenAIMember": "New ChatGPT member",
+    "addTitle": "Add member",
+    "enabled": "Active",
+    "listTitle": "Members",
+    "localAvatar": "Local avatar",
+    "muted": "Muted",
+    "muteQuestion": "Muted",
+    "removeTitle": "Remove member",
+    "roleIdentity": "Role identity",
+    "rolePlaceholder": "Describe this member's responsibility, stance, and response boundaries"
+  },
+  "rightPanel": {
+    "agentMode": "Agent mode",
+    "announcement": {
+      "editTitle": "Double-click to edit announcement",
+      "empty": "Double-click to edit announcement",
+      "placeholder": "Base prompt shared with every member",
+      "tag": "Base agreement",
+      "title": "Announcement"
+    },
+    "approvalMode": "Approval mode",
+    "collaborationTitle": "Agent collaboration",
+    "safetyModel": "Safety model",
+    "workflow": "Workflow",
+    "yoloMode": "YOLO mode",
+    "agentModeOptions": {
+      "architect": "Architect",
+      "chat": "Chat discussion",
+      "localAgent": "Local Agent"
+    },
+    "approvalModeOptions": {
+      "auto": "Auto approve",
+      "confirmRisky": "Confirm high risk",
+      "manual": "Manual confirmation"
+    }
+  },
+  "chat": {
+    "agree": "Agree {count}",
+    "chooseWorkspaceTitle": "Choose workspace folder",
+    "composerPlaceholder": "Type a message. Enter to send, Shift + Enter for a new line",
+    "disagree": "Disagree {count}",
+    "onlineMembers": "{count} members online",
+    "queue": {
+      "status": {
+        "checking": "Checking",
+        "queued": "Queued",
+        "speaking": "Speaking",
+        "waiting": "Watching"
+      },
+      "title": "Speaking queue"
+    },
+    "sendToMembers": "Send to {count} members",
+    "status": {
+      "done": "Done",
+      "error": "Error",
+      "thinking": "Generating"
+    },
+    "stop": "Stop",
+    "supplement": "Needs supplement {count}",
+    "thoughtSteps": "Thought process",
+    "workspace": {
+      "label": "Workspace",
+      "pickDialogTitle": "Choose current group workspace",
+      "placeholder": "Choose or enter a path..."
+    }
+  },
+  "patch": {
+    "approveAndApply": "Approve and apply",
+    "confirmApply": {
+      "cancel": "Cancel",
+      "confirm": "Approve and apply",
+      "message": "This patch needs manual confirmation. After confirmation, git apply will run inside the current group workspace.",
+      "title": "Confirm patch application"
+    },
+    "noFiles": "No specific files detected",
+    "panelTitle": "Approval queue",
+    "pendingCount": "{count} pending",
+    "proposalTitle": "{name}'s edit proposal",
+    "safetyTitle": "Safety check",
+    "status": {
+      "approved": "Applied",
+      "discarded": "Discarded",
+      "pending": "Pending",
+      "rejected": "Rejected"
+    },
+    "verdict": {
+      "allow": "Allowed",
+      "blocked": "Blocked",
+      "needsConfirmation": "Needs confirmation"
+    }
+  },
+  "messages": {
+    "configureApiKey": "Please configure {provider} API Key first",
+    "draftMemberAlreadyInNewGroup": "This member is already in the new group",
+    "enterGroupName": "Enter a group name",
+    "hydrateFailed": "Failed to read local chat settings. Default settings are in use.",
+    "keepOneMember": "Keep at least one virtual member",
+    "memberAlreadyInCurrentGroup": "This member is already in the current group",
+    "memberNameRequired": "Member names cannot be empty",
+    "memberNamesUnique": "Member names must be unique",
+    "newGroupNeedsMember": "A new group needs at least one virtual member",
+    "patchApplied": "Patch applied",
+    "patchApplyFailed": "Patch application failed",
+    "patchBlocked": "This patch was blocked by the safety model and cannot be approved",
+    "patchFailedLogged": "Patch application failed. Details were written to the chat.",
+    "patchMissingDiff": "This proposal has no applicable diff patch",
+    "unmuteOneMember": "Unmute at least one virtual member"
+  },
+  "defaults": {
+    "group": {
+      "announcement": "Announcement: every member should stay factual and clear; state the judgment first, then give actionable advice. Members may disagree, but they must explain their evidence.",
+      "createdMessage": "Group \"{name}\" has been created. It has {count} virtual members and is ready for conversation.",
+      "description": "Multi-model collaboration group",
+      "migratedName": "Migrated model group",
+      "name": "Default Agent Group",
+      "welcome": "This is an Agent chat group. Each virtual member has its own API, model, and core role. After you send a message, unmuted members share the same context and reply separately."
+    },
+    "member": {
+      "copyName": "{name} copy",
+      "defaultPrompt": "You are a virtual member in this group. Answer the user's questions independently according to your core role.",
+      "draftName": "{provider} member",
+      "nameWithIndex": "{provider} member {index}",
+      "productManagerName": "Product Manager",
+      "productManagerPrompt": "You are the product manager in this group, responsible for clarifying goals, breaking down requirements, and defining scope.",
+      "technicalAdvisorName": "Technical Advisor",
+      "technicalAdvisorPrompt": "You are the technical advisor in this group, responsible for analyzing implementation paths, risks, and engineering details."
+    },
+    "newGroup": {
+      "announcement": "Announcement: every member should first make an independent judgment, then give clear and actionable advice.",
+      "description": "A new multi-model discussion group",
+      "name": "New Agent Group"
+    }
+  },
+  "avatar": {
+    "chooseTitle": "Choose avatar image",
+    "filterImages": "Images"
+  },
+  "patchSafety": {
+    "absolutePath": "Patch contains an absolute path: {file}",
+    "allow": "Patch passed workspace boundary and baseline risk checks.",
+    "analyzerBlocks": "Security Analyzer mode requires all safety warnings to be handled first.",
+    "destructiveContent": "Content includes delete, database-destructive, or high-risk permission commands.",
+    "forbiddenPath": "Patch target is outside normal source boundaries: {file}",
+    "highRisk": "Risk level is high and requires human review.",
+    "legacyBlocked": "Legacy proposal has no safety check result and was blocked as high risk.",
+    "legacyWarning": "Legacy proposal has no safety check result and needs manual review.",
+    "noFiles": "No specific files were detected. Confirm target files manually before applying.",
+    "noWorkspace": "Current group workspace is not set, so patch boundaries cannot be verified.",
+    "sandboxYoloBlocks": "Sandbox YOLO still does not allow high-risk patches to proceed automatically.",
+    "secretContent": "Content appears to involve keys, tokens, or passwords.",
+    "secretPath": "Patch may touch sensitive files or secrets: {file}",
+    "strictBlocks": "Strict safety model blocks medium and high risk patches before automatic approval."
+  },
+  "agentPrompt": {
+    "collaborationRule": "Group collaboration rules: you can see messages from the user and other members. Do not speak in isolation. When you need to respond to, supplement, challenge, or correct another member's view, say so explicitly. If your specialty should not speak yet, you may wait for other members first.",
+    "codeContextGuide": "You can discuss code based on the following tool output. Prefer CodeGraph. If the result came from LocalCommands, mention that it is a fallback read.",
+    "codeContextTitle": "Code reading tool result:",
+    "coreRole": "Your core role:",
+    "localModeTitle": "Local Agent collaboration mode:",
+    "modeAgent": "- Agent mode: {value}",
+    "modeApproval": "- Approval mode: {value}",
+    "modeEditBeforeAsk": "- EditBeforeAsk: {value}",
+    "modeSafety": "- Safety model: {value}",
+    "modeWorkflow": "- Workflow: {value}",
+    "modeYolo": "- YOLO mode: {value}",
+    "off": "Off",
+    "on": "On",
+    "workspaceMissing": "The current chat group has no workspace folder set. For code editing, ask the user to set a workspace folder first.",
+    "workspaceSet": "Current chat group workspace: {path}",
+    "approval": {
+      "auto": "- Approval: before automatically proceeding, still record the files to change and the risk in the reply.",
+      "confirmRisky": "- Approval: low-risk steps may be batched as suggestions, while high-risk steps must be confirmed by the user.",
+      "manual": "- Approval: every edit or command step needs user confirmation."
+    },
+    "safety": {
+      "balanced": "- Balanced: low-risk reads or small patches may be suggested first; high-risk operations must be confirmed.",
+      "commonTitle": "Code collaboration safety boundaries:",
+      "ruleBoundary": "- Analyze and plan edits only inside the current chat group workspace folder.",
+      "ruleNoFabrication": "- Do not invent completed file changes. Only claim files were written after the approval queue shows the patch was applied.",
+      "rulePatchQueue": "- Diff or patch output enters the approval queue. Do not claim files were written before approval and application.",
+      "ruleRisk": "- Explicitly mark risk when deleting, overwriting, migrating, broadly renaming, running external commands, making network requests, or changing secrets or permissions.",
+      "ruleTool": "- When code reading is involved, the app prefers CodeGraph and only falls back to local commands when CodeGraph is unavailable. Answer from the \"Code reading tool result\" and do not claim you can only see a path.",
+      "sandboxYolo": "- Sandbox YOLO: you may automatically advance low and medium risk plans, but assume an isolated workspace. Never cross the workspace boundary, delete user data, or handle secrets.",
+      "securityAnalyzer": "- Security Analyzer: first classify risk into allow, needs confirmation, or blocked, then give editing suggestions.",
+      "strict": "- Strict: all file writes, command execution, and dependency installation must be planned and confirmed first."
+    },
+    "workflow": {
+      "ask": "- Ask: explain, diagnose, and ask questions by default. Do not proactively write patches.",
+      "code": "- Code: prioritize executable code change plans and patches.",
+      "editBeforeAsk": "- EditBeforeAsk: first provide a smallest viable patch plan, then list questions that need user confirmation.",
+      "yolo": "- YOLO: minimize interruptions while still following the safety model and workspace boundary."
+    }
+  },
+  "chatRuntime": {
+    "callFailedContent": "Call failed: {error}",
+    "consensusLimit": "This discussion reached the consensus round limit and still has disagreements. Please narrow the question manually or adjust member roles before continuing.",
+    "disagreementRule1": "You disagreed with the previous response. Clearly state the disagreement and give a revision that helps the group move toward consensus.",
+    "disagreementRule2": "Do not repeat what was already said. Prioritize a conclusion that other members can agree with.",
+    "inspectFailed": "Code reading tool call failed: {error}",
+    "inspectInstruction": "Read the relevant code for the recent group chat question. Prioritize symbols, call paths, file responsibilities, and impact scope.",
+    "inspectMember": "Current member: {name}",
+    "inspectRole": "Role identity: {role}",
+    "inspectTool": "Tool: {tool}",
+    "interruptedContent": "Generation was interrupted.",
+    "interruptedStep": "The user interrupted this round.",
+    "mentionedRule": "The user explicitly @ mentioned you. Answer first; other members will observe and decide whether to add anything after you reply.",
+    "observerRule": "You were observing. The @ mentioned member has now replied. Decide whether to supplement, challenge, or help close consensus.",
+    "pendingContent": "Generating reply...",
+    "phaseAfterPeers": "You have now seen new replies from other members in this round. Decide whether you need to supplement, challenge, summarize, or keep waiting. Reply with one word only: SPEAK or WAIT.",
+    "phaseFirst": "The user has just spoken. Decide whether you should speak immediately or wait for other members first. Reply with one word only: SPEAK or WAIT.",
+    "responseRule": "Respond based on the full current group chat history. Prioritize the user's need, and you may supplement, challenge, or correct what other members already said.",
+    "stepDone": "Generation complete.",
+    "stepFailed": "Call failed.",
+    "stepGotContext": "Code reading tool result obtained.",
+    "stepInspect": "Checking whether code context is needed.",
+    "stepNoContext": "No code context is needed for this round.",
+    "stepQueued": "Entered speaking queue.",
+    "stepWaitingModel": "Waiting for model response.",
+    "voteAgreeRule": "If the conclusion, plan, or key evidence is acceptable and you have nothing important to add, reply AGREE only.",
+    "voteDisagreeRule": "If you think there is a disagreement that needs more discussion, reply DISAGREE only.",
+    "voteQuestion": "Decide whether you agree with {name}'s previous response."
+    ,"voteSupplementRule": "If you agree overall but need to add important context, reply SUPPLEMENT only."
+  },
+  "patchRuntime": {
+    "appliedContent": "Patch \"{title}\" was applied.",
+    "appliedFiles": "Files: {files}",
+    "failedContent": "Patch \"{title}\" failed to apply: {error}",
+    "output": "Output: {output}",
+    "stderr": "Note: {stderr}"
+  },
+  "resizable": {
+    "left": "Resize left area width",
+    "right": "Resize right area width"
+  }
+}
