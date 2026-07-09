@@ -113,6 +113,7 @@
     "chooseWorkspaceTitle": "选择工作文件夹",
     "composerPlaceholder": "输入消息，Enter 发送，Shift + Enter 换行",
     "disagree": "不同意 {count}",
+    "allAgree": "全部同意",
     "onlineMembers": "{count} 群友在线",
     "queue": {
       "status": {
@@ -162,7 +163,12 @@
     "noFiles": "未识别具体文件",
     "panelTitle": "审批提示",
     "pendingCount": "{count} 待处理",
+    "showPanel": "展开审批卡片",
+    "hidePanel": "收起审批卡片",
+    "generatedSummary": "准备修改 {count} 个文件，详情见补丁预览。",
     "proposalTitle": "{name} 的编辑提案",
+    "proposalTitleWithCount": "{name} 修改 {count} 个文件",
+    "proposalTitleWithFile": "{name} 修改 {file}",
     "safetyTitle": "安全校验",
     "status": {
       "approved": "已应用",
@@ -297,6 +303,7 @@
     "pendingContent": "正在生成回复...",
     "phaseAfterPeers": "现在你已经看到其它群友本轮的新增发言。请判断你是否需要补充、反驳、总结或继续等待。只回复一个词：SPEAK 或 WAIT。",
     "phaseFirst": "现在用户刚发言。请判断你是否应该立刻发言，还是等待其它群友先发言。只回复一个词：SPEAK 或 WAIT。",
+    "reasoningTrace": "推理：{step}",
     "responseRule": "请基于当前完整群聊历史发言。优先回应用户需求，同时可以补充、质疑或修正其它群友已经说过的内容。",
     "stepDone": "生成完成。",
     "stepFailed": "调用失败。",
@@ -305,6 +312,7 @@
     "stepNoContext": "本轮不需要读取代码上下文。",
     "stepQueued": "进入发言队列。",
     "stepWaitingModel": "等待模型返回。",
+    "toolTrace": "工具：{step}",
     "voteAgreeRule": "如果结论、方案或关键依据可以接受，且你没有重要补充，只回复 AGREE。",
     "voteDisagreeRule": "如果你认为存在需要继续讨论的分歧，只回复 DISAGREE。",
     "voteQuestion": "请判断你是否同意 {name} 的上一条发言。",

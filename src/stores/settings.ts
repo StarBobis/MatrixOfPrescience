@@ -126,8 +126,8 @@ const COMPACT_MESSAGE_CONTENT_LIMIT = 4000;
 const NORMAL_PATCH_LIMIT = 8;
 const NORMAL_PATCH_TEXT_LIMIT = 20000;
 const COMPACT_PATCH_LIMIT = 3;
-const THOUGHT_STEP_LIMIT = 12;
-const THOUGHT_STEP_TEXT_LIMIT = 500;
+const THOUGHT_STEP_LIMIT = 96;
+const THOUGHT_STEP_TEXT_LIMIT = 1200;
 
 type PersistenceMode = "normal" | "compact" | "minimal";
 

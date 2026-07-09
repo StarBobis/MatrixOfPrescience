@@ -2,6 +2,7 @@
 import "./ChatGroupPage.css";
 import { computed, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import MarkdownIt from "markdown-it";
 import { ElMessage, ElMessageBox } from "element-plus";
 import { storeToRefs } from "pinia";
@@ -36,7 +37,22 @@ interface ApiChatMessage {
   content: string;
 }
 
-interface ChatCompletionResponse { content: string }
+interface ChatTraceStep {
+  kind: "reasoning" | "tool";
+  text: string;
+}
+
+interface ChatCompletionResponse {
+  content: string;
+  traceSteps?: ChatTraceStep[];
+}
+
+interface ChatCompletionStreamEvent {
+  streamId: string;
+  eventType: "traceChunk" | "traceStep" | "contentChunk";
+  traceKind?: ChatTraceStep["kind"];
+  text: string;
+}
 
 interface ApplyPatchResponse {
   appliedFiles: string[];
@@ -93,6 +109,11 @@ const pendingMessageIds = ref<string[]>([]);
 const speakerQueue = ref<SpeakerQueueItem[]>([]);
 const chatPanel = ref<InstanceType<typeof ChatConversationPanel> | null>(null);
 const speakingTimers = new Map<string, number>();
+const streamingContent = new Map<string, string>();
+const streamingTraceLines = new Map<
+  string,
+  { kind: ChatTraceStep["kind"]; index: number; text: string }
+>();
 
 const newGroupName = ref(t("defaults.newGroup.name"));
 const newGroupDescription = ref(t("defaults.newGroup.description"));
@@ -369,20 +390,57 @@ function inferPatchFiles(content: string, patchText: string) {
   const source = `${content}\n${patchText}`;
   const filePatterns = [
     /(?:diff --git a\/[^\s]+ b\/([^\s]+))/g,
-    /(?:\+\+\+ b\/([^\s]+))/g,
-    /(?:--- a\/([^\s]+))/g,
-    /`([^`]+\.(?:ts|tsx|vue|js|jsx|rs|json|css|md|toml|yml|yaml))`/g,
+    /(?:\+\+\+\s+(?:b\/)?([^\s]+))/g,
+    /(?:---\s+(?:a\/)?([^\s]+))/g,
+    /`([^`]+\.(?:ts|tsx|vue|js|jsx|rs|json|css|md|toml|yml|yaml|c|cc|cpp|cxx|h|hh|hpp|hxx|inl|ipp|hlsl|fx|shader))`/g,
   ];
 
   for (const pattern of filePatterns) {
     for (const match of source.matchAll(pattern)) {
       if (match[1]) {
-        candidates.add(match[1]);
+        if (match[1] !== "/dev/null") {
+          candidates.add(match[1]);
+        }
       }
     }
   }
 
   return [...candidates].slice(0, 12);
+}
+
+function hasApplicablePatchShape(patchText: string) {
+  const hasTargetHeader = /^(diff --git|---\s+(?:a\/)?\S+|\+\+\+\s+(?:b\/)?\S+)/m.test(patchText);
+  const hasApplyBody =
+    /^(@@\s|GIT binary patch|new file mode|deleted file mode|old mode|new mode|rename from|rename to|copy from|copy to)/m.test(
+      patchText,
+    );
+
+  return hasTargetHeader && hasApplyBody;
+}
+
+function buildPatchProposalTitle(member: AgentModel, files: string[]) {
+  if (files.length === 1) {
+    return t("patch.proposalTitleWithFile", { name: member.name, file: files[0] });
+  }
+
+  return t("patch.proposalTitleWithCount", { name: member.name, count: files.length });
+}
+
+function buildPatchProposalSummary(content: string, patchText: string, files: string[]) {
+  const withoutFencedDiff = content.replace(/```(?:diff|patch)\s*[\s\S]*?```/gi, "");
+  const withoutRawPatch = patchText ? withoutFencedDiff.replace(patchText, "") : withoutFencedDiff;
+  const summary = withoutRawPatch
+    .split(/\n+/)
+    .map((line) => line.trim())
+    .filter(
+      (line) =>
+        line &&
+        !/^(```|diff --git|--- |\+\+\+ |@@ |index |[+-]{1}[^+-])/.test(line),
+    )
+    .slice(0, 2)
+    .join("\n");
+
+  return summary || t("patch.generatedSummary", { count: files.length });
 }
 
 function inferRiskLevel(content: string, files: string[]): PatchRiskLevel {
@@ -418,11 +476,16 @@ async function maybeCreatePatchProposal(member: AgentModel, content: string) {
   }
 
   const files = inferPatchFiles(content, patchText);
+
+  if (!patchText.trim() || files.length === 0 || !hasApplicablePatchShape(patchText)) {
+    return;
+  }
+
   const riskLevel = inferRiskLevel(content, files);
   const workspacePath = activeGroup.value?.workspacePath ?? "";
 
   const proposal = {
-    title: t("patch.proposalTitle", { name: member.name }),
+    title: buildPatchProposalTitle(member, files),
     proposerName: member.name,
     riskLevel,
     workspacePath,
@@ -435,7 +498,7 @@ async function maybeCreatePatchProposal(member: AgentModel, content: string) {
       safetyModel: config.safetyModel,
     }),
     files,
-    summary: content.slice(0, 420),
+    summary: buildPatchProposalSummary(content, patchText, files).slice(0, 420),
     patchText,
   };
 
@@ -579,10 +642,124 @@ function isRunInterrupted(runId: string) {
 }
 
 function addThoughtStep(messageId: string, step: string) {
+  addThoughtSteps(messageId, [step]);
+}
+
+function addThoughtSteps(messageId: string, steps: string[]) {
   const message = activeMessages.value.find((item) => item.id === messageId);
+  const nextSteps = steps.map((step) => step.trim()).filter(Boolean);
+
+  if (nextSteps.length === 0) {
+    return;
+  }
+
   settingsStore.updateMessage(messageId, {
-    thoughtSteps: [...(message?.thoughtSteps ?? []), step],
+    thoughtSteps: [...(message?.thoughtSteps ?? []), ...nextSteps],
   });
+}
+
+function formatTraceStep(step: ChatTraceStep) {
+  const text = step.text.trim();
+
+  if (!text) {
+    return "";
+  }
+
+  return step.kind === "tool"
+    ? t("chatRuntime.toolTrace", { step: text })
+    : t("chatRuntime.reasoningTrace", { step: text });
+}
+
+function addResponseTraceSteps(messageId: string, response: ChatCompletionResponse) {
+  addThoughtSteps(
+    messageId,
+    (response.traceSteps ?? []).map(formatTraceStep),
+  );
+}
+
+function updateThoughtStepAt(messageId: string, index: number, step: string) {
+  const message = activeMessages.value.find((item) => item.id === messageId);
+  const thoughtSteps = [...(message?.thoughtSteps ?? [])];
+
+  if (index < thoughtSteps.length) {
+    thoughtSteps[index] = step;
+  } else {
+    thoughtSteps.push(step);
+  }
+
+  settingsStore.updateMessage(messageId, { thoughtSteps });
+}
+
+function flushStreamingTraceLine(messageId: string) {
+  streamingTraceLines.delete(messageId);
+}
+
+function appendStreamingTraceText(
+  messageId: string,
+  kind: ChatTraceStep["kind"],
+  text: string,
+) {
+  const message = activeMessages.value.find((item) => item.id === messageId);
+  const current = streamingTraceLines.get(messageId);
+  const next =
+    current && current.kind === kind
+      ? current
+      : {
+          kind,
+          index: message?.thoughtSteps?.length ?? 0,
+          text: "",
+        };
+
+  next.text += text;
+  streamingTraceLines.set(messageId, next);
+  updateThoughtStepAt(messageId, next.index, formatTraceStep({ kind, text: next.text }));
+}
+
+function appendStreamingTraceChunk(
+  messageId: string,
+  kind: ChatTraceStep["kind"],
+  chunk: string,
+) {
+  const lines = chunk.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+
+  lines.forEach((line, index) => {
+    if (line) {
+      appendStreamingTraceText(messageId, kind, line);
+    }
+
+    if (index < lines.length - 1) {
+      flushStreamingTraceLine(messageId);
+    }
+  });
+}
+
+function appendStreamingContentChunk(messageId: string, chunk: string) {
+  if (!chunk) {
+    return;
+  }
+
+  const nextContent = `${streamingContent.get(messageId) ?? ""}${chunk}`;
+  streamingContent.set(messageId, nextContent);
+  settingsStore.updateMessage(messageId, {
+    content: nextContent,
+  });
+}
+
+function applyCompletionStreamEvent(messageId: string, payload: ChatCompletionStreamEvent) {
+  if (payload.eventType === "contentChunk") {
+    appendStreamingContentChunk(messageId, payload.text);
+    return;
+  }
+
+  const traceKind = payload.traceKind ?? "reasoning";
+
+  if (payload.eventType === "traceChunk") {
+    appendStreamingTraceChunk(messageId, traceKind, payload.text);
+    return;
+  }
+
+  flushStreamingTraceLine(messageId);
+  addThoughtStep(messageId, formatTraceStep({ kind: traceKind, text: payload.text }));
 }
 
 function updateSpeakingDuration(messageId: string, startedAt: number) {
@@ -623,6 +800,8 @@ function stopGeneration() {
   for (const messageId of pendingMessageIds.value) {
     const message = activeMessages.value.find((item) => item.id === messageId);
     stopSpeakingTimer(messageId, message?.startedAt);
+    flushStreamingTraceLine(messageId);
+    streamingContent.delete(messageId);
     settingsStore.updateMessage(messageId, {
       status: "error",
       content: t("chatRuntime.interruptedContent"),
@@ -657,6 +836,8 @@ async function resetCurrentSession() {
     window.clearInterval(timer);
   }
   speakingTimers.clear();
+  streamingTraceLines.clear();
+  streamingContent.clear();
 
   activeRunId.value = "";
   sending.value = false;
@@ -746,6 +927,9 @@ async function askMember(
   pendingMessageIds.value = [...pendingMessageIds.value, pendingId];
   await scrollToBottom();
 
+  let unlistenStream: UnlistenFn | undefined;
+  let sawStreamTrace = false;
+
   try {
     const codeToolsEnabled = shouldInspectWorkspace(responseRule);
     addThoughtStep(
@@ -753,6 +937,22 @@ async function askMember(
       codeToolsEnabled ? t("chatRuntime.stepGotContext") : t("chatRuntime.stepNoContext"),
     );
     addThoughtStep(pendingId, t("chatRuntime.stepWaitingModel"));
+    unlistenStream = await listen<ChatCompletionStreamEvent>(
+      "chat-completion-stream",
+      (event) => {
+        const payload = event.payload;
+
+        if (payload.streamId !== pendingId || isRunInterrupted(runId)) {
+          return;
+        }
+
+        if (payload.eventType === "traceChunk" || payload.eventType === "traceStep") {
+          sawStreamTrace = true;
+        }
+
+        applyCompletionStreamEvent(pendingId, payload);
+      },
+    );
     const response = await invoke<ChatCompletionResponse>("chat_completion", {
       request: {
         providerName: provider.name,
@@ -763,6 +963,7 @@ async function askMember(
         temperature: member.temperature,
         workspacePath: activeGroup.value?.workspacePath ?? "",
         codeToolsEnabled,
+        streamId: pendingId,
         systemPrompt: buildSystemPrompt(member, activeGroup.value, responseRule),
         messages: conversation,
       },
@@ -777,6 +978,11 @@ async function askMember(
       content: response.content,
     });
     stopSpeakingTimer(pendingId, startedAt);
+    flushStreamingTraceLine(pendingId);
+    streamingContent.delete(pendingId);
+    if (!sawStreamTrace) {
+      addResponseTraceSteps(pendingId, response);
+    }
     addThoughtStep(pendingId, t("chatRuntime.stepDone"));
     await maybeCreatePatchProposal(member, response.content);
     return {
@@ -793,6 +999,9 @@ async function askMember(
     addThoughtStep(pendingId, t("chatRuntime.stepFailed"));
     return null;
   } finally {
+    unlistenStream?.();
+    flushStreamingTraceLine(pendingId);
+    streamingContent.delete(pendingId);
     stopSpeakingTimer(pendingId, startedAt);
     removeSpeakerQueueMember(member.id);
     pendingMessageIds.value = pendingMessageIds.value.filter((id) => id !== pendingId);

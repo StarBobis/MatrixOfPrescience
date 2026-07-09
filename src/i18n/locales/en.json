@@ -113,6 +113,7 @@
     "chooseWorkspaceTitle": "Choose workspace folder",
     "composerPlaceholder": "Type a message. Enter to send, Shift + Enter for a new line",
     "disagree": "Disagree {count}",
+    "allAgree": "All agree",
     "onlineMembers": "{count} members online",
     "queue": {
       "status": {
@@ -162,7 +163,12 @@
     "noFiles": "No specific files detected",
     "panelTitle": "Approval queue",
     "pendingCount": "{count} pending",
+    "showPanel": "Show approval card",
+    "hidePanel": "Hide approval card",
+    "generatedSummary": "Ready to modify {count} files. See the patch preview for details.",
     "proposalTitle": "{name}'s edit proposal",
+    "proposalTitleWithCount": "{name} edits {count} files",
+    "proposalTitleWithFile": "{name} edits {file}",
     "safetyTitle": "Safety check",
     "status": {
       "approved": "Applied",
@@ -297,6 +303,7 @@
     "pendingContent": "Generating reply...",
     "phaseAfterPeers": "You have now seen new replies from other members in this round. Decide whether you need to supplement, challenge, summarize, or keep waiting. Reply with one word only: SPEAK or WAIT.",
     "phaseFirst": "The user has just spoken. Decide whether you should speak immediately or wait for other members first. Reply with one word only: SPEAK or WAIT.",
+    "reasoningTrace": "Reasoning: {step}",
     "responseRule": "Respond based on the full current group chat history. Prioritize the user's need, and you may supplement, challenge, or correct what other members already said.",
     "stepDone": "Generation complete.",
     "stepFailed": "Call failed.",
@@ -305,6 +312,7 @@
     "stepNoContext": "No code context is needed for this round.",
     "stepQueued": "Entered speaking queue.",
     "stepWaitingModel": "Waiting for model response.",
+    "toolTrace": "Tool: {step}",
     "voteAgreeRule": "If the conclusion, plan, or key evidence is acceptable and you have nothing important to add, reply AGREE only.",
     "voteDisagreeRule": "If you think there is a disagreement that needs more discussion, reply DISAGREE only.",
     "voteQuestion": "Decide whether you agree with {name}'s previous response.",

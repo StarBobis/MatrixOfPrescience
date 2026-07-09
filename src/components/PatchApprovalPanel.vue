@@ -141,7 +141,8 @@ const safetyVerdictTextKey: Record<AgentPatchProposal["safetyCheck"]["verdict"],
 .patch-panel {
   display: grid;
   gap: 10px;
-  margin: 12px 0;
+  width: min(920px, 100%);
+  margin: 0;
   padding: 12px;
   border: 1px solid #dbe6de;
   border-radius: 8px;

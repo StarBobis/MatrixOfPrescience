@@ -1,4 +1,5 @@
 use base64::{engine::general_purpose, Engine as _};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -8,7 +9,7 @@ use std::{
     process::{Command, Output},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "lowercase")]
@@ -29,6 +30,7 @@ struct ChatCompletionRequest {
     system_prompt: Option<String>,
     workspace_path: Option<String>,
     code_tools_enabled: Option<bool>,
+    stream_id: Option<String>,
     messages: Vec<ChatMessage>,
 }
 
@@ -36,6 +38,31 @@ struct ChatCompletionRequest {
 #[serde(rename_all = "camelCase")]
 struct ChatCompletionResponse {
     content: String,
+    trace_steps: Vec<ChatTraceStep>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ChatTraceStep {
+    kind: String,
+    text: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ChatCompletionStreamEvent {
+    stream_id: String,
+    event_type: String,
+    trace_kind: Option<String>,
+    text: String,
+}
+
+#[derive(Debug, Default)]
+struct ToolCallAccumulator {
+    id: String,
+    call_type: String,
+    function_name: String,
+    function_arguments: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -93,6 +120,9 @@ struct AvatarCacheResponse {
 
 const MAX_CHAT_COMPLETION_TURNS: usize = 8;
 const MAX_CODE_TOOL_ROUNDS: usize = 5;
+const MAX_CHAT_TRACE_STEPS: usize = 160;
+const TRACE_STEP_TEXT_LIMIT: usize = 280;
+const CHAT_COMPLETION_STREAM_EVENT: &str = "chat-completion-stream";
 const FINAL_ANSWER_INSTRUCTION: &str = "The code reading tool budget for this response is exhausted. Use the tool results already provided and write the final answer now. Do not request more tool calls.";
 const CACHE_LOCATION_FILE: &str = "cache-location.json";
 const SETTINGS_FILE: &str = "settings.json";
@@ -320,7 +350,10 @@ async fn copy_avatar_to_cache(
 }
 
 #[tauri::command]
-async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletionResponse, String> {
+async fn chat_completion(
+    app: AppHandle,
+    request: ChatCompletionRequest,
+) -> Result<ChatCompletionResponse, String> {
     if request.api_key.trim().is_empty() {
         return Err(format!(
             "{} API Key is not configured.",
@@ -368,6 +401,13 @@ async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletio
     let mut code_tool_rounds = 0usize;
     let mut final_answer_requested = false;
     let mut last_finish_reason: Option<String> = None;
+    let mut trace_steps: Vec<ChatTraceStep> = Vec::new();
+    let stream_id = request
+        .stream_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
 
     for _ in 0..MAX_CHAT_COMPLETION_TURNS {
         let payload_messages = chat_payload_messages(&messages, final_answer_requested);
@@ -393,7 +433,9 @@ async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletio
             };
         }
 
-        let parsed = match send_chat_completion_request(
+        let parsed = match send_chat_completion_request_maybe_stream(
+            &app,
+            stream_id.as_deref(),
             &client,
             &endpoint,
             &request.api_key,
@@ -406,7 +448,9 @@ async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletio
             Err(error) if strict_tool_schema => {
                 payload["tools"] = codegraph_tools_schema(false);
                 payload["tool_choice"] = json!("auto");
-                send_chat_completion_request(
+                send_chat_completion_request_maybe_stream(
+                    &app,
+                    stream_id.as_deref(),
                     &client,
                     &endpoint,
                     &request.api_key,
@@ -430,6 +474,7 @@ async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletio
             .and_then(|choice| choice.get("message"))
             .cloned()
             .ok_or_else(|| format!("{} returned no message.", request.provider_name))?;
+        append_reasoning_trace_steps(&mut trace_steps, &message);
 
         if let (Some(workspace), Some(tool_calls)) = (
             code_workspace.as_ref(),
@@ -438,7 +483,14 @@ async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletio
             if !tool_calls.is_empty() {
                 messages.push(message.clone());
                 for tool_call in tool_calls {
-                    messages.push(execute_code_tool_call(workspace, tool_call));
+                    let call_step = tool_call_trace_step(tool_call);
+                    emit_trace_step(&app, stream_id.as_deref(), &call_step);
+                    append_trace_steps(&mut trace_steps, vec![call_step]);
+                    let tool_result = execute_code_tool_call(workspace, tool_call);
+                    let result_step = tool_result_trace_step(tool_call, &tool_result);
+                    emit_trace_step(&app, stream_id.as_deref(), &result_step);
+                    append_trace_steps(&mut trace_steps, vec![result_step]);
+                    messages.push(tool_result);
                 }
                 code_tool_called = true;
                 code_tool_rounds += 1;
@@ -452,7 +504,10 @@ async fn chat_completion(request: ChatCompletionRequest) -> Result<ChatCompletio
         let content = message_content_text(&message);
 
         if !content.is_empty() {
-            return Ok(ChatCompletionResponse { content });
+            return Ok(ChatCompletionResponse {
+                content,
+                trace_steps,
+            });
         }
 
         if code_tool_called && !final_answer_requested {
@@ -528,6 +583,179 @@ fn message_content_text(message: &Value) -> String {
     }
 }
 
+fn value_text(value: &Value) -> String {
+    match value {
+        Value::String(content) => content.trim().to_string(),
+        Value::Array(parts) => parts
+            .iter()
+            .filter_map(|part| {
+                part.get("text")
+                    .or_else(|| part.get("content"))
+                    .and_then(Value::as_str)
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim()
+            .to_string(),
+        _ => String::new(),
+    }
+}
+
+fn message_reasoning_text(message: &Value) -> String {
+    for key in ["reasoning_content", "reasoning"] {
+        if let Some(value) = message.get(key) {
+            let text = value_text(value);
+
+            if !text.is_empty() {
+                return text;
+            }
+        }
+    }
+
+    String::new()
+}
+
+fn trace_step(kind: &str, text: String) -> ChatTraceStep {
+    ChatTraceStep {
+        kind: kind.to_string(),
+        text,
+    }
+}
+
+fn split_trace_text(text: &str) -> Vec<String> {
+    let mut steps = Vec::new();
+
+    for raw_line in text.lines() {
+        let line = raw_line.trim();
+
+        if line.is_empty() {
+            continue;
+        }
+
+        let chars: Vec<char> = line.chars().collect();
+
+        if chars.len() <= TRACE_STEP_TEXT_LIMIT {
+            steps.push(line.to_string());
+            continue;
+        }
+
+        for chunk in chars.chunks(TRACE_STEP_TEXT_LIMIT) {
+            steps.push(chunk.iter().collect());
+        }
+    }
+
+    steps
+}
+
+fn append_trace_steps(trace_steps: &mut Vec<ChatTraceStep>, next_steps: Vec<ChatTraceStep>) {
+    for step in next_steps {
+        if trace_steps.len() >= MAX_CHAT_TRACE_STEPS {
+            return;
+        }
+
+        if !step.text.trim().is_empty() {
+            trace_steps.push(step);
+        }
+    }
+}
+
+fn append_reasoning_trace_steps(trace_steps: &mut Vec<ChatTraceStep>, message: &Value) {
+    let reasoning = message_reasoning_text(message);
+    let steps = split_trace_text(&reasoning)
+        .into_iter()
+        .map(|line| trace_step("reasoning", line))
+        .collect();
+
+    append_trace_steps(trace_steps, steps);
+}
+
+fn parsed_tool_arguments(function: &Value) -> Value {
+    let arguments = function
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!("{}"));
+
+    if let Some(arguments_text) = arguments.as_str() {
+        serde_json::from_str::<Value>(arguments_text)
+            .unwrap_or_else(|_| Value::String(arguments_text.to_string()))
+    } else {
+        arguments
+    }
+}
+
+fn compact_trace_json(value: &Value) -> String {
+    serde_json::to_string(value)
+        .map(|text| truncate_text(text, TRACE_STEP_TEXT_LIMIT))
+        .unwrap_or_else(|_| "<unreadable arguments>".to_string())
+}
+
+fn tool_call_trace_step(tool_call: &Value) -> ChatTraceStep {
+    let function = tool_call.get("function").unwrap_or(&Value::Null);
+    let name = function
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown_tool");
+    let arguments = parsed_tool_arguments(function);
+    let text = if name == "codegraph_explore" {
+        let query = arguments
+            .get("query")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let max_files = arguments.get("maxFiles").and_then(Value::as_u64);
+
+        match max_files {
+            Some(max_files) => format!(
+                "codegraph_explore query=\"{}\" maxFiles={}",
+                truncate_text(query.to_string(), 180),
+                max_files
+            ),
+            None => format!(
+                "codegraph_explore query=\"{}\"",
+                truncate_text(query.to_string(), 200)
+            ),
+        }
+    } else {
+        format!("{} {}", name, compact_trace_json(&arguments))
+    };
+
+    trace_step("tool", text)
+}
+
+fn tool_result_trace_step(tool_call: &Value, tool_message: &Value) -> ChatTraceStep {
+    let function = tool_call.get("function").unwrap_or(&Value::Null);
+    let name = function
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown_tool");
+    let content = message_content_text(tool_message);
+    let route = if content.contains("Local command fallback") || content.contains("local fallback")
+    {
+        "local fallback"
+    } else if content.contains("CodeGraph") {
+        "CodeGraph"
+    } else {
+        "tool"
+    };
+    let first_line = content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+    let text = if first_line.is_empty() {
+        format!("{} returned an empty result", name)
+    } else {
+        format!(
+            "{} returned {} chars via {}: {}",
+            name,
+            content.chars().count(),
+            route,
+            truncate_text(first_line.to_string(), 160)
+        )
+    };
+
+    trace_step("tool", text)
+}
+
 fn codegraph_tools_schema(strict: bool) -> Value {
     let mut function = json!({
         "name": "codegraph_explore",
@@ -593,6 +821,319 @@ async fn send_chat_completion_request(
 
     serde_json::from_str(&body)
         .map_err(|error| format!("Failed to parse {} response: {}", provider_name, error))
+}
+
+async fn send_chat_completion_request_maybe_stream(
+    app: &AppHandle,
+    stream_id: Option<&str>,
+    client: &reqwest::Client,
+    endpoint: &str,
+    api_key: &str,
+    provider_name: &str,
+    payload: &Value,
+) -> Result<Value, String> {
+    if let Some(stream_id) = stream_id {
+        send_chat_completion_stream_request(
+            app,
+            stream_id,
+            client,
+            endpoint,
+            api_key,
+            provider_name,
+            payload,
+        )
+        .await
+    } else {
+        send_chat_completion_request(client, endpoint, api_key, provider_name, payload).await
+    }
+}
+
+fn emit_stream_event(
+    app: &AppHandle,
+    stream_id: Option<&str>,
+    event_type: &str,
+    trace_kind: Option<&str>,
+    text: impl Into<String>,
+) {
+    let Some(stream_id) = stream_id else {
+        return;
+    };
+
+    let _ = app.emit(
+        CHAT_COMPLETION_STREAM_EVENT,
+        ChatCompletionStreamEvent {
+            stream_id: stream_id.to_string(),
+            event_type: event_type.to_string(),
+            trace_kind: trace_kind.map(str::to_string),
+            text: text.into(),
+        },
+    );
+}
+
+fn emit_trace_step(app: &AppHandle, stream_id: Option<&str>, step: &ChatTraceStep) {
+    emit_stream_event(
+        app,
+        stream_id,
+        "traceStep",
+        Some(&step.kind),
+        step.text.clone(),
+    );
+}
+
+fn emit_trace_chunk(app: &AppHandle, stream_id: &str, trace_kind: &str, text: &str) {
+    emit_stream_event(app, Some(stream_id), "traceChunk", Some(trace_kind), text);
+}
+
+fn emit_content_chunk(app: &AppHandle, stream_id: &str, text: &str) {
+    emit_stream_event(app, Some(stream_id), "contentChunk", None, text);
+}
+
+fn sse_event_separator(buffer: &str) -> Option<(usize, usize)> {
+    match (buffer.find("\n\n"), buffer.find("\r\n\r\n")) {
+        (Some(lf), Some(crlf)) if crlf < lf => Some((crlf, 4)),
+        (Some(lf), _) => Some((lf, 2)),
+        (_, Some(crlf)) => Some((crlf, 4)),
+        _ => None,
+    }
+}
+
+fn sse_data_lines(event_block: &str) -> Vec<String> {
+    event_block
+        .lines()
+        .filter_map(|line| {
+            let line = line.trim_end_matches('\r');
+            line.strip_prefix("data:")
+                .map(|data| data.trim_start().to_string())
+        })
+        .collect()
+}
+
+fn ensure_tool_call_slot(tool_calls: &mut Vec<ToolCallAccumulator>, index: usize) {
+    while tool_calls.len() <= index {
+        tool_calls.push(ToolCallAccumulator::default());
+    }
+}
+
+fn append_delta_tool_calls(delta_tool_calls: &[Value], tool_calls: &mut Vec<ToolCallAccumulator>) {
+    for delta_call in delta_tool_calls {
+        let index = delta_call
+            .get("index")
+            .and_then(Value::as_u64)
+            .unwrap_or(tool_calls.len() as u64) as usize;
+        ensure_tool_call_slot(tool_calls, index);
+        let accumulator = &mut tool_calls[index];
+
+        if let Some(id) = delta_call.get("id").and_then(Value::as_str) {
+            accumulator.id.push_str(id);
+        }
+
+        if let Some(call_type) = delta_call.get("type").and_then(Value::as_str) {
+            accumulator.call_type.push_str(call_type);
+        }
+
+        if let Some(function) = delta_call.get("function") {
+            if let Some(name) = function.get("name").and_then(Value::as_str) {
+                accumulator.function_name.push_str(name);
+            }
+
+            if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
+                accumulator.function_arguments.push_str(arguments);
+            }
+        }
+    }
+}
+
+fn tool_call_accumulators_to_values(tool_calls: Vec<ToolCallAccumulator>) -> Vec<Value> {
+    tool_calls
+        .into_iter()
+        .enumerate()
+        .filter(|(_, call)| {
+            !call.function_name.trim().is_empty() || !call.function_arguments.trim().is_empty()
+        })
+        .map(|(index, call)| {
+            json!({
+                "id": if call.id.is_empty() {
+                    format!("streamed-tool-call-{}", index)
+                } else {
+                    call.id
+                },
+                "type": if call.call_type.is_empty() {
+                    "function".to_string()
+                } else {
+                    call.call_type
+                },
+                "function": {
+                    "name": call.function_name,
+                    "arguments": call.function_arguments,
+                },
+            })
+        })
+        .collect()
+}
+
+fn apply_stream_delta(
+    app: &AppHandle,
+    stream_id: &str,
+    parsed: &Value,
+    content: &mut String,
+    reasoning: &mut String,
+    tool_calls: &mut Vec<ToolCallAccumulator>,
+    finish_reason: &mut Option<String>,
+) {
+    let Some(choices) = parsed.get("choices").and_then(Value::as_array) else {
+        return;
+    };
+
+    for choice in choices {
+        if let Some(reason) = choice.get("finish_reason").and_then(Value::as_str) {
+            *finish_reason = Some(reason.to_string());
+        }
+
+        let Some(delta) = choice.get("delta") else {
+            continue;
+        };
+
+        let reasoning_chunk = ["reasoning_content", "reasoning"]
+            .into_iter()
+            .filter_map(|key| delta.get(key).and_then(Value::as_str))
+            .find(|chunk| !chunk.is_empty());
+
+        if let Some(chunk) = reasoning_chunk {
+            reasoning.push_str(chunk);
+            emit_trace_chunk(app, stream_id, "reasoning", chunk);
+        }
+
+        if let Some(chunk) = delta.get("content").and_then(Value::as_str) {
+            if !chunk.is_empty() {
+                content.push_str(chunk);
+                emit_content_chunk(app, stream_id, chunk);
+            }
+        }
+
+        if let Some(delta_tool_calls) = delta.get("tool_calls").and_then(Value::as_array) {
+            append_delta_tool_calls(delta_tool_calls, tool_calls);
+        }
+    }
+}
+
+async fn send_chat_completion_stream_request(
+    app: &AppHandle,
+    stream_id: &str,
+    client: &reqwest::Client,
+    endpoint: &str,
+    api_key: &str,
+    provider_name: &str,
+    payload: &Value,
+) -> Result<Value, String> {
+    let mut payload = payload.clone();
+    payload["stream"] = json!(true);
+
+    let response = client
+        .post(endpoint)
+        .bearer_auth(api_key.trim())
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| format!("Request to {} failed: {}", provider_name, error))?;
+
+    let status = response.status();
+
+    if !status.is_success() {
+        let body = response
+            .text()
+            .await
+            .map_err(|error| format!("Failed to read {} response: {}", provider_name, error))?;
+
+        return Err(format!(
+            "{} returned HTTP {}: {}",
+            provider_name, status, body
+        ));
+    }
+
+    let mut content = String::new();
+    let mut reasoning = String::new();
+    let mut tool_calls: Vec<ToolCallAccumulator> = Vec::new();
+    let mut finish_reason: Option<String> = None;
+    let mut buffer = String::new();
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        let bytes =
+            chunk.map_err(|error| format!("Failed to read {} stream: {}", provider_name, error))?;
+        buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+        while let Some((separator_index, separator_len)) = sse_event_separator(&buffer) {
+            let event_block = buffer[..separator_index].to_string();
+            buffer = buffer[(separator_index + separator_len)..].to_string();
+
+            for data in sse_data_lines(&event_block) {
+                if data == "[DONE]" {
+                    break;
+                }
+
+                let parsed: Value = serde_json::from_str(&data).map_err(|error| {
+                    format!("Failed to parse {} stream event: {}", provider_name, error)
+                })?;
+                apply_stream_delta(
+                    app,
+                    stream_id,
+                    &parsed,
+                    &mut content,
+                    &mut reasoning,
+                    &mut tool_calls,
+                    &mut finish_reason,
+                );
+            }
+        }
+    }
+
+    if !buffer.trim().is_empty() {
+        for data in sse_data_lines(&buffer) {
+            if data == "[DONE]" {
+                continue;
+            }
+
+            let parsed: Value = serde_json::from_str(&data).map_err(|error| {
+                format!(
+                    "Failed to parse {} final stream event: {}",
+                    provider_name, error
+                )
+            })?;
+            apply_stream_delta(
+                app,
+                stream_id,
+                &parsed,
+                &mut content,
+                &mut reasoning,
+                &mut tool_calls,
+                &mut finish_reason,
+            );
+        }
+    }
+
+    let mut message = json!({
+        "role": "assistant",
+        "content": content,
+    });
+
+    if !reasoning.trim().is_empty() {
+        message["reasoning_content"] = json!(reasoning);
+    }
+
+    let tool_calls = tool_call_accumulators_to_values(tool_calls);
+
+    if !tool_calls.is_empty() {
+        message["tool_calls"] = Value::Array(tool_calls);
+    }
+
+    Ok(json!({
+        "choices": [
+            {
+                "message": message,
+                "finish_reason": finish_reason,
+            }
+        ]
+    }))
 }
 
 fn execute_code_tool_call(workspace: &Path, tool_call: &Value) -> Value {
@@ -1267,6 +1808,99 @@ mod tests {
                 ]
             })),
             "hello\nworld"
+        );
+    }
+
+    #[test]
+    fn extracts_deepseek_reasoning_content() {
+        assert_eq!(
+            message_reasoning_text(&json!({
+                "reasoning_content": "  line one\nline two  ",
+                "content": "answer"
+            })),
+            "line one\nline two"
+        );
+    }
+
+    #[test]
+    fn appends_reasoning_trace_lines() {
+        let mut trace_steps = Vec::new();
+
+        append_reasoning_trace_steps(
+            &mut trace_steps,
+            &json!({ "reasoning_content": "first\n\nsecond" }),
+        );
+
+        assert_eq!(trace_steps.len(), 2);
+        assert_eq!(trace_steps[0].kind, "reasoning");
+        assert_eq!(trace_steps[0].text, "first");
+        assert_eq!(trace_steps[1].text, "second");
+    }
+
+    #[test]
+    fn describes_codegraph_tool_call_and_result() {
+        let tool_call = json!({
+            "function": {
+                "name": "codegraph_explore",
+                "arguments": "{\"query\":\"ChatGroupPage reasoning\",\"maxFiles\":4}"
+            }
+        });
+        let tool_message = json!({
+            "role": "tool",
+            "content": "CodeGraph explore note:\nFound 8 symbols across 2 files."
+        });
+
+        let call_step = tool_call_trace_step(&tool_call);
+        let result_step = tool_result_trace_step(&tool_call, &tool_message);
+
+        assert_eq!(call_step.kind, "tool");
+        assert!(call_step.text.contains("ChatGroupPage reasoning"));
+        assert!(call_step.text.contains("maxFiles=4"));
+        assert!(result_step.text.contains("via CodeGraph"));
+    }
+
+    #[test]
+    fn finds_sse_event_separators() {
+        assert_eq!(sse_event_separator("data: one\n\nrest"), Some((9, 2)));
+        assert_eq!(sse_event_separator("data: one\r\n\r\nrest"), Some((9, 4)));
+        assert_eq!(sse_event_separator("data: one"), None);
+    }
+
+    #[test]
+    fn accumulates_streamed_tool_call_arguments() {
+        let mut tool_calls = Vec::new();
+
+        append_delta_tool_calls(
+            &[json!({
+                "index": 0,
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "codegraph_",
+                    "arguments": "{\"query\":\"Chat"
+                }
+            })],
+            &mut tool_calls,
+        );
+        append_delta_tool_calls(
+            &[json!({
+                "index": 0,
+                "function": {
+                    "name": "explore",
+                    "arguments": "GroupPage\"}"
+                }
+            })],
+            &mut tool_calls,
+        );
+
+        let values = tool_call_accumulators_to_values(tool_calls);
+
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0]["id"], json!("call_1"));
+        assert_eq!(values[0]["function"]["name"], json!("codegraph_explore"));
+        assert_eq!(
+            values[0]["function"]["arguments"],
+            json!("{\"query\":\"ChatGroupPage\"}")
         );
     }
 

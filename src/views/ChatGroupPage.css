@@ -522,6 +522,12 @@ h2 {
   background: #e8f4ed;
 }
 
+.reaction-pill.agree.complete {
+  border: 1px solid #8bc5a8;
+  color: #25624f;
+  background: #dff3e8;
+}
+
 .reaction-pill.supplement {
   color: #81611d;
   background: #fff4d9;

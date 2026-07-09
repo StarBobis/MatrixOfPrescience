@@ -43,6 +43,7 @@ const emit = defineEmits<{
 }>();
 
 const messagesPanel = ref<HTMLElement | null>(null);
+const approvalPanelOpen = ref(false);
 const { t } = useI18n();
 
 const mentionMatch = computed(() => {
@@ -65,6 +66,29 @@ const speakerQueueStatusType: Record<SpeakerQueueStatus, "info" | "warning" | "s
   waiting: "info",
   speaking: "success",
 };
+
+function hasApplicablePatchShape(patchText: string) {
+  const hasTargetHeader = /^(diff --git|---\s+(?:a\/)?\S+|\+\+\+\s+(?:b\/)?\S+)/m.test(patchText);
+  const hasApplyBody =
+    /^(@@\s|GIT binary patch|new file mode|deleted file mode|old mode|new mode|rename from|rename to|copy from|copy to)/m.test(
+      patchText,
+    );
+
+  return hasTargetHeader && hasApplyBody;
+}
+
+const actionablePatchProposals = computed(() =>
+  props.patchProposals.filter(
+    (proposal) =>
+      proposal.patchText.trim().length > 0 &&
+      proposal.files.length > 0 &&
+      hasApplicablePatchShape(proposal.patchText),
+  ),
+);
+
+const pendingPatchCount = computed(
+  () => actionablePatchProposals.value.filter((proposal) => proposal.status === "pending").length,
+);
 
 async function scrollToBottom() {
   await nextTick();
@@ -145,6 +169,38 @@ function getReasoningLabel(message: ChatMessage) {
   const effort = getMessageReasoningEffort(message);
 
   return t(`members.reasoningEffortOptions.${effort}`);
+}
+
+function allPeersAgreed(message: ChatMessage) {
+  if (message.role !== "assistant") {
+    return false;
+  }
+
+  const author = findMessageMember(message);
+
+  if (!author) {
+    return false;
+  }
+
+  const voters = props.activeMembers.filter((member) => member.id !== author.id);
+
+  if (voters.length === 0) {
+    return false;
+  }
+
+  const agreeMemberIds = new Set(message.agreeMemberIds ?? []);
+  const supplementCount = (message.supplementMemberIds ?? []).length;
+  const disagreeCount = (message.disagreeMemberIds ?? []).length;
+
+  return supplementCount === 0 && disagreeCount === 0 && voters.every((member) => agreeMemberIds.has(member.id));
+}
+
+function getAgreeLabel(message: ChatMessage) {
+  if (allPeersAgreed(message)) {
+    return t("chat.allAgree");
+  }
+
+  return t("chat.agree", { count: (message.agreeMemberIds ?? []).length });
 }
 
 defineExpose({
@@ -232,13 +288,31 @@ defineExpose({
       </div>
     </section>
 
-    <section ref="messagesPanel" class="messages-panel">
+    <section v-if="actionablePatchProposals.length > 0" class="approval-dock">
+      <button
+        class="approval-toggle"
+        type="button"
+        :class="{ open: approvalPanelOpen }"
+        @click="approvalPanelOpen = !approvalPanelOpen"
+      >
+        <span class="approval-toggle-copy">
+          <strong>{{ t("patch.panelTitle") }}</strong>
+          <span>{{ approvalPanelOpen ? t("patch.hidePanel") : t("patch.showPanel") }}</span>
+        </span>
+        <span class="approval-count">
+          {{ t("patch.pendingCount", { count: pendingPatchCount }) }}
+        </span>
+      </button>
+
       <PatchApprovalPanel
-        :patch-proposals="patchProposals"
+        v-if="approvalPanelOpen"
+        :patch-proposals="actionablePatchProposals"
         @update-patch-status="(proposalId, status) => emit('updatePatchStatus', proposalId, status)"
         @remove-patch-proposal="(proposalId) => emit('removePatchProposal', proposalId)"
       />
+    </section>
 
+    <section ref="messagesPanel" class="messages-panel">
       <article
         v-for="message in messages"
         :key="message.id"
@@ -294,8 +368,8 @@ defineExpose({
         </details>
 
         <div class="message-reactions">
-          <span class="reaction-pill agree">
-            {{ t("chat.agree", { count: (message.agreeMemberIds ?? []).length }) }}
+          <span class="reaction-pill agree" :class="{ complete: allPeersAgreed(message) }">
+            {{ getAgreeLabel(message) }}
           </span>
           <span class="reaction-pill supplement">
             {{ t("chat.supplement", { count: (message.supplementMemberIds ?? []).length }) }}
@@ -377,6 +451,76 @@ defineExpose({
   gap: 4px;
   margin: 8px 0 0;
   padding-left: 18px;
+}
+
+.thought-steps li {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.approval-dock {
+  display: grid;
+  gap: 10px;
+  padding: 10px 18px;
+  border-bottom: 1px solid #e1e7e2;
+  background: #fbfcfb;
+}
+
+.approval-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: min(920px, 100%);
+  min-height: 52px;
+  border: 1px solid #dbe6de;
+  border-radius: 8px;
+  padding: 9px 12px;
+  color: #26322b;
+  background: #ffffff;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.18s, background 0.18s, box-shadow 0.18s;
+}
+
+.approval-toggle:hover,
+.approval-toggle.open {
+  border-color: #c8d8ce;
+  background: #f8fbf9;
+  box-shadow: 0 6px 18px rgba(31, 43, 36, 0.06);
+}
+
+.approval-toggle-copy {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.approval-toggle-copy strong {
+  color: #1d2a22;
+  font-size: 14px;
+}
+
+.approval-toggle-copy span {
+  overflow: hidden;
+  color: #7a867e;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approval-count {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  min-height: 28px;
+  border: 1px solid #f1d7a6;
+  border-radius: 8px;
+  padding: 3px 10px;
+  color: #b06f09;
+  background: #fff8ea;
+  font-size: 13px;
+  font-weight: 800;
 }
 
 .speaker-queue {
