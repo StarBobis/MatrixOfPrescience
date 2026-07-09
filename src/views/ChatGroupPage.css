@@ -411,6 +411,11 @@ h2 {
   background: #fdecec;
 }
 
+.status-pill.interrupted {
+  color: #9a650c;
+  background: #fff1d7;
+}
+
 .message-body {
   margin-top: 12px;
   overflow-wrap: anywhere;

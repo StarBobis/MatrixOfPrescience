@@ -37,7 +37,7 @@ import { parseMentionedMembers } from "../utils/mentions";
 import { evaluatePatchSafety } from "../utils/patchSafety";
 
 type ChatRole = "user" | "assistant";
-type MessageStatus = "done" | "thinking" | "error";
+type MessageStatus = "done" | "thinking" | "error" | "interrupted";
 
 interface ApiChatMessage {
   role: ChatRole;
@@ -143,6 +143,9 @@ const MAX_MESSAGE_THOUGHT_STEPS = 80;
 const MAX_TRACE_TEXT_CHARS = 1200;
 const MAX_TRACE_DETAIL_CHARS = 6000;
 const MAX_STREAMING_TRACE_CHUNK_CHARS = 8000;
+const MAX_CONTEXT_EXECUTION_ITEMS = 24;
+const MAX_CONTEXT_EXECUTION_TEXT_CHARS = 700;
+const MAX_CONTEXT_EXECUTION_DETAIL_CHARS = 1400;
 const TRACE_TRUNCATED_MARKER = "\n[trace truncated]";
 
 const { t } = useI18n();
@@ -154,6 +157,7 @@ const statusText = computed<Record<MessageStatus, string>>(() => ({
   done: t("chat.status.done"),
   thinking: t("chat.status.thinking"),
   error: t("chat.status.error"),
+  interrupted: t("chat.status.interrupted"),
 }));
 
 const composer = ref("");
@@ -504,6 +508,79 @@ function removeMember(memberId: string) {
   settingsStore.removeMember(memberId);
 }
 
+function getOwnerDisplayName() {
+  return ownerProfile.value.name?.trim() || t("common.ownerName");
+}
+
+function limitContextText(value: string, maxLength: number) {
+  const normalized = value.trim();
+
+  if (normalized.length <= maxLength) {
+    return normalized;
+  }
+
+  return `${normalized.slice(0, maxLength)}\n[context truncated]`;
+}
+
+function getMessageExecutionContextItems(message: ChatMessage): ChatMessageExecutionItem[] {
+  if ((message.executionItems ?? []).length > 0) {
+    return message.executionItems ?? [];
+  }
+
+  return [
+    ...(message.activityItems ?? []).map((item, index) => ({
+      ...item,
+      kind: item.kind,
+      createdAt: index,
+    })),
+    ...(message.thoughtSteps ?? []).map((step, index) => ({
+      id: `${message.id}-context-reasoning-${index}`,
+      kind: "reasoning" as const,
+      status: "done" as const,
+      text: step,
+      createdAt: (message.activityItems?.length ?? 0) + index,
+    })),
+  ];
+}
+
+function formatExecutionHistoryForModel(message: ChatMessage) {
+  const executionItems = getMessageExecutionContextItems(message)
+    .filter((item) => item.text.trim().length > 0 || item.detail?.trim())
+    .slice(-MAX_CONTEXT_EXECUTION_ITEMS);
+
+  if (executionItems.length === 0) {
+    return "";
+  }
+
+  const lines = executionItems.map((item) => {
+    const detail = item.detail?.trim()
+      ? ` detail=${JSON.stringify(limitContextText(item.detail, MAX_CONTEXT_EXECUTION_DETAIL_CHARS))}`
+      : "";
+    return `- [${item.kind}/${item.status}] ${limitContextText(item.text, MAX_CONTEXT_EXECUTION_TEXT_CHARS)}${detail}`;
+  });
+
+  return [
+    "Execution history visible to future turns:",
+    ...lines,
+  ].join("\n");
+}
+
+function formatMessageForModel(message: ChatMessage) {
+  const speaker = message.role === "assistant" ? message.modelName : getOwnerDisplayName();
+  const content = message.content.trim() || "(empty message)";
+  const sections = [`${speaker} [status=${message.status}]: ${content}`];
+
+  if (message.role === "assistant") {
+    const executionHistory = formatExecutionHistoryForModel(message);
+
+    if (executionHistory) {
+      sections.push(executionHistory);
+    }
+  }
+
+  return sections.join("\n\n");
+}
+
 function buildConversation(excludeMessageIds: string[] = []): ApiChatMessage[] {
   const excludedIds = new Set(excludeMessageIds);
 
@@ -531,11 +608,92 @@ function buildConversation(excludeMessageIds: string[] = []): ApiChatMessage[] {
   return cacheFriendlyMessages
     .map<ApiChatMessage>((message) => ({
       role: message.role,
-      content:
-        message.role === "assistant"
-          ? `${message.modelName}: ${message.content}`
-          : message.content,
+      content: formatMessageForModel(message),
     }));
+}
+
+function inferMarkdownCodeFenceLanguage(code: string) {
+  const trimmed = code.trim();
+
+  if (/^<template[\s>]|<script[\s>]/i.test(trimmed)) {
+    return "vue";
+  }
+
+  if (/^\s*[{[]/.test(trimmed) && /[}\]]\s*$/.test(trimmed)) {
+    return "json";
+  }
+
+  if (/#include\s*<|std::|using\s+namespace\s+std|int\s+main\s*\(|\bcout\s*<</.test(trimmed)) {
+    return "cpp";
+  }
+
+  if (/\bfn\s+\w+\s*\(|\blet\s+mut\b|\bimpl\s+\w+|println!\s*\(/.test(trimmed)) {
+    return "rust";
+  }
+
+  if (/\bdef\s+\w+\s*\(|\bfrom\s+\w+\s+import\b|\bprint\s*\(/.test(trimmed)) {
+    return "python";
+  }
+
+  if (/\binterface\s+\w+|\btype\s+\w+\s*=|:\s*(string|number|boolean|unknown)\b/.test(trimmed)) {
+    return "ts";
+  }
+
+  if (/\b(import|export)\s+|const\s+\w+\s*=|let\s+\w+\s*=|function\s+\w+\s*\(/.test(trimmed)) {
+    return "ts";
+  }
+
+  if (/^\s*[.#]?[A-Za-z][\w-]*\s*\{[\s\S]*:\s*[^;]+;/.test(trimmed)) {
+    return "css";
+  }
+
+  if (/^\s*<[^>]+>[\s\S]*<\/[^>]+>\s*$/.test(trimmed)) {
+    return "html";
+  }
+
+  if (/^\s*(SELECT|INSERT|UPDATE|DELETE|CREATE|ALTER)\b/i.test(trimmed)) {
+    return "sql";
+  }
+
+  if (/^\s*(git|npm|pnpm|bun|cargo|python|node|rg)\s+/.test(trimmed)) {
+    return "bash";
+  }
+
+  return "text";
+}
+
+function annotateMarkdownCodeFences(content: string) {
+  return content.replace(
+    /(^|\n)([ \t]*)```\s*\n([\s\S]*?)\n[ \t]*```/g,
+    (match, prefix: string, indent: string, code: string) => {
+      if (!code.trim()) {
+        return match;
+      }
+
+      return `${prefix}${indent}\`\`\`${inferMarkdownCodeFenceLanguage(code)}\n${code}\n${indent}\`\`\``;
+    },
+  );
+}
+
+function ensureAddressedReply(content: string, targetName: string) {
+  const target = targetName.trim();
+  const normalizedContent = annotateMarkdownCodeFences(content).trim();
+
+  if (!target || normalizedContent.startsWith(`@${target}`)) {
+    return normalizedContent;
+  }
+
+  return `@${target}\n\n${normalizedContent}`;
+}
+
+function buildAddressedResponseRule(baseRule: string, targetName: string) {
+  const rules = [
+    baseRule,
+    targetName.trim() ? t("chatRuntime.addressReplyRule", { name: targetName.trim() }) : "",
+    t("chatRuntime.markdownCodeFenceRule"),
+  ];
+
+  return rules.filter(Boolean).join("\n");
 }
 
 function shouldInspectWorkspace(extraRule: string) {
@@ -1226,10 +1384,10 @@ function stopGeneration() {
     const message = activeMessages.value.find((item) => item.id === messageId);
     releasePendingMessage(messageId, message?.startedAt);
     settingsStore.updateMessage(messageId, {
-      status: "error",
+      status: "interrupted",
       content: t("chatRuntime.interruptedContent"),
     });
-    addActivityItem(messageId, "status", t("chatRuntime.interruptedStep"), "error");
+    addActivityItem(messageId, "status", t("chatRuntime.interruptedStep"), "interrupted");
   }
 
   speakerQueue.value = [];
@@ -1398,6 +1556,7 @@ async function askMember(
   extraRule = "",
   runId: string,
   pendingMessage?: PendingMemberMessage,
+  replyTargetName = getOwnerDisplayName(),
 ): Promise<MemberAnswer | null> {
   if (isRunInterrupted(runId)) {
     return null;
@@ -1407,9 +1566,10 @@ async function askMember(
   const pendingId = pendingMessage?.id ?? crypto.randomUUID();
   const startedAt = pendingMessage?.startedAt ?? Date.now();
   const conversation = buildConversation(pendingMessage ? [pendingId] : []);
-  const responseRule =
-    extraRule ||
-    t("chatRuntime.responseRule");
+  const responseRule = buildAddressedResponseRule(
+    extraRule || t("chatRuntime.responseRule"),
+    replyTargetName,
+  );
   const systemPrompt = buildSystemPrompt(member, activeGroup.value, responseRule);
   const contextUsage = buildContextUsageSnapshot(member, conversation, systemPrompt);
 
@@ -1484,7 +1644,7 @@ async function askMember(
 
     settingsStore.updateMessage(pendingId, {
       status: "done",
-      content: response.content,
+      content: ensureAddressedReply(response.content, replyTargetName),
     });
     applyCompletionUsage(pendingId, response.usage);
     releasePendingMessage(pendingId, startedAt);
@@ -1496,10 +1656,20 @@ async function askMember(
     return {
       messageId: pendingId,
       member,
-      content: response.content,
+      content: ensureAddressedReply(response.content, replyTargetName),
     };
   } catch (error) {
     releasePendingMessage(pendingId, startedAt);
+
+    if (isRunInterrupted(runId)) {
+      settingsStore.updateMessage(pendingId, {
+        status: "interrupted",
+        content: t("chatRuntime.interruptedContent"),
+      });
+      addActivityItem(pendingId, "status", t("chatRuntime.interruptedStep"), "interrupted");
+      return null;
+    }
+
     settingsStore.updateMessage(pendingId, {
       status: "error",
       content: t("chatRuntime.callFailedContent", { error: String(error) }),
@@ -1611,6 +1781,11 @@ async function resolveConsensus(initialAnswer: MemberAnswer | null, runId: strin
         break;
       }
 
+      if (!currentAnswer) {
+        break;
+      }
+
+      const replyTargetName = currentAnswer.member.name;
       currentAnswer = await askMember(
         member,
         [
@@ -1618,6 +1793,8 @@ async function resolveConsensus(initialAnswer: MemberAnswer | null, runId: strin
           t("chatRuntime.disagreementRule2"),
         ].join("\n"),
         runId,
+        undefined,
+        replyTargetName,
       );
     }
   }
@@ -1658,6 +1835,7 @@ async function sendMessage() {
   activeRunId.value = runId;
   pendingMessageIds.value = [];
   const userContextUsage = buildUserContextUsageSnapshot(userText);
+  const ownerName = getOwnerDisplayName();
 
   appendMessage({
     role: "user",
@@ -1673,11 +1851,12 @@ async function sendMessage() {
   const members = [...orderedActiveMembers.value];
   setSpeakerQueue(members, "queued");
   const mentionedMembers = parseMentionedMembers(userText, members);
-  const waitingMembers: AgentModel[] = [];
 
   try {
     if (mentionedMembers.length > 0) {
       setSpeakerQueue(mentionedMembers, "queued");
+      let latestAnswer: MemberAnswer | null = null;
+
       for (const member of mentionedMembers) {
         if (isRunInterrupted(runId)) {
           return;
@@ -1687,8 +1866,15 @@ async function sendMessage() {
           member,
           t("chatRuntime.mentionedRule"),
           runId,
+          undefined,
+          ownerName,
         );
+        latestAnswer = answer ?? latestAnswer;
         await resolveConsensus(answer, runId);
+      }
+
+      if (!latestAnswer) {
+        return;
       }
 
       const observerMembers = prioritizeMembers(
@@ -1709,7 +1895,9 @@ async function sendMessage() {
             t("chatRuntime.observerRule"),
             runId,
             decision.pendingMessage,
+            latestAnswer?.member.name ?? ownerName,
           );
+          latestAnswer = answer ?? latestAnswer;
           await resolveConsensus(answer, runId);
         }
       }
@@ -1717,23 +1905,30 @@ async function sendMessage() {
       return;
     }
 
-    for (const member of members) {
-      if (isRunInterrupted(runId)) {
-        return;
-      }
+    const primaryMember = members[0];
 
-      const decision = await decideMemberResponse(member, "first", runId);
-
-      if (decision.decision === "wait") {
-        waitingMembers.push(member);
-        continue;
-      }
-
-      const answer = await askMember(member, "", runId, decision.pendingMessage);
-      await resolveConsensus(answer, runId);
+    if (!primaryMember) {
+      return;
     }
 
-    for (const member of waitingMembers) {
+    setSpeakerQueue([primaryMember], "queued");
+    let latestAnswer = await askMember(
+      primaryMember,
+      t("chatRuntime.defaultResponderRule"),
+      runId,
+      undefined,
+      ownerName,
+    );
+    await resolveConsensus(latestAnswer, runId);
+
+    if (!latestAnswer) {
+      return;
+    }
+
+    const observerMembers = prioritizeMembers(members.filter((member) => member.id !== primaryMember.id));
+    setSpeakerQueue(observerMembers, "waiting");
+
+    for (const member of observerMembers) {
       if (isRunInterrupted(runId)) {
         return;
       }
@@ -1741,7 +1936,14 @@ async function sendMessage() {
       const decision = await decideMemberResponse(member, "afterPeers", runId);
 
       if (decision.decision === "speak") {
-        const answer = await askMember(member, "", runId, decision.pendingMessage);
+        const answer = await askMember(
+          member,
+          t("chatRuntime.observerRule"),
+          runId,
+          decision.pendingMessage,
+          latestAnswer?.member.name ?? ownerName,
+        );
+        latestAnswer = answer ?? latestAnswer;
         await resolveConsensus(answer, runId);
       }
     }

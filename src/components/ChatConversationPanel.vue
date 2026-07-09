@@ -1228,7 +1228,7 @@ defineExpose({
 
 .message-row.thinking {
   position: relative;
-  overflow: hidden;
+  overflow: visible;
   border-color: transparent;
 }
 
@@ -1239,7 +1239,7 @@ defineExpose({
 
 .message-row.thinking::before {
   position: absolute;
-  z-index: 0;
+  z-index: 1;
   inset: 0;
   border-radius: 8px;
   padding: 1px;
@@ -1255,6 +1255,19 @@ defineExpose({
   mask-composite: exclude;
 }
 
+.message-row.thinking::after {
+  position: absolute;
+  z-index: 0;
+  inset: -7px;
+  border-radius: 14px;
+  animation: thinking-glow-breathe 2.8s ease-in-out infinite;
+  background: linear-gradient(120deg, rgba(145, 201, 176, 0.32), rgba(240, 211, 134, 0.28), rgba(183, 223, 199, 0.32));
+  content: "";
+  filter: blur(10px);
+  opacity: 0.45;
+  pointer-events: none;
+}
+
 @keyframes thinking-border-flow {
   0% {
     background-position: 0% 50%;
@@ -1262,6 +1275,19 @@ defineExpose({
 
   100% {
     background-position: 320% 50%;
+  }
+}
+
+@keyframes thinking-glow-breathe {
+  0%,
+  100% {
+    opacity: 0.28;
+    transform: scale(0.992);
+  }
+
+  50% {
+    opacity: 0.72;
+    transform: scale(1.01);
   }
 }
 
@@ -1414,6 +1440,12 @@ defineExpose({
   background: #fff0f0;
 }
 
+.activity-chip.interrupted {
+  border-color: #efd7ad;
+  color: #9a650c;
+  background: #fff8ea;
+}
+
 .activity-detail {
   max-height: 240px;
   overflow: auto;
@@ -1533,6 +1565,12 @@ defineExpose({
   border-color: #f0c7c7;
   color: #a33d3d;
   background: #fff0f0;
+}
+
+.execution-line.interrupted .execution-icon {
+  border-color: #efd7ad;
+  color: #9a650c;
+  background: #fff8ea;
 }
 
 .execution-kind {

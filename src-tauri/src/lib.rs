@@ -6,8 +6,8 @@ use std::{
     env, fs,
     io::Write,
     path::{Component, Path, PathBuf},
-    process::{Command, Output},
-    time::{SystemTime, UNIX_EPOCH},
+    process::{Command, Output, Stdio},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -133,7 +133,7 @@ struct AvatarCacheResponse {
 }
 
 const MAX_CHAT_COMPLETION_TURNS: usize = 8;
-const MAX_CODE_TOOL_ROUNDS: usize = 5;
+const MAX_CODE_TOOL_ROUNDS: usize = 8;
 const MAX_CHAT_TRACE_STEPS: usize = 160;
 const TRACE_STEP_TEXT_LIMIT: usize = 280;
 const TOOL_TRACE_DETAIL_LIMIT: usize = 6000;
@@ -976,6 +976,152 @@ fn code_tools_schema(strict: bool) -> Value {
                 }
             }),
             strict
+        ),
+        finalize_tool_function(
+            json!({
+                "name": "write_file",
+                "description": "Create, overwrite, or append to a UTF-8 text file inside the workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file": {
+                            "type": "string",
+                            "description": "Workspace-relative file path."
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Text content to write."
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["overwrite", "create", "append"],
+                            "description": "Write mode. Defaults to overwrite."
+                        },
+                        "createParents": {
+                            "type": "boolean",
+                            "description": "Whether to create missing parent directories. Defaults to true."
+                        }
+                    },
+                    "required": ["file", "content"]
+                }
+            }),
+            strict
+        ),
+        finalize_tool_function(
+            json!({
+                "name": "create_directory",
+                "description": "Create a directory inside the workspace, including missing parents.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Workspace-relative directory path."
+                        }
+                    },
+                    "required": ["path"]
+                }
+            }),
+            strict
+        ),
+        finalize_tool_function(
+            json!({
+                "name": "delete_path",
+                "description": "Delete a workspace-relative file or, with recursive=true, a directory. Refuses workspace root and sensitive/generated paths.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Workspace-relative path to delete."
+                        },
+                        "recursive": {
+                            "type": "boolean",
+                            "description": "Required for deleting directories. Defaults to false."
+                        }
+                    },
+                    "required": ["path"]
+                }
+            }),
+            strict
+        ),
+        finalize_tool_function(
+            json!({
+                "name": "move_path",
+                "description": "Move or rename a file or directory inside the workspace.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "from": {
+                            "type": "string",
+                            "description": "Existing workspace-relative source path."
+                        },
+                        "to": {
+                            "type": "string",
+                            "description": "Workspace-relative destination path."
+                        },
+                        "createParents": {
+                            "type": "boolean",
+                            "description": "Whether to create missing destination parent directories. Defaults to true."
+                        }
+                    },
+                    "required": ["from", "to"]
+                }
+            }),
+            strict
+        ),
+        finalize_tool_function(
+            json!({
+                "name": "apply_patch",
+                "description": "Apply a unified diff patch inside the workspace. Use checkOnly=true to validate without changing files.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "patchText": {
+                            "type": "string",
+                            "description": "Unified diff text accepted by git apply."
+                        },
+                        "checkOnly": {
+                            "type": "boolean",
+                            "description": "Validate only without applying. Defaults to false."
+                        }
+                    },
+                    "required": ["patchText"]
+                }
+            }),
+            strict
+        ),
+        finalize_tool_function(
+            json!({
+                "name": "run_command",
+                "description": "Run a non-interactive command in the workspace, such as tests, formatters, or git diff. Prefer command plus args instead of shell syntax.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "Executable name, for example npm, cargo, git, rg, node, or python."
+                        },
+                        "args": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Command arguments."
+                        },
+                        "cwd": {
+                            "type": "string",
+                            "description": "Optional workspace-relative working directory."
+                        },
+                        "timeoutMs": {
+                            "type": "integer",
+                            "description": "Timeout in milliseconds. Defaults to 30000 and is capped at 120000.",
+                            "minimum": 1000,
+                            "maximum": 120000
+                        }
+                    },
+                    "required": ["command"]
+                }
+            }),
+            strict
         )
     ])
 }
@@ -1369,6 +1515,12 @@ fn execute_code_tool_call(workspace: &Path, tool_call: &Value) -> Value {
         "list_files" => list_workspace_files_tool(workspace, &arguments),
         "search_files" => search_workspace_files_tool(workspace, &arguments),
         "glob_files" => glob_workspace_files_tool(workspace, &arguments),
+        "write_file" => write_workspace_file_tool(workspace, &arguments),
+        "create_directory" => create_workspace_directory_tool(workspace, &arguments),
+        "delete_path" => delete_workspace_path_tool(workspace, &arguments),
+        "move_path" => move_workspace_path_tool(workspace, &arguments),
+        "apply_patch" => apply_patch_tool(workspace, &arguments),
+        "run_command" => run_workspace_command_tool(workspace, &arguments),
         _ => Err(format!("Unknown tool: {}", name)),
     };
 
@@ -1423,6 +1575,20 @@ fn tool_arg_bool(arguments: &Value, key: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+fn tool_arg_string_array(arguments: &Value, key: &str) -> Vec<String> {
+    arguments
+        .get(key)
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn tool_arg_usize(arguments: &Value, key: &str, default: usize, min: usize, max: usize) -> usize {
     arguments
         .get(key)
@@ -1462,6 +1628,30 @@ fn resolve_workspace_relative_path(workspace: &Path, raw_path: &str) -> Result<P
     }
 
     Ok(target)
+}
+
+fn resolve_workspace_target_path(workspace: &Path, raw_path: &str) -> Result<PathBuf, String> {
+    let normalized = validate_relative_file(raw_path)?;
+    Ok(workspace.join(normalized))
+}
+
+fn ensure_target_stays_in_workspace(workspace: &Path, target: &Path) -> Result<(), String> {
+    let existing = if target.exists() {
+        target.to_path_buf()
+    } else {
+        target
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or_else(|| "Target has no parent directory.".to_string())?
+    };
+    let canonical = fs::canonicalize(&existing)
+        .map_err(|error| format!("Failed to verify {}: {}", existing.display(), error))?;
+
+    if !canonical.starts_with(workspace) {
+        return Err(format!("Path escapes workspace: {}", target.display()));
+    }
+
+    Ok(())
 }
 
 fn workspace_relative_display(workspace: &Path, path: &Path) -> String {
@@ -1718,6 +1908,283 @@ fn glob_workspace_files_tool(workspace: &Path, arguments: &Value) -> Result<Stri
         max_results,
         files.join("\n")
     ))
+}
+
+fn ensure_parent_directory(path: &Path, create_parents: bool) -> Result<(), String> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| "Target path has no parent directory.".to_string())?;
+
+    if parent.exists() {
+        return Ok(());
+    }
+
+    if !create_parents {
+        return Err(format!(
+            "Parent directory does not exist: {}",
+            parent.display()
+        ));
+    }
+
+    fs::create_dir_all(parent)
+        .map_err(|error| format!("Failed to create {}: {}", parent.display(), error))
+}
+
+fn write_workspace_file_tool(workspace: &Path, arguments: &Value) -> Result<String, String> {
+    let file = tool_arg_string(arguments, "file");
+    let content = arguments
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    let mode = tool_arg_string(arguments, "mode");
+    let create_parents = tool_arg_bool(arguments, "createParents", true);
+
+    if file.is_empty() {
+        return Err("write_file requires a file path.".to_string());
+    }
+
+    if content.len() > 2_000_000 {
+        return Err("write_file content is too large.".to_string());
+    }
+
+    let path = resolve_workspace_target_path(workspace, file)?;
+    ensure_parent_directory(&path, create_parents)?;
+    ensure_target_stays_in_workspace(workspace, &path)?;
+
+    match mode {
+        "" | "overwrite" => {
+            fs::write(&path, content)
+                .map_err(|error| format!("Failed to write {}: {}", file, error))?;
+        }
+        "create" => {
+            if path.exists() {
+                return Err(format!("File already exists: {}", file));
+            }
+            fs::write(&path, content)
+                .map_err(|error| format!("Failed to create {}: {}", file, error))?;
+        }
+        "append" => {
+            let mut file_handle = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|error| format!("Failed to open {}: {}", file, error))?;
+            file_handle
+                .write_all(content.as_bytes())
+                .map_err(|error| format!("Failed to append {}: {}", file, error))?;
+        }
+        other => return Err(format!("Unsupported write_file mode: {}", other)),
+    }
+
+    Ok(format!(
+        "{} {} ({} bytes).",
+        match mode {
+            "append" => "Appended",
+            "create" => "Created",
+            _ => "Wrote",
+        },
+        workspace_relative_display(workspace, &path),
+        content.len()
+    ))
+}
+
+fn create_workspace_directory_tool(workspace: &Path, arguments: &Value) -> Result<String, String> {
+    let path_arg = tool_arg_string(arguments, "path");
+
+    if path_arg.is_empty() {
+        return Err("create_directory requires a path.".to_string());
+    }
+
+    let path = resolve_workspace_target_path(workspace, path_arg)?;
+    fs::create_dir_all(&path)
+        .map_err(|error| format!("Failed to create {}: {}", path_arg, error))?;
+    ensure_target_stays_in_workspace(workspace, &path)?;
+
+    Ok(format!(
+        "Created directory {}.",
+        workspace_relative_display(workspace, &path)
+    ))
+}
+
+fn delete_workspace_path_tool(workspace: &Path, arguments: &Value) -> Result<String, String> {
+    let path_arg = tool_arg_string(arguments, "path");
+    let recursive = tool_arg_bool(arguments, "recursive", false);
+
+    if path_arg.is_empty() {
+        return Err("delete_path requires a path.".to_string());
+    }
+
+    let validated_path = validate_relative_file(path_arg)?;
+    let path = resolve_workspace_relative_path(workspace, &validated_path)?;
+
+    if path == workspace {
+        return Err("delete_path refuses to delete the workspace root.".to_string());
+    }
+
+    if path.is_dir() {
+        if !recursive {
+            return Err("delete_path requires recursive=true for directories.".to_string());
+        }
+        fs::remove_dir_all(&path)
+            .map_err(|error| format!("Failed to delete directory {}: {}", path_arg, error))?;
+    } else {
+        fs::remove_file(&path)
+            .map_err(|error| format!("Failed to delete file {}: {}", path_arg, error))?;
+    }
+
+    Ok(format!("Deleted {}.", path_arg))
+}
+
+fn move_workspace_path_tool(workspace: &Path, arguments: &Value) -> Result<String, String> {
+    let from = tool_arg_string(arguments, "from");
+    let to = tool_arg_string(arguments, "to");
+    let create_parents = tool_arg_bool(arguments, "createParents", true);
+
+    if from.is_empty() || to.is_empty() {
+        return Err("move_path requires both from and to.".to_string());
+    }
+
+    let validated_source = validate_relative_file(from)?;
+    let source = resolve_workspace_relative_path(workspace, &validated_source)?;
+    let target = resolve_workspace_target_path(workspace, to)?;
+
+    if source == workspace {
+        return Err("move_path refuses to move the workspace root.".to_string());
+    }
+
+    ensure_parent_directory(&target, create_parents)?;
+    ensure_target_stays_in_workspace(workspace, &target)?;
+    fs::rename(&source, &target)
+        .map_err(|error| format!("Failed to move {} to {}: {}", from, to, error))?;
+
+    Ok(format!("Moved {} to {}.", from, to))
+}
+
+fn apply_patch_tool(workspace: &Path, arguments: &Value) -> Result<String, String> {
+    let patch_text = arguments
+        .get("patchText")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let check_only = tool_arg_bool(arguments, "checkOnly", false);
+
+    if patch_text.is_empty() {
+        return Err("apply_patch requires patchText.".to_string());
+    }
+
+    let request = ApplyPatchRequest {
+        workspace_path: workspace.to_string_lossy().to_string(),
+        patch_text: patch_text.to_string(),
+        files: Vec::new(),
+    };
+    let applied_files = collect_patch_files(&request)?;
+    let patch_file = write_temp_patch(patch_text)?;
+    let check_result = run_git_apply(workspace, &patch_file, true);
+
+    if let Err(error) = check_result {
+        let _ = fs::remove_file(&patch_file);
+        return Err(error);
+    }
+
+    if check_only {
+        let _ = fs::remove_file(&patch_file);
+        return Ok(format!(
+            "Patch check passed for files:\n{}",
+            applied_files.join("\n")
+        ));
+    }
+
+    let (stdout, stderr) = run_git_apply(workspace, &patch_file, false)?;
+    let _ = fs::remove_file(&patch_file);
+    let output = [stdout.trim(), stderr.trim()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    Ok(format!(
+        "Patch applied to files:\n{}\n{}",
+        applied_files.join("\n"),
+        if output.is_empty() {
+            "git apply produced no output.".to_string()
+        } else {
+            truncate_text(output, 8_000)
+        }
+    ))
+}
+
+fn run_workspace_command_tool(workspace: &Path, arguments: &Value) -> Result<String, String> {
+    let command = tool_arg_string(arguments, "command");
+    let args = tool_arg_string_array(arguments, "args");
+    let timeout_ms = tool_arg_usize(arguments, "timeoutMs", 30_000, 1_000, 120_000) as u64;
+    let cwd_arg = tool_arg_string(arguments, "cwd");
+    let cwd = if cwd_arg.is_empty() {
+        workspace.to_path_buf()
+    } else {
+        resolve_workspace_relative_path(workspace, cwd_arg)?
+    };
+
+    if command.is_empty() {
+        return Err("run_command requires a command.".to_string());
+    }
+
+    if command.contains('/') || command.contains('\\') {
+        return Err("run_command command must be an executable name, not a path.".to_string());
+    }
+
+    if !cwd.is_dir() {
+        return Err("run_command cwd must be a directory.".to_string());
+    }
+
+    let mut child = Command::new(command)
+        .current_dir(&cwd)
+        .args(&args)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|error| format!("Failed to start command: {}", error))?;
+
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+    loop {
+        if child
+            .try_wait()
+            .map_err(|error| format!("Failed to poll command: {}", error))?
+            .is_some()
+        {
+            break;
+        }
+
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("Command timed out after {} ms.", timeout_ms));
+        }
+
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    let output = child
+        .wait_with_output()
+        .map_err(|error| format!("Failed to read command output: {}", error))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let code = output
+        .status
+        .code()
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "terminated".to_string());
+    let combined = format!(
+        "exit_code={}\nstdout:\n{}\nstderr:\n{}",
+        code,
+        stdout.trim(),
+        stderr.trim()
+    );
+
+    if !output.status.success() {
+        return Err(truncate_text(combined, 12_000));
+    }
+
+    Ok(truncate_text(combined, 12_000))
 }
 
 fn validate_workspace(workspace_path: &str) -> Result<PathBuf, String> {
@@ -2382,6 +2849,12 @@ mod tests {
         assert!(names.contains(&"list_files"));
         assert!(names.contains(&"search_files"));
         assert!(names.contains(&"glob_files"));
+        assert!(names.contains(&"write_file"));
+        assert!(names.contains(&"create_directory"));
+        assert!(names.contains(&"delete_path"));
+        assert!(names.contains(&"move_path"));
+        assert!(names.contains(&"apply_patch"));
+        assert!(names.contains(&"run_command"));
     }
 
     #[test]
@@ -2404,6 +2877,57 @@ mod tests {
 
         assert!(content.contains("2\ttwo"));
         assert!(resolve_workspace_relative_path(&workspace, "../outside").is_err());
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn file_write_move_and_delete_tools_stay_in_workspace() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("matrix-write-tool-test-{}", stamp));
+        fs::create_dir_all(&workspace).unwrap();
+        let workspace = fs::canonicalize(&workspace).unwrap();
+
+        write_workspace_file_tool(
+            &workspace,
+            &json!({
+                "file": "notes/one.txt",
+                "content": "hello",
+                "mode": "create"
+            }),
+        )
+        .unwrap();
+        assert!(workspace.join("notes/one.txt").is_file());
+
+        move_workspace_path_tool(
+            &workspace,
+            &json!({
+                "from": "notes/one.txt",
+                "to": "notes/two.txt"
+            }),
+        )
+        .unwrap();
+        assert!(workspace.join("notes/two.txt").is_file());
+
+        delete_workspace_path_tool(
+            &workspace,
+            &json!({
+                "path": "notes/two.txt"
+            }),
+        )
+        .unwrap();
+        assert!(!workspace.join("notes/two.txt").exists());
+        assert!(write_workspace_file_tool(
+            &workspace,
+            &json!({
+                "file": "../outside.txt",
+                "content": "no"
+            }),
+        )
+        .is_err());
 
         let _ = fs::remove_dir_all(&workspace);
     }

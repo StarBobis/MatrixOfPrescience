@@ -139,6 +139,7 @@
     "status": {
       "done": "Done",
       "error": "Error",
+      "interrupted": "Interrupted",
       "thinking": "Generating"
     },
     "stop": "Stop",
@@ -269,9 +270,9 @@
   },
   "agentPrompt": {
     "collaborationRule": "Group collaboration rules: you can see messages from the user and other members. Do not speak in isolation. When you need to respond to, supplement, challenge, or correct another member's view, say so explicitly. If your specialty should not speak yet, you may wait for other members first.",
-    "codeContextGuide": "You can discuss code based on the following tool output. Prefer CodeGraph for structure and call paths, then use read_file, search_files, list_files, or glob_files when exact lines or local details are needed. If the result came from LocalCommands, mention that it is a fallback read. CodeGraph's `Found N symbols across M files` line only describes the relevant source returned for that query; it is not the total indexed file count.",
+    "codeContextGuide": "You can discuss code based on the following tool output. Prefer CodeGraph for structure and call paths, then use read_file, search_files, list_files, or glob_files when exact lines or local details are needed. For edits, use write_file, apply_patch, create_directory, move_path, delete_path, or run_command only inside the workspace and only when the current safety mode allows it. If the result came from LocalCommands, mention that it is a fallback read. CodeGraph's `Found N symbols across M files` line only describes the relevant source returned for that query; it is not the total indexed file count.",
     "codeContextTitle": "Code reading tool result:",
-    "codeToolGuide": "You can use read-only code tools in the current workspace: codegraph_explore for structure/call paths, read_file for exact line ranges, search_files for text search, list_files for directory discovery, and glob_files for filename patterns. Start with CodeGraph for architecture questions, then use the file/search tools whenever details are missing. CodeGraph's `Found N symbols across M files` line only describes the relevant source returned for that query; it is not the total indexed file count.",
+    "codeToolGuide": "You can use workspace code tools: codegraph_explore for structure/call paths, read_file for exact line ranges, search_files for text search, list_files for directory discovery, glob_files for filename patterns, write_file for creating or replacing files, apply_patch for unified diffs, create_directory, move_path, delete_path, and run_command. Start with CodeGraph for architecture questions, then use file/search tools whenever details are missing. Use write/delete/move/command tools only within the workspace and only when the configured workflow and safety policy allow it. CodeGraph's `Found N symbols across M files` line only describes the relevant source returned for that query; it is not the total indexed file count.",
     "coreRole": "Your core role:",
     "localModeTitle": "Local Agent collaboration mode:",
     "modeAgent": "- Agent mode: {value}",
@@ -314,6 +315,8 @@
     "consensusLimit": "This discussion reached the consensus round limit and still has disagreements. Please narrow the question manually or adjust member roles before continuing.",
     "decisionPendingContent": "Deciding whether to speak...",
     "decisionWaitContent": "Observing this round.",
+    "addressReplyRule": "Your final visible reply must begin with @{name}. If you are replying to a member, address that member; if you are replying to the user, address the user.",
+    "defaultResponderRule": "No member was explicitly mentioned. You are the primary responder for this turn. Answer the user's message directly; other members will only add something if needed.",
     "disagreementRule1": "You disagreed with the previous response. Clearly state the disagreement and give a revision that helps the group move toward consensus.",
     "disagreementRule2": "Do not repeat what was already said. Prioritize a conclusion that other members can agree with.",
     "inspectFailed": "Code reading tool call failed: {error}",
@@ -324,6 +327,7 @@
     "interruptedContent": "Generation was interrupted.",
     "interruptedStep": "The user interrupted this round.",
     "mentionedRule": "The user explicitly mentioned you. Answer first; other members will observe and decide whether to add anything after you reply.",
+    "markdownCodeFenceRule": "When your final Markdown contains a fenced code block, always write the language after the opening fence, for example ```cpp, ```ts, ```vue, ```rust, ```python, ```json, or ```bash. Never output a bare ``` fence for code.",
     "observerRule": "You were observing. The mentioned member has now replied. Decide whether to supplement, challenge, or help close consensus.",
     "pendingContent": "Generating reply...",
     "phaseAfterPeers": "You have now seen new replies from other members in this round. Decide whether you need to supplement, challenge, summarize, or keep waiting. Reply with one word only: SPEAK or WAIT.",

@@ -139,6 +139,7 @@
     "status": {
       "done": "完成",
       "error": "错误",
+      "interrupted": "已中断",
       "thinking": "生成中"
     },
     "stop": "中断",
@@ -269,9 +270,9 @@
   },
   "agentPrompt": {
     "collaborationRule": "群聊协作规则：你能看到用户和其它群友已经发出的消息。不要只各说各话；需要回应、补充、质疑或修正其它群友观点时，请明确指出。若你的专业分工暂时不该发言，可以等待其它群友先说。",
-    "codeContextGuide": "你可以基于以下工具输出讨论代码。优先用 CodeGraph 理解结构和调用链；如果缺少精确行号或局部细节，再用 read_file、search_files、list_files 或 glob_files 补充。若结果来自 LocalCommands，需要说明这是降级读取。CodeGraph 输出中的 `Found N symbols across M files` 只表示本次查询命中的相关源码范围，不是索引总文件数。",
+    "codeContextGuide": "你可以基于以下工具输出讨论代码。优先用 CodeGraph 理解结构和调用链；如果缺少精确行号或局部细节，再用 read_file、search_files、list_files 或 glob_files 补充。需要编辑时，只能在当前工作区内并在安全模式允许时使用 write_file、apply_patch、create_directory、move_path、delete_path 或 run_command。若结果来自 LocalCommands，需要说明这是降级读取。CodeGraph 输出中的 `Found N symbols across M files` 只表示本次查询命中的相关源码范围，不是索引总文件数。",
     "codeContextTitle": "代码阅读工具结果：",
-    "codeToolGuide": "你可以使用当前工作区的只读代码工具：codegraph_explore 用于结构和调用链，read_file 用于读取精确行段，search_files 用于文本搜索，list_files 用于目录发现，glob_files 用于按文件名模式查找。架构问题先用 CodeGraph；缺少细节时继续调用文件/搜索工具。CodeGraph 输出中的 `Found N symbols across M files` 只表示本次查询命中的相关源码范围，不是索引总文件数。",
+    "codeToolGuide": "你可以使用当前工作区的代码工具：codegraph_explore 用于结构和调用链，read_file 用于读取精确行段，search_files 用于文本搜索，list_files 用于目录发现，glob_files 用于按文件名模式查找，write_file 用于创建或覆盖文件，apply_patch 用于统一 diff，create_directory、move_path、delete_path 用于目录和文件操作，run_command 用于运行工作区命令。架构问题先用 CodeGraph；缺少细节时继续调用文件/搜索工具。写入、删除、移动和命令工具只能在工作区内使用，并且必须符合当前工作流和安全策略。CodeGraph 输出中的 `Found N symbols across M files` 只表示本次查询命中的相关源码范围，不是索引总文件数。",
     "coreRole": "你的核心角色：",
     "localModeTitle": "本地 Agent 协作模式：",
     "modeAgent": "- Agent 模式：{value}",
@@ -314,6 +315,8 @@
     "consensusLimit": "本轮讨论达到共识轮次上限，仍存在分歧。请人工收束问题或调整群友角色后继续。",
     "decisionPendingContent": "正在判断是否需要发言...",
     "decisionWaitContent": "本轮先观望。",
+    "addressReplyRule": "你的最终可见回复必须以 @{name} 开头。如果你是在回复某个群友，就 @ 那个群友；如果是在回复用户，就 @ 用户。",
+    "defaultResponderRule": "这条消息没有明确 @ 群友。你是本轮的首要回复者，请直接回答用户消息；其它群友只会在确有必要时补充。",
     "disagreementRule1": "你刚才不同意上一条发言。请明确指出分歧点，并给出能推动集体达成一致的修正方案。",
     "disagreementRule2": "不要重复已经说过的内容；优先提出可被其它群友同意的结论。",
     "inspectFailed": "代码阅读工具调用失败：{error}",
@@ -324,6 +327,7 @@
     "interruptedContent": "已中断生成。",
     "interruptedStep": "用户中断，本轮停止。",
     "mentionedRule": "用户明确提到了你。请你先回答；其它群友会先观望，等你回答完再判断是否需要补充。",
+    "markdownCodeFenceRule": "当你的最终 Markdown 包含围栏代码块时，必须在开头围栏后写语言类型，例如 ```cpp、```ts、```vue、```rust、```python、```json 或 ```bash。不要输出裸的 ``` 代码围栏。",
     "observerRule": "你刚才处于观望状态。现在被提到的群友已经回答，请判断是否需要补充、反驳或帮助收束共识。",
     "pendingContent": "正在生成回复...",
     "phaseAfterPeers": "现在你已经看到其它群友本轮的新增发言。请判断你是否需要补充、反驳、总结或继续等待。只回复一个词：SPEAK 或 WAIT。",

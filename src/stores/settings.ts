@@ -5,9 +5,9 @@ import { defaultLocale, normalizeLocale, type AppLocale } from "../i18n/locales"
 
 export type ProviderId = "openai" | "deepseek";
 export type ChatRole = "user" | "assistant";
-export type MessageStatus = "done" | "thinking" | "error";
+export type MessageStatus = "done" | "thinking" | "error" | "interrupted";
 export type ChatMessageActivityKind = "status" | "tool";
-export type ChatMessageActivityStatus = "running" | "done" | "error" | "info";
+export type ChatMessageActivityStatus = "running" | "done" | "error" | "info" | "interrupted";
 export type ChatMessageExecutionKind = "status" | "reasoning" | "tool";
 export type ChatMessageExecutionStatus = ChatMessageActivityStatus;
 export type AgentMode = "chat" | "local-agent" | "architect";
@@ -258,6 +258,7 @@ function normalizeGroup(group: ChatGroup): ChatGroup {
     members: group.members.map(normalizeMember),
     messages: group.messages.map((message) => ({
       ...message,
+      status: normalizeMessageStatus(message.status),
       avatar: message.avatar ?? "",
       apiModel: message.apiModel ?? "",
       reasoningEffort: normalizeReasoningEffort(message.reasoningEffort),
@@ -287,6 +288,12 @@ function normalizeGroup(group: ChatGroup): ChatGroup {
 
 function normalizeReasoningEffort(value: unknown): AgentReasoningEffort {
   return value === "low" || value === "medium" || value === "high" ? value : "off";
+}
+
+function normalizeMessageStatus(value: unknown): MessageStatus {
+  return value === "done" || value === "thinking" || value === "error" || value === "interrupted"
+    ? value
+    : "done";
 }
 
 function normalizeMember(member: AgentModel): AgentModel {
