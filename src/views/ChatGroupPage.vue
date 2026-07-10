@@ -38,6 +38,11 @@ import { describeError } from "../utils/errorPresentation";
 import { makeMemberNameUnique } from "../utils/memberNames";
 import { parseMentionedMembers } from "../utils/mentions";
 import {
+  getTaskAssignment,
+  isWorkerDelegationResponse,
+  parseTaskRedispatch,
+} from "../utils/taskWorkflow";
+import {
   DEFAULT_CONTEXT_LIMIT,
   getProviderModelContextLimit,
   modelPresets,
@@ -2055,6 +2060,7 @@ async function askMember(
   runId: string,
   pendingMessage?: PendingMemberMessage,
   replyTargetName = getOwnerDisplayName(),
+  addressReply = true,
 ): Promise<MemberAnswer | null> {
   if (isRunInterrupted(runId)) {
     return null;
@@ -2064,10 +2070,10 @@ async function askMember(
   const pendingId = pendingMessage?.id ?? crypto.randomUUID();
   const startedAt = pendingMessage?.startedAt ?? Date.now();
   const conversation = buildConversation(pendingMessage ? [pendingId] : []);
-  const responseRule = buildAddressedResponseRule(
-    extraRule || t("chatRuntime.responseRule"),
-    replyTargetName,
-  );
+  const baseResponseRule = extraRule || t("chatRuntime.responseRule");
+  const responseRule = addressReply
+    ? buildAddressedResponseRule(baseResponseRule, replyTargetName)
+    : [baseResponseRule, t("chatRuntime.markdownCodeFenceRule")].filter(Boolean).join("\n");
   const systemPrompt = buildSystemPrompt(
     member,
     activeGroup.value,
@@ -2156,7 +2162,9 @@ async function askMember(
     }
 
     chatPanel.value?.collapseExecutionPanel(pendingId);
-    const finalContent = ensureAddressedReply(response.content, replyTargetName);
+    const finalContent = addressReply
+      ? ensureAddressedReply(response.content, replyTargetName)
+      : annotateMarkdownCodeFences(response.content).trim();
     settingsStore.updateMessage(pendingId, {
       status: "done",
       content: finalContent,
@@ -2363,65 +2371,112 @@ async function resolveConsensus(initialAnswer: MemberAnswer | null, runId: strin
   }
 }
 
-function getTaskAssignment(plan: string, member: AgentModel) {
-  const normalizedName = member.name.trim().toLocaleLowerCase();
-  const line = plan.split("\n").find((candidate) => {
-    const normalized = candidate.trim().replace(/^[-*]\s*/, "").toLocaleLowerCase();
-    return normalized.startsWith(`@${normalizedName}:`) || normalized.startsWith(`@${normalizedName}：`);
-  });
-
-  if (!line) {
-    return "";
-  }
-
-  const asciiSeparator = line.indexOf(":");
-  const fullWidthSeparator = line.indexOf("：");
-  const separatorIndex =
-    asciiSeparator < 0
-      ? fullWidthSeparator
-      : fullWidthSeparator < 0
-        ? asciiSeparator
-        : Math.min(asciiSeparator, fullWidthSeparator);
-
-  return separatorIndex < 0 ? "" : line.slice(separatorIndex + 1).trim();
-}
-
 function buildTaskAssignments(plan: string, workers: AgentModel[]): TaskAssignment[] {
-  return workers.map((member) => ({
-    member,
-    instruction:
-      getTaskAssignment(plan, member) ||
-      t("chatRuntime.taskFallbackAssignment", { role: member.systemPrompt.trim() || member.name }),
-  }));
+  return workers.flatMap((member) => {
+    const instruction = getTaskAssignment(plan, member);
+    return instruction ? [{ member, instruction }] : [];
+  });
 }
 
-function buildTaskPlanningRule(workers: AgentModel[], round: number) {
-  const workerLines = workers.map((member) => `- @${member.name}:`).join("\n");
+function buildTaskPlanningRule(workers: AgentModel[], round: number, redispatchInstruction = "") {
+  const workerRoleLines = workers
+    .map((member) => {
+      const role = member.systemPrompt.trim();
+      return `- @${member.name}：${role}`;
+    })
+    .join("\n");
+
+  const assignmentTemplateLines = workers.map((member) => `- @${member.name}:`).join("\n");
 
   return [
     t("chatRuntime.taskPlanRule", { round }),
+    redispatchInstruction
+      ? t("chatRuntime.taskRedispatchInstruction", { instruction: redispatchInstruction })
+      : "",
+    t("chatRuntime.taskWorkersIntro"),
+    workerRoleLines,
     t("chatRuntime.taskPlanFormat"),
-    workerLines,
+    assignmentTemplateLines,
   ].join("\n");
 }
 
-function buildTaskWorkerRule(assignment: TaskAssignment, admin: AgentModel, round: number) {
+function buildTaskPlanningRetryRule(workers: AgentModel[]) {
+  const assignmentTemplateLines = workers.map((member) => `- @${member.name}:`).join("\n");
+  return [t("chatRuntime.taskPlanRetryRule"), assignmentTemplateLines].join("\n");
+}
+
+function hasTaskAssignments(plan: string, workers: AgentModel[]) {
+  return workers.some((worker) => Boolean(getTaskAssignment(plan, worker)));
+}
+
+function buildTaskWorkerRule(assignment: TaskAssignment, round: number) {
   return [
-    t("chatRuntime.taskWorkerRule", { round, admin: admin.name }),
+    t("chatRuntime.taskWorkerRule", { round }),
     t("chatRuntime.taskWorkerAssignment", { task: assignment.instruction }),
   ].join("\n");
+}
+
+function buildTaskWorkerRetryRule(assignment: TaskAssignment, round: number) {
+  return [
+    t("chatRuntime.taskWorkerRetryRule", { round }),
+    t("chatRuntime.taskWorkerAssignment", { task: assignment.instruction }),
+  ].join("\n");
+}
+
+async function askTaskWorker(
+  assignment: TaskAssignment,
+  members: AgentModel[],
+  round: number,
+  runId: string,
+) {
+  let answer = await askMember(
+    assignment.member,
+    buildTaskWorkerRule(assignment, round),
+    runId,
+    undefined,
+    "",
+    false,
+  );
+
+  if (!answer || isRunInterrupted(runId)) {
+    return answer;
+  }
+
+  if (!isWorkerDelegationResponse(answer.content, members)) {
+    return answer;
+  }
+
+  answer = await askMember(
+    assignment.member,
+    buildTaskWorkerRetryRule(assignment, round),
+    runId,
+    undefined,
+    "",
+    false,
+  );
+
+  if (!answer || isRunInterrupted(runId)) {
+    return answer;
+  }
+
+  if (!isWorkerDelegationResponse(answer.content, members)) {
+    return answer;
+  }
+
+  const invalidContent = t("chatRuntime.taskWorkerInvalid", { name: assignment.member.name });
+  settingsStore.updateMessage(answer.messageId, {
+    status: "error",
+    content: invalidContent,
+    contentSegments: getFinalContentSegments(answer.messageId, invalidContent),
+  });
+  answer.content = invalidContent;
+  return answer;
 }
 
 function buildTaskReviewRule(round: number, forceFinal = false) {
   return forceFinal
     ? t("chatRuntime.taskForceFinalRule", { round })
     : t("chatRuntime.taskReviewRule", { round });
-}
-
-function requestsTaskRedispatch(content: string) {
-  return content
-    .split("\n")
-    .some((line) => line.trim().toLocaleUpperCase().startsWith("REDISPATCH:"));
 }
 
 async function runTaskGroup(
@@ -2437,35 +2492,60 @@ async function runTaskGroup(
     return;
   }
 
+  let redispatchInstruction = "";
+
   for (let round = 1; round <= maxTaskRounds; round += 1) {
     if (isRunInterrupted(runId)) {
       return;
     }
 
     setSpeakerQueue([admin], "queued");
-    const plan = await askMember(
+    let plan = await askMember(
       admin,
-      buildTaskPlanningRule(workers, round),
+      buildTaskPlanningRule(workers, round, redispatchInstruction),
       runId,
       undefined,
       ownerName,
+      false,
     );
 
     if (!plan || isRunInterrupted(runId)) {
       return;
     }
 
+    if (!hasTaskAssignments(plan.content, workers)) {
+      const retryPlan = await askMember(
+        admin,
+        buildTaskPlanningRetryRule(workers),
+        runId,
+        undefined,
+        ownerName,
+        false,
+      );
+      if (retryPlan && !isRunInterrupted(runId)) {
+        plan = retryPlan;
+      }
+    }
+
+    if (!hasTaskAssignments(plan.content, workers)) {
+      appendMessage({
+        role: "assistant",
+        modelName: t("common.systemName"),
+        status: "error",
+        color: "#c45656",
+        content: t("chatRuntime.taskPlanInvalid"),
+      });
+      return;
+    }
+
     const assignments = buildTaskAssignments(plan.content, workers);
-    setSpeakerQueue(workers, "queued");
+    setSpeakerQueue(
+      assignments.map((assignment) => assignment.member),
+      "queued",
+    );
     await Promise.all(
       assignments.map((assignment) =>
-        askMember(
-          assignment.member,
-          buildTaskWorkerRule(assignment, admin, round),
-          runId,
-          undefined,
-          admin.name,
-        ),
+        askTaskWorker(assignment, members, round, runId),
       ),
     );
 
@@ -2482,9 +2562,17 @@ async function runTaskGroup(
       ownerName,
     );
 
-    if (!review || !requestsTaskRedispatch(review.content)) {
+    if (!review) {
       return;
     }
+
+    const redispatch = parseTaskRedispatch(review.content);
+
+    if (!redispatch.requested) {
+      return;
+    }
+
+    redispatchInstruction = redispatch.instruction;
   }
 
   if (!isRunInterrupted(runId)) {
@@ -2538,36 +2626,33 @@ async function sendMessage() {
   const mentionedMembers = parseMentionedMembers(userText, members);
 
   try {
+    const taskAdminWasMentioned = mentionedMembers.some((member) => member.isAdmin);
+
+    if (
+      activeGroup.value?.mode === "task" &&
+      (mentionedMembers.length === 0 || taskAdminWasMentioned)
+    ) {
+      await runTaskGroup(members, runId, ownerName);
+      return;
+    }
+
     if (activeGroup.value?.mode === "task") {
-      if (mentionedMembers.length > 0) {
-        const mentionedIds = new Set(mentionedMembers.map((m) => m.id));
-        const taskMembers = members.filter((m) => m.isAdmin || mentionedIds.has(m.id));
-        setSpeakerQueue(taskMembers, "queued");
-        await runTaskGroup(taskMembers, runId, ownerName);
-      } else {
-        const admin = members.find((m) => m.isAdmin);
-        if (!admin) {
+      setSpeakerQueue(mentionedMembers, "queued");
+
+      for (const member of mentionedMembers) {
+        if (isRunInterrupted(runId)) {
           return;
         }
 
-        setSpeakerQueue([admin], "queued");
-        const answer = await askMember(
-          admin,
-          t("chatRuntime.defaultResponderRule"),
+        await askMember(
+          member,
+          t("chatRuntime.mentionedRule"),
           runId,
           undefined,
           ownerName,
         );
-
-        if (!answer || isRunInterrupted(runId)) {
-          return;
-        }
-
-        const otherMembers = prioritizeMembers(
-          members.filter((m) => m.id !== admin.id),
-        );
-        setSpeakerQueue(otherMembers, "waiting");
       }
+
       return;
     }
 
