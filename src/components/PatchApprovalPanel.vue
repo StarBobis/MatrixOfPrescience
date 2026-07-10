@@ -52,6 +52,16 @@ const safetyVerdictTextKey: Record<AgentPatchProposal["safetyCheck"]["verdict"],
   "needs-confirmation": "patch.verdict.needsConfirmation",
   blocked: "patch.verdict.blocked",
 };
+
+function hasPatchRuntime(proposal: AgentPatchProposal) {
+  return Boolean(
+    proposal.applyError?.trim() ||
+      proposal.applyStdout?.trim() ||
+      proposal.applyStderr?.trim() ||
+      (proposal.appliedFiles?.length ?? 0) > 0 ||
+      proposal.status === "approved",
+  );
+}
 </script>
 
 <template>
@@ -108,6 +118,28 @@ const safetyVerdictTextKey: Record<AgentPatchProposal["safetyCheck"]["verdict"],
         <div v-else class="patch-files muted">{{ t("patch.noFiles") }}</div>
 
         <pre v-if="proposal.patchText" class="patch-preview">{{ proposal.patchText }}</pre>
+
+        <div
+          v-if="hasPatchRuntime(proposal)"
+          class="patch-runtime"
+          :class="{ error: Boolean(proposal.applyError?.trim()) }"
+        >
+          <strong>
+            {{
+              proposal.applyError?.trim()
+                ? t("patchRuntime.failedContent", {
+                    title: proposal.title,
+                    error: proposal.applyError,
+                  })
+                : t("patchRuntime.appliedContent", { title: proposal.title })
+            }}
+          </strong>
+          <p v-if="proposal.appliedFiles?.length">
+            {{ t("patchRuntime.appliedFiles", { files: proposal.appliedFiles.join(", ") }) }}
+          </p>
+          <pre v-if="proposal.applyStdout?.trim()">{{ t("patchRuntime.output", { output: proposal.applyStdout }) }}</pre>
+          <pre v-if="proposal.applyStderr?.trim()">{{ t("patchRuntime.stderr", { stderr: proposal.applyStderr }) }}</pre>
+        </div>
 
         <div class="patch-actions">
           <template v-if="proposal.status === 'pending'">
@@ -283,6 +315,44 @@ const safetyVerdictTextKey: Record<AgentPatchProposal["safetyCheck"]["verdict"],
   background: #f3f6f3;
   font-size: 11px;
   line-height: 1.5;
+  white-space: pre-wrap;
+}
+
+.patch-runtime {
+  display: grid;
+  gap: 6px;
+  padding: 9px;
+  border: 1px solid #cfe4d7;
+  border-radius: 8px;
+  color: #24513f;
+  background: #f1fbf5;
+}
+
+.patch-runtime.error {
+  border-color: #efc4c4;
+  color: #963f3f;
+  background: #fff4f4;
+}
+
+.patch-runtime strong {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.patch-runtime p,
+.patch-runtime pre {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.patch-runtime pre {
+  max-height: 160px;
+  overflow: auto;
+  padding: 8px;
+  border-radius: 6px;
+  color: #26312b;
+  background: rgba(255, 255, 255, 0.72);
   white-space: pre-wrap;
 }
 </style>

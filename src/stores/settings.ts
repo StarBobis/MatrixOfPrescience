@@ -130,6 +130,10 @@ export interface AgentPatchProposal {
   summary: string;
   patchText: string;
   createdAt: string;
+  appliedFiles?: string[];
+  applyStdout?: string;
+  applyStderr?: string;
+  applyError?: string;
 }
 
 export interface PatchSafetyCheck {
@@ -248,6 +252,10 @@ function normalizeGroup(group: ChatGroup): ChatGroup {
     patchProposals: (group.patchProposals ?? []).map((proposal) => ({
       ...proposal,
       workspacePath: proposal.workspacePath ?? workspacePath,
+      appliedFiles: proposal.appliedFiles ?? [],
+      applyStdout: proposal.applyStdout ?? "",
+      applyStderr: proposal.applyStderr ?? "",
+      applyError: proposal.applyError ?? "",
       safetyCheck: proposal.safetyCheck ?? {
         verdict: proposal.riskLevel === "high" ? "blocked" : "needs-confirmation",
         reasons:
@@ -479,6 +487,16 @@ function toPersistedPatchProposal(
   return {
     ...proposal,
     summary: truncateText(proposal.summary, mode === "normal" ? 2000 : 500),
+    appliedFiles: (proposal.appliedFiles ?? []).slice(0, 40),
+    applyStdout: proposal.applyStdout
+      ? truncateText(proposal.applyStdout, mode === "normal" ? 4000 : 1000)
+      : "",
+    applyStderr: proposal.applyStderr
+      ? truncateText(proposal.applyStderr, mode === "normal" ? 4000 : 1000)
+      : "",
+    applyError: proposal.applyError
+      ? truncateText(proposal.applyError, mode === "normal" ? 2000 : 500)
+      : "",
     patchText:
       mode === "normal" ? truncateText(proposal.patchText, NORMAL_PATCH_TEXT_LIMIT) : "",
   };
@@ -1123,8 +1141,24 @@ export const useSettingsStore = defineStore("settings", {
         id: crypto.randomUUID(),
         status: "pending",
         createdAt: nowText(),
+        appliedFiles: proposal.appliedFiles ?? [],
+        applyStdout: proposal.applyStdout ?? "",
+        applyStderr: proposal.applyStderr ?? "",
+        applyError: proposal.applyError ?? "",
       });
       group.updatedAt = new Date().toISOString();
+    },
+
+    updatePatchProposal(proposalId: string, patch: Partial<AgentPatchProposal>) {
+      const group = this.activeGroup;
+      if (!group) return;
+
+      const proposal = group.patchProposals.find((item) => item.id === proposalId);
+
+      if (proposal) {
+        Object.assign(proposal, patch);
+        group.updatedAt = new Date().toISOString();
+      }
     },
 
     updatePatchProposalStatus(proposalId: string, status: PatchApprovalStatus) {

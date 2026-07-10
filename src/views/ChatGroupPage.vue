@@ -972,32 +972,21 @@ async function applyPatchProposal(proposal: AgentPatchProposal) {
       },
     });
 
-    appendMessage({
-      role: "assistant",
-      modelName: t("common.systemName"),
-      status: "done",
-      color: "#6c6f75",
-      content: [
-        t("patchRuntime.appliedContent", { title: proposal.title }),
-        result.appliedFiles.length > 0
-          ? t("patchRuntime.appliedFiles", { files: result.appliedFiles.join(", ") })
-          : "",
-        result.stdout.trim() ? t("patchRuntime.output", { output: result.stdout.trim() }) : "",
-        result.stderr.trim() ? t("patchRuntime.stderr", { stderr: result.stderr.trim() }) : "",
-      ]
-        .filter(Boolean)
-        .join("\n"),
+    settingsStore.updatePatchProposal(proposal.id, {
+      appliedFiles: result.appliedFiles,
+      applyStdout: result.stdout,
+      applyStderr: result.stderr,
+      applyError: "",
     });
     ElMessage.success(t("messages.patchApplied"));
   } catch (error) {
-    appendMessage({
-      role: "assistant",
-      modelName: t("common.systemName"),
-      status: "error",
-      color: "#c45656",
-      content: t("patchRuntime.failedContent", { title: proposal.title, error: String(error) }),
+    settingsStore.updatePatchProposal(proposal.id, {
+      appliedFiles: [],
+      applyStdout: "",
+      applyStderr: "",
+      applyError: String(error),
     });
-    ElMessage.error(t("messages.patchFailedLogged"));
+    ElMessage.error(t("messages.patchApplyFailed"));
     throw error;
   }
 }
