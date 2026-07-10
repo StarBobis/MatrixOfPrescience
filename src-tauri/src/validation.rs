@@ -7,8 +7,9 @@ use crate::{
     ChatTraceStep,
 };
 
-pub(crate) const VALIDATION_REQUIRED_INSTRUCTION: &str = "You just changed files in the workspace. Before writing the final visible answer, call run_command with the most appropriate build, test, type-check, lint, or compile command for the changed project. Prefer project scripts and manifests already present in the workspace, such as npm run build, cargo test, cargo check, pytest, go test, dotnet test, or equivalent. Do not provide a final answer until validation output is available; if validation fails, explain the failure and what remains.";
-const VALIDATION_UNAVAILABLE_INSTRUCTION: &str = "No default validation command could be detected automatically for this workspace. Write the final answer now and explicitly say that code was changed but automatic validation could not be run because no known project validator was found.";
+pub(crate) const VALIDATION_REQUIRED_INSTRUCTION: &str = "You changed files in the workspace, so validation must pass before the final visible answer. Call run_command with the most appropriate build, test, type-check, lint, or compile command. Prefer project scripts and manifests already present in the workspace. If validation fails, immediately diagnose the first actionable error, fix its root cause, and rerun validation until it passes. Do not stop at reporting the failure and do not provide a final answer while validation is failing.";
+pub(crate) const VALIDATION_FAILURE_RECOVERY_INSTRUCTION: &str = "The previous build, test, type-check, lint, or compile command failed. Do not stop or summarize the failure as the final answer. Inspect the first actionable error and relevant source, fix the root cause with the available workspace tools, then rerun the appropriate validation command. Continue the repair-and-validate loop until validation passes. Preserve unrelated user changes and do not hide errors by weakening or skipping validation.";
+pub(crate) const VALIDATION_UNAVAILABLE_INSTRUCTION: &str = "No default validation command was detected automatically. Do not provide the final answer yet. Inspect the workspace manifests, build scripts, CI configuration, and documentation to identify the intended build or validation command, then run it. If it fails, fix the root cause and rerun it until it passes. Only stop for a genuine blocker after exhausting the available workspace tools.";
 
 fn tool_call_name(tool_call: &Value) -> &str {
     tool_call
@@ -29,6 +30,112 @@ fn tool_call_arguments(tool_call: &Value) -> Value {
         serde_json::from_str::<Value>(text).unwrap_or_else(|_| json!({}))
     } else {
         arguments
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ValidationRun {
+    ran: bool,
+    succeeded: bool,
+}
+
+impl ValidationRun {
+    pub(crate) fn observe_tool_result(&mut self, tool_call: &Value, tool_result: &Value) {
+        if is_validation_tool_call(tool_call) {
+            self.record_result(tool_result_succeeded(tool_result));
+        }
+    }
+
+    pub(crate) fn record_result(&mut self, succeeded: bool) {
+        if !self.ran {
+            self.ran = true;
+            self.succeeded = true;
+        }
+        self.succeeded &= succeeded;
+    }
+
+    pub(crate) fn ran(self) -> bool {
+        self.ran
+    }
+
+    pub(crate) fn succeeded(self) -> bool {
+        self.ran && self.succeeded
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ValidationState {
+    required: bool,
+    succeeded: bool,
+    model_prompted: bool,
+    auto_attempted: bool,
+    repair_required: bool,
+}
+
+impl ValidationState {
+    pub(crate) fn requires_tool(&self, edit_recovery_required: bool) -> bool {
+        self.required && !self.succeeded && !self.repair_required && !edit_recovery_required
+    }
+
+    pub(crate) fn requires_repair(&self) -> bool {
+        self.repair_required
+    }
+
+    pub(crate) fn is_pending(&self) -> bool {
+        self.required && !self.succeeded
+    }
+
+    pub(crate) fn mark_model_prompted(&mut self) {
+        self.model_prompted = true;
+    }
+
+    pub(crate) fn mark_successful_edit(&mut self) {
+        self.required = true;
+        self.succeeded = false;
+        self.model_prompted = false;
+        self.auto_attempted = false;
+        self.repair_required = false;
+    }
+
+    pub(crate) fn should_auto_validate(&self, edit_recovery_required: bool) -> bool {
+        self.is_pending()
+            && self.model_prompted
+            && !self.auto_attempted
+            && !self.repair_required
+            && !edit_recovery_required
+    }
+
+    pub(crate) fn can_auto_validate(&self) -> bool {
+        self.is_pending() && !self.auto_attempted && !self.repair_required
+    }
+
+    pub(crate) fn mark_auto_attempted(&mut self) {
+        self.auto_attempted = true;
+    }
+
+    pub(crate) fn record_run(&mut self, run: ValidationRun) -> bool {
+        if !run.ran() {
+            return false;
+        }
+
+        if run.succeeded() {
+            if self.required {
+                self.succeeded = true;
+            }
+            self.repair_required = false;
+            return false;
+        }
+
+        self.required = true;
+        self.succeeded = false;
+        self.repair_required = true;
+        true
+    }
+
+    pub(crate) fn mark_validator_discovery_required(&mut self) {
+        self.required = true;
+        self.succeeded = false;
+        self.repair_required = true;
     }
 }
 
@@ -216,6 +323,14 @@ fn validation_tool_call(index: usize, command: &ValidationCommand) -> Value {
     })
 }
 
+pub(crate) fn validation_tool_calls(workspace: &Path) -> Vec<Value> {
+    default_validation_commands(workspace)
+        .iter()
+        .enumerate()
+        .map(|(index, command)| validation_tool_call(index, command))
+        .collect()
+}
+
 pub(crate) fn run_default_validation_commands(
     app: &AppHandle,
     stream_id: Option<&str>,
@@ -223,15 +338,11 @@ pub(crate) fn run_default_validation_commands(
     can_write: bool,
     messages: &mut Vec<Value>,
     trace_steps: &mut Vec<ChatTraceStep>,
-) -> bool {
-    let tool_calls = default_validation_commands(workspace)
-        .iter()
-        .enumerate()
-        .map(|(index, command)| validation_tool_call(index, command))
-        .collect::<Vec<_>>();
+) -> ValidationRun {
+    let tool_calls = validation_tool_calls(workspace);
 
     if tool_calls.is_empty() {
-        return false;
+        return ValidationRun::default();
     }
 
     messages.push(json!({
@@ -246,9 +357,10 @@ pub(crate) fn run_default_validation_commands(
         .and_then(Value::as_array)
         .cloned()
     else {
-        return false;
+        return ValidationRun::default();
     };
 
+    let mut run = ValidationRun::default();
     for tool_call in tool_calls {
         let call_step = tools::tool_call_trace_step(&tool_call);
         emit_trace_step(app, stream_id, &call_step);
@@ -266,10 +378,11 @@ pub(crate) fn run_default_validation_commands(
         let result_step = tools::tool_result_trace_step(&tool_call, &tool_result);
         emit_trace_step(app, stream_id, &result_step);
         append_trace_steps(trace_steps, vec![result_step]);
+        run.observe_tool_result(&tool_call, &tool_result);
         messages.push(tool_result);
     }
 
-    true
+    run
 }
 
 pub(crate) fn mark_validation_unavailable(messages: &mut Vec<Value>) {
@@ -310,6 +423,62 @@ mod tests {
                 "arguments": "{\"command\":\"git\",\"args\":[\"status\"]}"
             }
         })));
+        assert!(is_validation_tool_call(&json!({
+            "function": {
+                "name": "run_command",
+                "arguments": "{\"command\":\"powershell\",\"args\":[\"-File\",\"build_debug_x64.ps1\"]}"
+            }
+        })));
+    }
+
+    #[test]
+    fn failed_validation_requires_repair_until_a_later_run_passes() {
+        let validation_call = json!({
+            "function": {
+                "name": "run_command",
+                "arguments": "{\"command\":\"powershell\",\"args\":[\"-File\",\"build_debug_x64.ps1\"]}"
+            }
+        });
+        let failed_result = json!({
+            "role": "tool",
+            "content": "Tool run_command failed: exit_code=1\nstderr:\nerror C2838"
+        });
+        let successful_result = json!({
+            "role": "tool",
+            "content": "exit_code=0\nstdout:\nBuild succeeded"
+        });
+        let mut state = ValidationState::default();
+        state.mark_successful_edit();
+
+        let mut failed_run = ValidationRun::default();
+        failed_run.observe_tool_result(&validation_call, &failed_result);
+        assert!(state.record_run(failed_run));
+        assert!(state.is_pending());
+        assert!(state.requires_repair());
+        assert!(!state.requires_tool(false));
+
+        state.mark_successful_edit();
+        assert!(!state.requires_repair());
+        assert!(state.requires_tool(false));
+
+        let mut successful_run = ValidationRun::default();
+        successful_run.observe_tool_result(&validation_call, &successful_result);
+        assert!(!state.record_run(successful_run));
+        assert!(!state.is_pending());
+        assert!(!state.requires_repair());
+    }
+
+    #[test]
+    fn any_failed_validation_in_a_batch_keeps_repair_required() {
+        let mut run = ValidationRun::default();
+        run.record_result(true);
+        run.record_result(false);
+
+        let mut state = ValidationState::default();
+        state.mark_successful_edit();
+
+        assert!(state.record_run(run));
+        assert!(state.requires_repair());
     }
 
     #[test]

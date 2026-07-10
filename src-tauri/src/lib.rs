@@ -12,11 +12,18 @@ use tauri::{AppHandle, Emitter, Manager};
 
 mod dsml;
 mod tools;
+mod validation;
 
 use dsml::normalize_dsml_tool_calls_in_message;
 use tools::{
     code_tools_schema, execute_code_tool_call, tool_call_trace_step, tool_result_trace_step,
     validate_workspace,
+};
+use validation::{
+    is_successful_edit_tool_call, mark_validation_unavailable, run_default_validation_commands,
+    tool_result_succeeded, validation_tool_calls, ValidationRun, ValidationState,
+    VALIDATION_FAILURE_RECOVERY_INSTRUCTION, VALIDATION_REQUIRED_INSTRUCTION,
+    VALIDATION_UNAVAILABLE_INSTRUCTION,
 };
 
 #[cfg(test)]
@@ -140,8 +147,6 @@ const CHAT_COMPLETION_STREAM_EVENT: &str = "chat-completion-stream";
 const FINAL_ANSWER_INSTRUCTION: &str =
     "Use the tool results already provided and write the final answer now.";
 const EDIT_FAILURE_RECOVERY_INSTRUCTION: &str = "The previous edit tool call failed. Do not stop or provide a final answer solely because an edit did not apply. Recover using the error and the current workspace state: re-read the target when the context may be stale, then retry with a corrected smaller patch or a different available edit tool. Do not repeat the identical failing call. Continue until the requested change is complete or no available tool can resolve a genuine blocker.";
-const VALIDATION_REQUIRED_INSTRUCTION: &str = "You just changed files in the workspace. Before writing the final visible answer, call run_command with the most appropriate build, test, type-check, lint, or compile command for the changed project. Prefer project scripts and manifests already present in the workspace, such as npm run build, cargo test, cargo check, pytest, go test, dotnet test, or equivalent. Do not provide a final answer until validation output is available; if validation fails, explain the failure and what remains.";
-const VALIDATION_UNAVAILABLE_INSTRUCTION: &str = "No default validation command could be detected automatically for this workspace. Write the final answer now and explicitly say that code was changed but automatic validation could not be run because no known project validator was found.";
 const CACHE_LOCATION_FILE: &str = "cache-location.json";
 const SETTINGS_FILE: &str = "settings.json";
 const MEMBER_LIBRARY_FILE: &str = "member-library.json";
@@ -787,10 +792,7 @@ async fn chat_completion(
     let mut edit_recovery_required = false;
     let mut edit_recovery_rounds = 0usize;
     let mut final_answer_requested = false;
-    let mut validation_required = false;
-    let mut validation_attempted = false;
-    let mut validation_model_prompted = false;
-    let mut auto_validation_attempted = false;
+    let mut validation = ValidationState::default();
     let mut last_finish_reason: Option<String> = None;
     let mut last_usage: Option<ChatCompletionUsage> = None;
     let mut trace_steps: Vec<ChatTraceStep> = Vec::new();
@@ -802,17 +804,14 @@ async fn chat_completion(
         .map(str::to_string);
 
     for _ in 0..MAX_CHAT_COMPLETION_TURNS {
-        let validation_tool_required = should_require_validation(
-            validation_required,
-            validation_attempted,
-            edit_recovery_required,
-        );
+        let validation_tool_required = validation.requires_tool(edit_recovery_required);
         if validation_tool_required {
-            validation_model_prompted = true;
+            validation.mark_model_prompted();
         }
+        let repair_required = edit_recovery_required || validation.requires_repair();
         let payload_messages = chat_payload_messages(
             &messages,
-            final_answer_requested && !validation_tool_required && !edit_recovery_required,
+            final_answer_requested && !validation_tool_required && !repair_required,
             validation_tool_required,
         );
         let mut payload = json!({
@@ -821,14 +820,15 @@ async fn chat_completion(
             "temperature": request.temperature.unwrap_or(0.7),
         });
         let tools_allowed = code_workspace.is_some()
-            && (!final_answer_requested || validation_tool_required || edit_recovery_required);
+            && (!final_answer_requested || validation_tool_required || repair_required);
         let strict_tool_schema = is_deepseek && tools_allowed;
 
-        apply_reasoning_payload(
-            &mut payload,
-            is_deepseek,
-            request.reasoning_effort.as_deref(),
-        );
+        let reasoning_effort = if is_deepseek && (validation_tool_required || repair_required) {
+            Some("off")
+        } else {
+            request.reasoning_effort.as_deref()
+        };
+        apply_reasoning_payload(&mut payload, is_deepseek, reasoning_effort);
 
         if tools_allowed {
             payload["tools"] = code_tools_schema(is_deepseek, can_write);
@@ -836,7 +836,7 @@ async fn chat_completion(
                 is_deepseek,
                 deepseek_thinking,
                 validation_tool_required,
-                edit_recovery_required,
+                repair_required,
                 code_tool_called,
             ) {
                 payload["tool_choice"] = tool_choice;
@@ -861,7 +861,7 @@ async fn chat_completion(
                     is_deepseek,
                     deepseek_thinking,
                     validation_tool_required,
-                    edit_recovery_required,
+                    repair_required,
                     true,
                 ) {
                     payload["tool_choice"] = tool_choice;
@@ -910,6 +910,7 @@ async fn chat_completion(
                 messages.push(message.clone());
                 let mut failed_edit = false;
                 let mut successful_edit = false;
+                let mut validation_run = ValidationRun::default();
                 for tool_call in tool_calls {
                     let call_step = tool_call_trace_step(tool_call);
                     emit_trace_step(&app, stream_id.as_deref(), &call_step);
@@ -923,17 +924,11 @@ async fn chat_completion(
                         can_write,
                         Some(&mut stream_tool_output),
                     );
-                    if validation_required && is_validation_tool_call(tool_call) {
-                        validation_attempted = true;
-                    }
+                    validation_run.observe_tool_result(tool_call, &tool_result);
                     if tool_result_succeeded(&tool_result)
                         && is_successful_edit_tool_call(tool_call)
                     {
                         successful_edit = true;
-                        validation_required = true;
-                        validation_attempted = false;
-                        validation_model_prompted = false;
-                        auto_validation_attempted = false;
                     }
                     if failed_edit_requires_recovery(tool_call, &tool_result) {
                         failed_edit = true;
@@ -955,19 +950,26 @@ async fn chat_completion(
                         "content": EDIT_FAILURE_RECOVERY_INSTRUCTION,
                     }));
                 }
-                if edit_recovery_required {
+                let validation_failed = if successful_edit {
+                    validation.mark_successful_edit();
+                    false
+                } else {
+                    validation.record_run(validation_run)
+                };
+                if validation_failed {
+                    messages.push(json!({
+                        "role": "user",
+                        "content": VALIDATION_FAILURE_RECOVERY_INSTRUCTION,
+                    }));
+                }
+                if edit_recovery_required || validation.requires_repair() {
                     final_answer_requested = false;
                 }
                 code_tool_called = true;
 
-                if validation_required
-                    && !validation_attempted
-                    && validation_model_prompted
-                    && !auto_validation_attempted
-                    && !edit_recovery_required
-                {
-                    auto_validation_attempted = true;
-                    let validation_ran = code_workspace
+                if validation.should_auto_validate(edit_recovery_required) {
+                    validation.mark_auto_attempted();
+                    let validation_run = code_workspace
                         .as_ref()
                         .map(|workspace| {
                             run_default_validation_commands(
@@ -979,14 +981,19 @@ async fn chat_completion(
                                 &mut trace_steps,
                             )
                         })
-                        .unwrap_or(false);
+                        .unwrap_or_default();
 
-                    if validation_ran {
-                        validation_attempted = true;
-                        final_answer_requested = true;
-                    } else {
+                    if !validation_run.ran() {
                         mark_validation_unavailable(&mut messages);
-                        validation_attempted = true;
+                        validation.mark_validator_discovery_required();
+                        final_answer_requested = false;
+                    } else if validation.record_run(validation_run) {
+                        messages.push(json!({
+                            "role": "user",
+                            "content": VALIDATION_FAILURE_RECOVERY_INSTRUCTION,
+                        }));
+                        final_answer_requested = false;
+                    } else {
                         final_answer_requested = true;
                     }
                 }
@@ -997,10 +1004,10 @@ async fn chat_completion(
         let content = message_content_text(&message);
 
         if !content.is_empty() {
-            if validation_required && !validation_attempted {
-                if !auto_validation_attempted {
-                    auto_validation_attempted = true;
-                    let validation_ran = code_workspace
+            if validation.is_pending() {
+                if validation.can_auto_validate() {
+                    validation.mark_auto_attempted();
+                    let validation_run = code_workspace
                         .as_ref()
                         .map(|workspace| {
                             run_default_validation_commands(
@@ -1012,18 +1019,27 @@ async fn chat_completion(
                                 &mut trace_steps,
                             )
                         })
-                        .unwrap_or(false);
+                        .unwrap_or_default();
 
-                    if validation_ran {
-                        validation_attempted = true;
-                        final_answer_requested = true;
+                    if validation_run.ran() {
+                        if validation.record_run(validation_run) {
+                            messages.push(json!({
+                                "role": "user",
+                                "content": VALIDATION_FAILURE_RECOVERY_INSTRUCTION,
+                            }));
+                            final_answer_requested = false;
+                        } else {
+                            final_answer_requested = true;
+                        }
+                        continue;
+                    } else {
+                        mark_validation_unavailable(&mut messages);
+                        validation.mark_validator_discovery_required();
+                        final_answer_requested = false;
                         continue;
                     }
                 }
-
-                mark_validation_unavailable(&mut messages);
-                validation_attempted = true;
-                final_answer_requested = true;
+                final_answer_requested = false;
                 continue;
             }
 
@@ -1061,10 +1077,7 @@ async fn openai_responses_completion(
     let mut edit_recovery_required = false;
     let mut edit_recovery_rounds = 0usize;
     let mut final_answer_requested = false;
-    let mut validation_required = false;
-    let mut validation_attempted = false;
-    let mut validation_model_prompted = false;
-    let mut auto_validation_attempted = false;
+    let mut validation = ValidationState::default();
     let mut previous_response_id: Option<String> = None;
     let mut pending_input: Vec<Value> = Vec::new();
     let mut last_usage: Option<ChatCompletionUsage> = None;
@@ -1077,21 +1090,18 @@ async fn openai_responses_completion(
         .map(str::to_string);
 
     for _ in 0..MAX_CHAT_COMPLETION_TURNS {
-        let validation_tool_required = should_require_validation(
-            validation_required,
-            validation_attempted,
-            edit_recovery_required,
-        );
+        let validation_tool_required = validation.requires_tool(edit_recovery_required);
         if validation_tool_required {
-            validation_model_prompted = true;
+            validation.mark_model_prompted();
         }
+        let repair_required = edit_recovery_required || validation.requires_repair();
 
         let mut input = if previous_response_id.is_some() {
             std::mem::take(&mut pending_input)
         } else {
             responses_payload_messages(
                 &request.messages,
-                final_answer_requested && !validation_tool_required && !edit_recovery_required,
+                final_answer_requested && !validation_tool_required && !repair_required,
                 validation_tool_required,
             )
         };
@@ -1099,13 +1109,13 @@ async fn openai_responses_completion(
         if previous_response_id.is_some() {
             if validation_tool_required {
                 input.push(responses_user_message(VALIDATION_REQUIRED_INSTRUCTION));
-            } else if final_answer_requested && !edit_recovery_required {
+            } else if final_answer_requested && !repair_required {
                 input.push(responses_user_message(FINAL_ANSWER_INSTRUCTION));
             }
         }
 
         let tools_allowed = code_workspace.is_some()
-            && (!final_answer_requested || validation_tool_required || edit_recovery_required);
+            && (!final_answer_requested || validation_tool_required || repair_required);
         let mut payload = json!({
             "model": request.model,
             "input": input,
@@ -1128,7 +1138,7 @@ async fn openai_responses_completion(
 
         if tools_allowed {
             payload["tools"] = responses_tools_schema(can_write);
-            if edit_recovery_required {
+            if repair_required {
                 payload["tool_choice"] = json!("required");
             }
         }
@@ -1159,6 +1169,7 @@ async fn openai_responses_completion(
             if !tool_calls.is_empty() {
                 let mut failed_edit = false;
                 let mut successful_edit = false;
+                let mut validation_run = ValidationRun::default();
                 for response_tool_call in &tool_calls {
                     let tool_call = response_function_call_to_chat_tool_call(response_tool_call);
                     let call_step = tool_call_trace_step(&tool_call);
@@ -1175,17 +1186,11 @@ async fn openai_responses_completion(
                         Some(&mut stream_tool_output),
                     );
 
-                    if validation_required && is_validation_tool_call(&tool_call) {
-                        validation_attempted = true;
-                    }
+                    validation_run.observe_tool_result(&tool_call, &tool_result);
                     if tool_result_succeeded(&tool_result)
                         && is_successful_edit_tool_call(&tool_call)
                     {
                         successful_edit = true;
-                        validation_required = true;
-                        validation_attempted = false;
-                        validation_model_prompted = false;
-                        auto_validation_attempted = false;
                     }
                     if failed_edit_requires_recovery(&tool_call, &tool_result) {
                         failed_edit = true;
@@ -1206,35 +1211,49 @@ async fn openai_responses_completion(
                 if failed_edit && edit_recovery_required {
                     pending_input.push(responses_user_message(EDIT_FAILURE_RECOVERY_INSTRUCTION));
                 }
-                if edit_recovery_required {
+                let validation_failed = if successful_edit {
+                    validation.mark_successful_edit();
+                    false
+                } else {
+                    validation.record_run(validation_run)
+                };
+                if validation_failed {
+                    pending_input.push(responses_user_message(
+                        VALIDATION_FAILURE_RECOVERY_INSTRUCTION,
+                    ));
+                }
+                if edit_recovery_required || validation.requires_repair() {
                     final_answer_requested = false;
                 }
 
                 code_tool_called = true;
 
-                if validation_required
-                    && !validation_attempted
-                    && validation_model_prompted
-                    && !auto_validation_attempted
-                    && !edit_recovery_required
-                {
-                    auto_validation_attempted = true;
-                    let validation_outputs = run_default_validation_commands_for_responses(
-                        &app,
-                        stream_id.as_deref(),
-                        workspace,
-                        can_write,
-                        &mut trace_steps,
-                    );
+                if validation.should_auto_validate(edit_recovery_required) {
+                    validation.mark_auto_attempted();
+                    let (validation_outputs, validation_run) =
+                        run_default_validation_commands_for_responses(
+                            &app,
+                            stream_id.as_deref(),
+                            workspace,
+                            can_write,
+                            &mut trace_steps,
+                        );
 
                     if validation_outputs.is_empty() {
-                        pending_input
-                            .push(responses_user_message(VALIDATION_UNAVAILABLE_INSTRUCTION));
+                        mark_validation_unavailable_for_responses(&mut pending_input);
+                        validation.mark_validator_discovery_required();
+                        final_answer_requested = false;
                     } else {
                         pending_input.extend(validation_outputs);
+                        if validation.record_run(validation_run) {
+                            pending_input.push(responses_user_message(
+                                VALIDATION_FAILURE_RECOVERY_INSTRUCTION,
+                            ));
+                            final_answer_requested = false;
+                        } else {
+                            final_answer_requested = true;
+                        }
                     }
-                    validation_attempted = true;
-                    final_answer_requested = true;
                 }
 
                 continue;
@@ -1244,30 +1263,37 @@ async fn openai_responses_completion(
         let content = responses_output_text(&parsed);
 
         if !content.is_empty() {
-            if validation_required && !validation_attempted {
+            if validation.is_pending() {
                 if let Some(workspace) = code_workspace.as_ref() {
-                    if !auto_validation_attempted {
-                        auto_validation_attempted = true;
-                        let validation_outputs = run_default_validation_commands_for_responses(
-                            &app,
-                            stream_id.as_deref(),
-                            workspace,
-                            can_write,
-                            &mut trace_steps,
-                        );
+                    if validation.can_auto_validate() {
+                        validation.mark_auto_attempted();
+                        let (validation_outputs, validation_run) =
+                            run_default_validation_commands_for_responses(
+                                &app,
+                                stream_id.as_deref(),
+                                workspace,
+                                can_write,
+                                &mut trace_steps,
+                            );
 
                         if !validation_outputs.is_empty() {
                             pending_input.extend(validation_outputs);
-                            validation_attempted = true;
-                            final_answer_requested = true;
+                            if validation.record_run(validation_run) {
+                                pending_input.push(responses_user_message(
+                                    VALIDATION_FAILURE_RECOVERY_INSTRUCTION,
+                                ));
+                                final_answer_requested = false;
+                            } else {
+                                final_answer_requested = true;
+                            }
                             continue;
                         }
                     }
                 }
 
-                pending_input.push(responses_user_message(VALIDATION_UNAVAILABLE_INSTRUCTION));
-                validation_attempted = true;
-                final_answer_requested = true;
+                mark_validation_unavailable_for_responses(&mut pending_input);
+                validation.mark_validator_discovery_required();
+                final_answer_requested = false;
                 continue;
             }
 
@@ -1311,13 +1337,15 @@ fn chat_tool_choice(
     edit_recovery_required: bool,
     code_tool_called: bool,
 ) -> Option<Value> {
+    if validation_tool_required || edit_recovery_required {
+        return Some(json!("required"));
+    }
+
     if deepseek_thinking {
         return None;
     }
 
-    Some(if validation_tool_required || edit_recovery_required {
-        json!("required")
-    } else if is_deepseek && !code_tool_called {
+    Some(if is_deepseek && !code_tool_called {
         json!("required")
     } else {
         json!("auto")
@@ -1368,6 +1396,10 @@ fn responses_user_message(content: &str) -> Value {
         "role": "user",
         "content": content,
     })
+}
+
+fn mark_validation_unavailable_for_responses(input: &mut Vec<Value>) {
+    input.push(responses_user_message(VALIDATION_UNAVAILABLE_INSTRUCTION));
 }
 
 fn responses_payload_messages(
@@ -1558,74 +1590,34 @@ fn run_default_validation_commands_for_responses(
     workspace: &Path,
     can_write: bool,
     trace_steps: &mut Vec<ChatTraceStep>,
-) -> Vec<Value> {
-    default_validation_commands(workspace)
-        .iter()
-        .enumerate()
-        .map(|(index, command)| validation_tool_call(index, command))
-        .flat_map(|tool_call| {
-            let call_step = tool_call_trace_step(&tool_call);
-            emit_trace_step(app, stream_id, &call_step);
-            append_trace_steps(trace_steps, vec![call_step]);
+) -> (Vec<Value>, ValidationRun) {
+    let mut outputs = Vec::new();
+    let mut run = ValidationRun::default();
 
-            let mut stream_tool_output = |step: ChatTraceStep| {
-                emit_tool_chunk(app, stream_id, &step);
-            };
-            let tool_result = execute_code_tool_call(
-                workspace,
-                &tool_call,
-                can_write,
-                Some(&mut stream_tool_output),
-            );
-            let result_step = tool_result_trace_step(&tool_call, &tool_result);
-            emit_trace_step(app, stream_id, &result_step);
-            append_trace_steps(trace_steps, vec![result_step]);
+    for tool_call in validation_tool_calls(workspace) {
+        let call_step = tool_call_trace_step(&tool_call);
+        emit_trace_step(app, stream_id, &call_step);
+        append_trace_steps(trace_steps, vec![call_step]);
 
-            vec![
-                chat_tool_call_to_response_function_call(&tool_call),
-                response_tool_output(&tool_call, &tool_result),
-            ]
-        })
-        .collect()
-}
+        let mut stream_tool_output = |step: ChatTraceStep| {
+            emit_tool_chunk(app, stream_id, &step);
+        };
+        let tool_result = execute_code_tool_call(
+            workspace,
+            &tool_call,
+            can_write,
+            Some(&mut stream_tool_output),
+        );
+        let result_step = tool_result_trace_step(&tool_call, &tool_result);
+        emit_trace_step(app, stream_id, &result_step);
+        append_trace_steps(trace_steps, vec![result_step]);
+        run.observe_tool_result(&tool_call, &tool_result);
 
-fn tool_call_name(tool_call: &Value) -> &str {
-    tool_call
-        .get("function")
-        .and_then(|function| function.get("name"))
-        .and_then(Value::as_str)
-        .unwrap_or("")
-}
-
-fn tool_call_arguments(tool_call: &Value) -> Value {
-    let arguments = tool_call
-        .get("function")
-        .and_then(|function| function.get("arguments"))
-        .cloned()
-        .unwrap_or_else(|| json!("{}"));
-
-    if let Some(text) = arguments.as_str() {
-        serde_json::from_str::<Value>(text).unwrap_or_else(|_| json!({}))
-    } else {
-        arguments
+        outputs.push(chat_tool_call_to_response_function_call(&tool_call));
+        outputs.push(response_tool_output(&tool_call, &tool_result));
     }
-}
 
-fn tool_result_succeeded(tool_result: &Value) -> bool {
-    let content = message_content_text(tool_result);
-    !(content.starts_with("Tool ") && content.contains(" failed:"))
-}
-
-fn is_successful_edit_tool_call(tool_call: &Value) -> bool {
-    match tool_call_name(tool_call) {
-        "write_file" | "create_directory" | "delete_path" | "move_path" => true,
-        "apply_patch" => !tool_call_arguments(tool_call)
-            .get("checkOnly")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        "run_command" => run_command_looks_mutating(&tool_call_arguments(tool_call)),
-        _ => false,
-    }
+    (outputs, run)
 }
 
 fn failed_edit_requires_recovery(tool_call: &Value, tool_result: &Value) -> bool {
@@ -1657,244 +1649,6 @@ fn next_edit_recovery_state(
     }
 
     (false, 0)
-}
-
-fn should_require_validation(
-    validation_required: bool,
-    validation_attempted: bool,
-    edit_recovery_required: bool,
-) -> bool {
-    validation_required && !validation_attempted && !edit_recovery_required
-}
-
-fn run_command_looks_mutating(arguments: &Value) -> bool {
-    let text = run_command_text(arguments);
-
-    [
-        "apply",
-        "install",
-        "set-content",
-        "out-file",
-        "new-item",
-        "remove-item",
-        "move-item",
-        "copy-item",
-        "mkdir",
-        "rmdir",
-        "rm ",
-        "del ",
-        "move ",
-        "copy ",
-        ">",
-        ">>",
-    ]
-    .iter()
-    .any(|needle| text.contains(needle))
-}
-
-fn is_validation_tool_call(tool_call: &Value) -> bool {
-    tool_call_name(tool_call) == "run_command"
-        && run_command_looks_like_validation(&tool_call_arguments(tool_call))
-}
-
-fn run_command_text(arguments: &Value) -> String {
-    let command = arguments
-        .get("command")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let args = arguments
-        .get("args")
-        .and_then(Value::as_array)
-        .map(|items| {
-            items
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(" ")
-        })
-        .unwrap_or_default();
-
-    format!("{} {}", command, args).to_ascii_lowercase()
-}
-
-fn run_command_looks_like_validation(arguments: &Value) -> bool {
-    let text = run_command_text(arguments);
-
-    [
-        " build",
-        " test",
-        " check",
-        " lint",
-        " typecheck",
-        " type-check",
-        " tsc",
-        "vue-tsc",
-        "pytest",
-        "cargo test",
-        "cargo check",
-        "cargo build",
-        "go test",
-        "dotnet test",
-        "mvn test",
-        "gradle test",
-        "ctest",
-        "msbuild",
-        "make",
-        "ninja",
-    ]
-    .iter()
-    .any(|needle| text.contains(needle))
-}
-
-#[derive(Debug, Clone)]
-struct ValidationCommand {
-    command: String,
-    args: Vec<String>,
-    cwd: Option<String>,
-}
-
-fn package_script_exists(workspace: &Path, script: &str) -> bool {
-    let Ok(content) = fs::read_to_string(workspace.join("package.json")) else {
-        return false;
-    };
-    let Ok(parsed) = serde_json::from_str::<Value>(&content) else {
-        return false;
-    };
-
-    parsed
-        .get("scripts")
-        .and_then(Value::as_object)
-        .and_then(|scripts| scripts.get(script))
-        .and_then(Value::as_str)
-        .map(|value| !value.trim().is_empty())
-        .unwrap_or(false)
-}
-
-fn default_validation_commands(workspace: &Path) -> Vec<ValidationCommand> {
-    let mut commands = Vec::new();
-
-    for script in ["build", "test", "typecheck", "lint"] {
-        if package_script_exists(workspace, script) {
-            commands.push(ValidationCommand {
-                command: "npm".to_string(),
-                args: if script == "test" {
-                    vec!["test".to_string()]
-                } else {
-                    vec!["run".to_string(), script.to_string()]
-                },
-                cwd: None,
-            });
-            break;
-        }
-    }
-
-    if workspace.join("Cargo.toml").is_file() {
-        commands.push(ValidationCommand {
-            command: "cargo".to_string(),
-            args: vec!["test".to_string()],
-            cwd: None,
-        });
-    } else if workspace.join("src-tauri").join("Cargo.toml").is_file() {
-        commands.push(ValidationCommand {
-            command: "cargo".to_string(),
-            args: vec!["test".to_string()],
-            cwd: Some("src-tauri".to_string()),
-        });
-    }
-
-    if workspace.join("pyproject.toml").is_file() || workspace.join("pytest.ini").is_file() {
-        commands.push(ValidationCommand {
-            command: "python".to_string(),
-            args: vec!["-m".to_string(), "pytest".to_string()],
-            cwd: None,
-        });
-    }
-
-    commands
-}
-
-fn validation_tool_call(index: usize, command: &ValidationCommand) -> Value {
-    let mut arguments = json!({
-        "command": command.command,
-        "args": command.args,
-        "timeoutMs": 120000,
-    });
-
-    if let Some(cwd) = command.cwd.as_deref() {
-        arguments["cwd"] = json!(cwd);
-    }
-
-    json!({
-        "id": format!("auto-validation-{}", index),
-        "type": "function",
-        "function": {
-            "name": "run_command",
-            "arguments": serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string()),
-        }
-    })
-}
-
-fn run_default_validation_commands(
-    app: &AppHandle,
-    stream_id: Option<&str>,
-    workspace: &Path,
-    can_write: bool,
-    messages: &mut Vec<Value>,
-    trace_steps: &mut Vec<ChatTraceStep>,
-) -> bool {
-    let tool_calls = default_validation_commands(workspace)
-        .iter()
-        .enumerate()
-        .map(|(index, command)| validation_tool_call(index, command))
-        .collect::<Vec<_>>();
-
-    if tool_calls.is_empty() {
-        return false;
-    }
-
-    messages.push(json!({
-        "role": "assistant",
-        "content": "",
-        "tool_calls": tool_calls,
-    }));
-
-    let Some(tool_calls) = messages
-        .last()
-        .and_then(|message| message.get("tool_calls"))
-        .and_then(Value::as_array)
-        .cloned()
-    else {
-        return false;
-    };
-
-    for tool_call in tool_calls {
-        let call_step = tool_call_trace_step(&tool_call);
-        emit_trace_step(app, stream_id, &call_step);
-        append_trace_steps(trace_steps, vec![call_step]);
-
-        let mut stream_tool_output = |step: ChatTraceStep| {
-            emit_tool_chunk(app, stream_id, &step);
-        };
-        let tool_result = execute_code_tool_call(
-            workspace,
-            &tool_call,
-            can_write,
-            Some(&mut stream_tool_output),
-        );
-        let result_step = tool_result_trace_step(&tool_call, &tool_result);
-        emit_trace_step(app, stream_id, &result_step);
-        append_trace_steps(trace_steps, vec![result_step]);
-        messages.push(tool_result);
-    }
-
-    true
-}
-
-fn mark_validation_unavailable(messages: &mut Vec<Value>) {
-    messages.push(json!({
-        "role": "user",
-        "content": VALIDATION_UNAVAILABLE_INSTRUCTION,
-    }));
 }
 
 fn first_choice_finish_reason(parsed: &Value) -> Option<String> {
@@ -2874,9 +2628,12 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_thinking_omits_tool_choice() {
+    fn deepseek_thinking_omits_tool_choice_except_during_required_recovery() {
         assert_eq!(chat_tool_choice(true, true, false, false, false), None);
-        assert_eq!(chat_tool_choice(true, true, true, false, false), None);
+        assert_eq!(
+            chat_tool_choice(true, true, true, false, false),
+            Some(json!("required"))
+        );
     }
 
     #[test]
@@ -2899,6 +2656,10 @@ mod tests {
         );
         assert_eq!(
             chat_tool_choice(false, false, true, false, true),
+            Some(json!("required"))
+        );
+        assert_eq!(
+            chat_tool_choice(true, true, false, true, true),
             Some(json!("required"))
         );
     }
@@ -2948,8 +2709,22 @@ mod tests {
 
     #[test]
     fn edit_recovery_takes_priority_over_validation() {
-        assert!(!should_require_validation(true, false, true));
-        assert!(should_require_validation(true, false, false));
+        let mut validation = ValidationState::default();
+        validation.mark_successful_edit();
+
+        assert!(!validation.requires_tool(true));
+        assert!(validation.requires_tool(false));
+    }
+
+    #[test]
+    fn validation_instructions_require_repair_instead_of_early_final_answer() {
+        let required = VALIDATION_REQUIRED_INSTRUCTION.to_ascii_lowercase();
+        let unavailable = VALIDATION_UNAVAILABLE_INSTRUCTION.to_ascii_lowercase();
+
+        assert!(required.contains("fix"));
+        assert!(required.contains("until it passes"));
+        assert!(!VALIDATION_UNAVAILABLE_INSTRUCTION.contains("Write the final answer now"));
+        assert!(unavailable.contains("inspect"));
     }
 
     #[test]
@@ -3126,70 +2901,12 @@ mod tests {
         assert!(payload_messages[1]["content"]
             .as_str()
             .unwrap()
+            .to_ascii_lowercase()
             .contains("call run_command"));
         assert!(!payload_messages[1]["content"]
             .as_str()
             .unwrap()
             .contains(FINAL_ANSWER_INSTRUCTION));
-    }
-
-    #[test]
-    fn detects_validation_and_edit_tool_calls() {
-        assert!(is_successful_edit_tool_call(&json!({
-            "function": {
-                "name": "write_file",
-                "arguments": "{\"file\":\"src/lib.rs\",\"content\":\"x\"}"
-            }
-        })));
-        assert!(!is_successful_edit_tool_call(&json!({
-            "function": {
-                "name": "apply_patch",
-                "arguments": "{\"patchText\":\"diff --git a/a b/a\",\"checkOnly\":true}"
-            }
-        })));
-        assert!(is_validation_tool_call(&json!({
-            "function": {
-                "name": "run_command",
-                "arguments": "{\"command\":\"npm\",\"args\":[\"run\",\"build\"]}"
-            }
-        })));
-        assert!(!is_validation_tool_call(&json!({
-            "function": {
-                "name": "run_command",
-                "arguments": "{\"command\":\"git\",\"args\":[\"status\"]}"
-            }
-        })));
-    }
-
-    #[test]
-    fn default_validation_commands_detect_package_and_tauri_cargo() {
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let workspace = std::env::temp_dir().join(format!("matrix-validation-test-{}", stamp));
-        fs::create_dir_all(workspace.join("src-tauri")).unwrap();
-        fs::write(
-            workspace.join("package.json"),
-            r#"{"scripts":{"build":"vite build"}}"#,
-        )
-        .unwrap();
-        fs::write(
-            workspace.join("src-tauri").join("Cargo.toml"),
-            "[package]\n",
-        )
-        .unwrap();
-
-        let commands = default_validation_commands(&workspace);
-
-        assert_eq!(commands.len(), 2);
-        assert_eq!(commands[0].command, "npm");
-        assert_eq!(commands[0].args, vec!["run", "build"]);
-        assert_eq!(commands[1].command, "cargo");
-        assert_eq!(commands[1].args, vec!["test"]);
-        assert_eq!(commands[1].cwd.as_deref(), Some("src-tauri"));
-
-        let _ = fs::remove_dir_all(workspace);
     }
 
     #[test]
