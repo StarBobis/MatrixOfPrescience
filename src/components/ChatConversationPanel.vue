@@ -1317,9 +1317,6 @@ defineExpose({
                 <span v-if="message.role === 'assistant'">
                   {{ t("chat.messageMeta.reasoning", { effort: getReasoningLabel(message) }) }}
                 </span>
-                <span v-if="formatDuration(message.durationMs)">
-                  {{ t("chat.messageMeta.duration", { duration: formatDuration(message.durationMs) }) }}
-                </span>
               </div>
             </div>
             <div class="message-meta-actions">
@@ -1519,6 +1516,9 @@ defineExpose({
             </span>
             <span class="reaction-pill disagree">
               {{ t("chat.disagree", { count: (message.disagreeMemberIds ?? []).length }) }}
+            </span>
+            <span v-if="formatDuration(message.durationMs)" class="message-duration-badge">
+              {{ t("chat.messageMeta.duration", { duration: formatDuration(message.durationMs) }) }}
             </span>
           </div>
         </article>
