@@ -592,13 +592,13 @@ pub(crate) fn code_tools_schema(strict: bool, allow_writes: bool) -> Value {
         finalize_tool_function(
             json!({
                 "name": "apply_patch",
-                "description": "Apply a unified diff patch inside the workspace. Keep each call focused on one file and one coherent change; split large edits across multiple calls instead of rewriting a whole file. Every hunk body line must start with ' ', '+', '-', or '\\'. Hunk line counts must match the body. Use checkOnly=true to validate without changing files.",
+                "description": "Apply a unified diff patch inside the workspace. Keep each call focused on one file and one coherent change; split large edits across multiple calls instead of rewriting a whole file. Before patching, read the exact current target location. Build hunks from stable nearby content, not remembered or hand-guessed line numbers. Every hunk body line must start with ' ', '+', '-', or '\\'. Hunk line counts must match the body. Use checkOnly=true to validate non-trivial patches before applying.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "patchText": {
                             "type": "string",
-                            "description": "Unified diff text accepted by git apply. Context lines require a leading marker space before their source indentation."
+                            "description": "Unified diff text accepted by git apply. Context lines require a leading marker space before their source indentation. Prefer exact old lines plus a few stable context lines; avoid fragile @@ line ranges unless they were generated from freshly read content."
                         },
                         "checkOnly": {
                             "type": "boolean",
@@ -2414,37 +2414,220 @@ fn prepare_checked_patch(workspace: &Path, patch_text: &str) -> Result<(PathBuf,
     }
 }
 
+fn normalize_match_line(line: &str) -> String {
+    line.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn find_line_fragment(lines: &[String], fragment: &[String], start_hint: usize) -> Option<usize> {
+    if fragment.is_empty() {
+        return Some(start_hint.min(lines.len()));
+    }
+
+    if fragment.len() > lines.len() {
+        return None;
+    }
+
+    let max_start = lines.len() - fragment.len();
+    let start_hint = start_hint.min(max_start);
+    let mut candidates = Vec::with_capacity(max_start + 1);
+    candidates.push(start_hint);
+
+    for distance in 1..=max_start.max(start_hint) {
+        if let Some(before) = start_hint.checked_sub(distance) {
+            candidates.push(before);
+        }
+        let after = start_hint + distance;
+        if after <= max_start {
+            candidates.push(after);
+        }
+    }
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    for start in &candidates {
+        if lines[*start..*start + fragment.len()] == *fragment {
+            return Some(*start);
+        }
+    }
+
+    let normalized_fragment = fragment
+        .iter()
+        .map(|line| normalize_match_line(line))
+        .collect::<Vec<_>>();
+    candidates.into_iter().find(|start| {
+        lines[*start..*start + fragment.len()]
+            .iter()
+            .map(|line| normalize_match_line(line))
+            .eq(normalized_fragment.iter().cloned())
+    })
+}
+
+fn apply_patch_by_line_fragments(
+    workspace: &Path,
+    patch_file: &Path,
+    check_only: bool,
+) -> Result<(String, String), String> {
+    let patch_text = fs::read_to_string(patch_file)
+        .map_err(|error| format!("Failed to read patch for fallback apply: {}", error))?;
+    let normalized_patch = normalize_relaxed_unified_diff(&patch_text)?;
+    let patch_lines = normalized_patch.lines().collect::<Vec<_>>();
+    let mut index = 0;
+    let mut pending_writes: Vec<(PathBuf, String)> = Vec::new();
+
+    while index < patch_lines.len() {
+        if !patch_lines[index].starts_with("diff --git ") {
+            index += 1;
+            continue;
+        }
+
+        let mut target_file = None;
+        index += 1;
+        while index < patch_lines.len() && !patch_lines[index].starts_with("@@ -") {
+            if let Some(path) = patch_lines[index].strip_prefix("+++ b/") {
+                target_file = Some(validate_relative_file(path)?);
+            }
+            index += 1;
+        }
+
+        let Some(target_file) = target_file else {
+            return Err("Fallback patch apply could not detect a target file.".to_string());
+        };
+        let target_path = resolve_workspace_relative_path(workspace, &target_file)?;
+        let existing = fs::read_to_string(&target_path)
+            .map_err(|error| format!("Fallback patch apply failed to read {}: {}", target_file, error))?;
+        let normalized_existing = existing.replace("\r\n", "\n").replace('\r', "\n");
+        let had_trailing_newline = normalized_existing.ends_with('\n');
+        let mut file_lines = normalized_existing
+            .split('\n')
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if had_trailing_newline {
+            file_lines.pop();
+        }
+
+        while index < patch_lines.len() && patch_lines[index].starts_with("@@ -") {
+            let (old_start, _, _) = parse_hunk_header(patch_lines[index])?;
+            let start_hint = old_start
+                .parse::<usize>()
+                .ok()
+                .and_then(|value| value.checked_sub(1))
+                .unwrap_or(0);
+            index += 1;
+
+            let mut old_fragment = Vec::new();
+            let mut new_fragment = Vec::new();
+            while index < patch_lines.len() && !is_hunk_boundary(patch_lines[index]) {
+                let line = patch_lines[index];
+                match line.as_bytes().first().copied() {
+                    Some(b' ') => {
+                        old_fragment.push(line[1..].to_string());
+                        new_fragment.push(line[1..].to_string());
+                    }
+                    Some(b'-') => old_fragment.push(line[1..].to_string()),
+                    Some(b'+') => new_fragment.push(line[1..].to_string()),
+                    Some(b'\\') => {}
+                    _ => {
+                        old_fragment.push(line.to_string());
+                        new_fragment.push(line.to_string());
+                    }
+                }
+                index += 1;
+            }
+
+            let Some(fragment_start) = find_line_fragment(&file_lines, &old_fragment, start_hint)
+            else {
+                return Err(format!(
+                    "Fallback patch apply could not find the expected text in {}.",
+                    target_file
+                ));
+            };
+            file_lines.splice(
+                fragment_start..fragment_start + old_fragment.len(),
+                new_fragment.into_iter(),
+            );
+        }
+
+        let mut next_content = file_lines.join("\n");
+        if had_trailing_newline {
+            next_content.push('\n');
+        }
+        pending_writes.push((target_path, next_content));
+    }
+
+    if pending_writes.is_empty() {
+        return Err("Fallback patch apply found no text hunks.".to_string());
+    }
+
+    if !check_only {
+        for (path, content) in pending_writes {
+            fs::write(path, content)
+                .map_err(|error| format!("Fallback patch apply failed to write file: {}", error))?;
+        }
+    }
+
+    Ok((
+        "Patch applied with text-fragment fallback.".to_string(),
+        String::new(),
+    ))
+}
+
 fn run_git_apply(
     workspace: &Path,
     patch_file: &Path,
     check_only: bool,
 ) -> Result<(String, String), String> {
-    let mut command = Command::new("git");
-    command
-        .current_dir(workspace)
-        .arg("apply")
-        .arg("--whitespace=nowarn");
+    let attempts: &[&[&str]] = &[
+        &[],
+        &["--recount"],
+        &["--ignore-space-change", "--ignore-whitespace"],
+        &["--unidiff-zero"],
+    ];
+    let mut failures = Vec::new();
 
-    if check_only {
-        command.arg("--check");
-    }
+    for extra_args in attempts {
+        let mut command = Command::new("git");
+        command
+            .current_dir(workspace)
+            .arg("apply")
+            .arg("--whitespace=nowarn")
+            .args(*extra_args);
 
-    let output = command
-        .arg(patch_file)
-        .output()
-        .map_err(|error| format!("Failed to run git apply: {}", error))?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        if check_only {
+            command.arg("--check");
+        }
 
-    if !output.status.success() {
-        return Err(if stderr.trim().is_empty() {
-            format!("git apply failed: {}", stdout)
+        let output = command
+            .arg(patch_file)
+            .output()
+            .map_err(|error| format!("Failed to run git apply: {}", error))?;
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+        if output.status.success() {
+            return Ok((stdout, stderr));
+        }
+
+        let label = if extra_args.is_empty() {
+            "default".to_string()
         } else {
-            format!("git apply failed: {}", stderr)
-        });
+            extra_args.join(" ")
+        };
+        let message = if stderr.trim().is_empty() {
+            stdout
+        } else {
+            stderr
+        };
+        failures.push(format!("{label}: {}", message.trim()));
     }
 
-    Ok((stdout, stderr))
+    apply_patch_by_line_fragments(workspace, patch_file, check_only)
+        .map_err(|fallback_error| {
+            format!(
+                "git apply failed:\n{}\ntext-fragment fallback failed: {}",
+                failures.join("\n"),
+                fallback_error
+            )
+        })
 }
 
 #[tauri::command]
@@ -2684,12 +2867,99 @@ mod tests {
         )
         .unwrap();
 
-        assert!(result.contains("Patch format was normalized"));
+        assert!(result.contains("Patch applied to files"));
         assert_eq!(
             fs::read_to_string(source_dir.join("example.cpp"))
                 .unwrap()
                 .replace("\r\n", "\n"),
             "\tfirst_context();\n\tnew_call();\n\tlast_context();\n"
+        );
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn apply_patch_falls_back_for_model_whitespace_drift() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("matrix-patch-fuzzy-test-{}", stamp));
+        let source_dir = workspace.join("src");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("example.cpp"),
+            "\tif (DX12HotPathState::skipAll && mOrigDispatch) {\n\t\treturn;\n\t}\n",
+        )
+        .unwrap();
+        let workspace = fs::canonicalize(&workspace).unwrap();
+        let whitespace_drift = concat!(
+            "diff --git a/src/example.cpp b/src/example.cpp\n",
+            "--- a/src/example.cpp\n",
+            "+++ b/src/example.cpp\n",
+            "@@ -1,3 +1,3 @@\n",
+            "-    if (DX12HotPathState::skipAll && mOrigDispatch) {\n",
+            "+    if (!(DX12HotPathState::HookWorkFlags & DX12HotPathState::MASK_DISPATCH_WORK) && mOrigDispatch) {\n",
+            "         return;\n",
+            "     }\n",
+        );
+
+        let result = apply_patch_tool(
+            &workspace,
+            &json!({
+                "patchText": whitespace_drift
+            }),
+        )
+        .unwrap();
+
+        assert!(result.contains("Patch applied to files"));
+        assert_eq!(
+            fs::read_to_string(source_dir.join("example.cpp"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "    if (!(DX12HotPathState::HookWorkFlags & DX12HotPathState::MASK_DISPATCH_WORK) && mOrigDispatch) {\n\t\treturn;\n\t}\n"
+        );
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn apply_patch_falls_back_for_wrong_hunk_line_numbers() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("matrix-patch-line-drift-test-{}", stamp));
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::write(
+            workspace.join("src/example.cpp"),
+            "first_context();\nold_call();\nlast_context();\n",
+        )
+        .unwrap();
+        let workspace = fs::canonicalize(&workspace).unwrap();
+        let line_drift = concat!(
+            "diff --git a/src/example.cpp b/src/example.cpp\n",
+            "--- a/src/example.cpp\n",
+            "+++ b/src/example.cpp\n",
+            "@@ -900,1 +900,1 @@\n",
+            "-old_call();\n",
+            "+new_call();\n",
+        );
+
+        let result = apply_patch_tool(
+            &workspace,
+            &json!({
+                "patchText": line_drift
+            }),
+        )
+        .unwrap();
+
+        assert!(result.contains("Patch applied to files"));
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/example.cpp"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "first_context();\nnew_call();\nlast_context();\n"
         );
 
         let _ = fs::remove_dir_all(&workspace);

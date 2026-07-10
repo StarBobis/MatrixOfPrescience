@@ -105,7 +105,7 @@ struct ChatCompletionStreamEvent {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OverloadRetryProgress {
+enum HttpRetryProgress {
     Waiting { attempt: usize, delay: Duration },
     Recovered { attempts: usize },
 }
@@ -188,8 +188,8 @@ const MAX_EDIT_RECOVERY_TOOL_ROUNDS: usize = 4;
 const MAX_CHAT_TRACE_STEPS: usize = 160;
 const TRACE_STEP_TEXT_LIMIT: usize = 280;
 const CHAT_COMPLETION_STREAM_EVENT: &str = "chat-completion-stream";
-const NEW_API_OVERLOAD_INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
-const NEW_API_OVERLOAD_MAX_RETRY_DELAY: Duration = Duration::from_secs(15);
+const HTTP_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
+const HTTP_RETRY_MAX_DELAY: Duration = Duration::from_secs(15);
 const RETRY_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const FINAL_ANSWER_INSTRUCTION: &str =
     "Use the tool results already provided and write the final answer now.";
@@ -1881,32 +1881,15 @@ fn append_reasoning_trace_steps(trace_steps: &mut Vec<ChatTraceStep>, message: &
     append_trace_steps(trace_steps, steps);
 }
 
-fn is_new_api_resource_overload(status: reqwest::StatusCode, body: &str) -> bool {
-    if status != reqwest::StatusCode::SERVICE_UNAVAILABLE {
-        return false;
-    }
-
-    let Ok(parsed) = serde_json::from_str::<Value>(body) else {
-        return false;
-    };
-    let Some(error) = parsed.get("error") else {
-        return false;
-    };
-    let error_type = error.get("type").and_then(Value::as_str);
-    let error_code = error.get("code").and_then(Value::as_str);
-
-    error_type == Some("new_api_error")
-        && matches!(
-            error_code,
-            Some("system_cpu_overloaded" | "system_memory_overloaded" | "system_disk_overloaded")
-        )
+fn should_retry_http_failure(status: reqwest::StatusCode, _body: &str) -> bool {
+    !status.is_success()
 }
 
 fn request_was_cancelled(cancellation: Option<&AtomicBool>) -> bool {
     cancellation.is_some_and(|token| token.load(Ordering::Acquire))
 }
 
-async fn wait_for_overload_retry(
+async fn wait_for_http_retry(
     delay: Duration,
     cancellation: Option<&AtomicBool>,
 ) -> Result<(), String> {
@@ -1926,14 +1909,14 @@ async fn wait_for_overload_retry(
     }
 }
 
-async fn send_http_request_with_overload_retry(
+async fn send_http_request_with_retry(
     client: &reqwest::Client,
     endpoint: &str,
     api_key: &str,
     provider_name: &str,
     payload: &Value,
     cancellation: Option<&AtomicBool>,
-    retry_progress: Option<&(dyn Fn(OverloadRetryProgress) + Sync)>,
+    retry_progress: Option<&(dyn Fn(HttpRetryProgress) + Sync)>,
     initial_retry_delay: Duration,
 ) -> Result<reqwest::Response, String> {
     let mut retry_delay = initial_retry_delay;
@@ -1949,14 +1932,27 @@ async fn send_http_request_with_overload_retry(
             .bearer_auth(api_key.trim())
             .json(payload)
             .send()
-            .await
-            .map_err(|error| format!("Request to {} failed: {}", provider_name, error))?;
+            .await;
+        let Ok(response) = response else {
+            retry_attempt += 1;
+            if let Some(notify) = retry_progress {
+                notify(HttpRetryProgress::Waiting {
+                    attempt: retry_attempt,
+                    delay: retry_delay,
+                });
+            }
+            wait_for_http_retry(retry_delay, cancellation).await?;
+            retry_delay = retry_delay
+                .saturating_mul(2)
+                .min(HTTP_RETRY_MAX_DELAY);
+            continue;
+        };
         let status = response.status();
 
         if status.is_success() {
             if retry_attempt > 0 {
                 if let Some(notify) = retry_progress {
-                    notify(OverloadRetryProgress::Recovered {
+                    notify(HttpRetryProgress::Recovered {
                         attempts: retry_attempt,
                     });
                 }
@@ -1966,10 +1962,23 @@ async fn send_http_request_with_overload_retry(
 
         let body = response
             .text()
-            .await
-            .map_err(|error| format!("Failed to read {} response: {}", provider_name, error))?;
+            .await;
+        let Ok(body) = body else {
+            retry_attempt += 1;
+            if let Some(notify) = retry_progress {
+                notify(HttpRetryProgress::Waiting {
+                    attempt: retry_attempt,
+                    delay: retry_delay,
+                });
+            }
+            wait_for_http_retry(retry_delay, cancellation).await?;
+            retry_delay = retry_delay
+                .saturating_mul(2)
+                .min(HTTP_RETRY_MAX_DELAY);
+            continue;
+        };
 
-        if !is_new_api_resource_overload(status, &body) {
+        if !should_retry_http_failure(status, &body) {
             return Err(format!(
                 "{} returned HTTP {}: {}",
                 provider_name, status, body
@@ -1978,15 +1987,15 @@ async fn send_http_request_with_overload_retry(
 
         retry_attempt += 1;
         if let Some(notify) = retry_progress {
-            notify(OverloadRetryProgress::Waiting {
+            notify(HttpRetryProgress::Waiting {
                 attempt: retry_attempt,
                 delay: retry_delay,
             });
         }
-        wait_for_overload_retry(retry_delay, cancellation).await?;
+        wait_for_http_retry(retry_delay, cancellation).await?;
         retry_delay = retry_delay
             .saturating_mul(2)
-            .min(NEW_API_OVERLOAD_MAX_RETRY_DELAY);
+            .min(HTTP_RETRY_MAX_DELAY);
     }
 }
 
@@ -1998,7 +2007,7 @@ async fn send_chat_completion_request(
     payload: &Value,
     cancellation: Option<&AtomicBool>,
 ) -> Result<Value, String> {
-    let response = send_http_request_with_overload_retry(
+    let response = send_http_request_with_retry(
         client,
         endpoint,
         api_key,
@@ -2006,7 +2015,7 @@ async fn send_chat_completion_request(
         payload,
         cancellation,
         None,
-        NEW_API_OVERLOAD_INITIAL_RETRY_DELAY,
+        HTTP_RETRY_INITIAL_DELAY,
     )
     .await?;
     let body = response
@@ -2061,7 +2070,7 @@ async fn send_responses_request(
     payload: &Value,
     cancellation: Option<&AtomicBool>,
 ) -> Result<Value, String> {
-    let response = send_http_request_with_overload_retry(
+    let response = send_http_request_with_retry(
         client,
         endpoint,
         api_key,
@@ -2069,7 +2078,7 @@ async fn send_responses_request(
         payload,
         cancellation,
         None,
-        NEW_API_OVERLOAD_INITIAL_RETRY_DELAY,
+        HTTP_RETRY_INITIAL_DELAY,
     )
     .await?;
     let body = response
@@ -2144,14 +2153,14 @@ fn emit_stream_event(
     );
 }
 
-fn emit_overload_retry_event(app: &AppHandle, stream_id: &str, progress: OverloadRetryProgress) {
+fn emit_overload_retry_event(app: &AppHandle, stream_id: &str, progress: HttpRetryProgress) {
     let (event_type, retry_attempt, retry_delay_ms) = match progress {
-        OverloadRetryProgress::Waiting { attempt, delay } => (
+        HttpRetryProgress::Waiting { attempt, delay } => (
             "retryWaiting",
             attempt,
             Some(delay.as_millis().min(u64::MAX as u128) as u64),
         ),
-        OverloadRetryProgress::Recovered { attempts } => ("retryRecovered", attempts, None),
+        HttpRetryProgress::Recovered { attempts } => ("retryRecovered", attempts, None),
     };
 
     let _ = app.emit(
@@ -2362,7 +2371,7 @@ async fn send_chat_completion_stream_request(
     payload["stream_options"] = json!({ "include_usage": true });
     let report_retry = |progress| emit_overload_retry_event(app, stream_id, progress);
 
-    let response = send_http_request_with_overload_retry(
+    let response = send_http_request_with_retry(
         client,
         endpoint,
         api_key,
@@ -2370,7 +2379,7 @@ async fn send_chat_completion_stream_request(
         &payload,
         cancellation,
         Some(&report_retry),
-        NEW_API_OVERLOAD_INITIAL_RETRY_DELAY,
+        HTTP_RETRY_INITIAL_DELAY,
     )
     .await?;
 
@@ -2646,7 +2655,7 @@ async fn send_responses_stream_request(
     payload["stream"] = json!(true);
     let report_retry = |progress| emit_overload_retry_event(app, stream_id, progress);
 
-    let response = send_http_request_with_overload_retry(
+    let response = send_http_request_with_retry(
         client,
         endpoint,
         api_key,
@@ -2654,7 +2663,7 @@ async fn send_responses_stream_request(
         &payload,
         cancellation,
         Some(&report_retry),
-        NEW_API_OVERLOAD_INITIAL_RETRY_DELAY,
+        HTTP_RETRY_INITIAL_DELAY,
     )
     .await?;
 
@@ -2765,8 +2774,10 @@ mod tests {
     use std::net::TcpListener;
     use std::thread;
 
-    fn spawn_overload_then_success_server(
-        overload_count: usize,
+    fn spawn_status_then_success_server(
+        retry_status: &'static str,
+        retry_body: &'static str,
+        retry_count: usize,
     ) -> (String, thread::JoinHandle<usize>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("test server should bind");
         let address = listener
@@ -2775,7 +2786,7 @@ mod tests {
         let handle = thread::spawn(move || {
             let mut requests = 0;
 
-            for attempt in 0..=overload_count {
+            for attempt in 0..=retry_count {
                 let (mut stream, _) = listener.accept().expect("test server should accept");
                 let mut request = [0_u8; 4096];
                 let _ = stream
@@ -2783,11 +2794,8 @@ mod tests {
                     .expect("test server should read request");
                 requests += 1;
 
-                let (status, body) = if attempt < overload_count {
-                    (
-                        "503 Service Unavailable",
-                        r#"{"error":{"message":"system cpu overloaded (current: 93.1%, threshold: 85%)","type":"new_api_error","param":"","code":"system_cpu_overloaded"}}"#,
-                    )
+                let (status, body) = if attempt < retry_count {
+                    (retry_status, retry_body)
                 } else {
                     ("200 OK", r#"{"output_text":"recovered"}"#)
                 };
@@ -2804,6 +2812,16 @@ mod tests {
         });
 
         (format!("http://{address}/v1/responses"), handle)
+    }
+
+    fn spawn_overload_then_success_server(
+        overload_count: usize,
+    ) -> (String, thread::JoinHandle<usize>) {
+        spawn_status_then_success_server(
+            "503 Service Unavailable",
+            r#"{"error":{"message":"system cpu overloaded (current: 93.1%, threshold: 85%)","type":"new_api_error","param":"","code":"system_cpu_overloaded"}}"#,
+            overload_count,
+        )
     }
 
     #[test]
@@ -2835,7 +2853,7 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .push(event)
         };
-        let response = tauri::async_runtime::block_on(send_http_request_with_overload_retry(
+        let response = tauri::async_runtime::block_on(send_http_request_with_retry(
             &reqwest::Client::new(),
             &endpoint,
             "test-key",
@@ -2856,42 +2874,81 @@ mod tests {
                 .into_inner()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
             vec![
-                OverloadRetryProgress::Waiting {
+                HttpRetryProgress::Waiting {
                     attempt: 1,
                     delay: Duration::ZERO,
                 },
-                OverloadRetryProgress::Waiting {
+                HttpRetryProgress::Waiting {
                     attempt: 2,
                     delay: Duration::ZERO,
                 },
-                OverloadRetryProgress::Recovered { attempts: 2 },
+                HttpRetryProgress::Recovered { attempts: 2 },
             ]
         );
     }
 
     #[test]
-    fn only_retries_explicit_new_api_resource_overload_errors() {
-        let cpu_overload = r#"{"error":{"type":"new_api_error","code":"system_cpu_overloaded"}}"#;
-        let generic_unavailable = r#"{"error":{"type":"server_error","code":"unavailable"}}"#;
+    fn retries_bad_gateway_until_request_succeeds() {
+        let (endpoint, server) =
+            spawn_status_then_success_server("502 Bad Gateway", "error code: 502", 1);
+        let progress = Mutex::new(Vec::new());
+        let record_progress = |event| {
+            progress
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(event)
+        };
+        let response = tauri::async_runtime::block_on(send_http_request_with_retry(
+            &reqwest::Client::new(),
+            &endpoint,
+            "test-key",
+            "ChatGPT",
+            &json!({ "model": "gpt-5.5", "input": "test" }),
+            None,
+            Some(&record_progress),
+            std::time::Duration::ZERO,
+        ))
+        .expect("bad gateway should be retried");
+        let body: Value =
+            tauri::async_runtime::block_on(response.json()).expect("response should parse");
 
-        assert!(is_new_api_resource_overload(
-            reqwest::StatusCode::SERVICE_UNAVAILABLE,
-            cpu_overload,
+        assert_eq!(body["output_text"], "recovered");
+        assert_eq!(server.join().expect("test server should finish"), 2);
+        assert_eq!(
+            progress
+                .into_inner()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            vec![
+                HttpRetryProgress::Waiting {
+                    attempt: 1,
+                    delay: Duration::ZERO,
+                },
+                HttpRetryProgress::Recovered { attempts: 1 },
+            ]
+        );
+    }
+
+    #[test]
+    fn retries_any_http_failure_status() {
+        assert!(should_retry_http_failure(
+            reqwest::StatusCode::BAD_REQUEST,
+            "bad request",
         ));
-        assert!(!is_new_api_resource_overload(
-            reqwest::StatusCode::SERVICE_UNAVAILABLE,
-            generic_unavailable,
-        ));
-        assert!(!is_new_api_resource_overload(
+        assert!(should_retry_http_failure(
             reqwest::StatusCode::BAD_GATEWAY,
-            cpu_overload,
+            "bad gateway",
         ));
+        assert!(should_retry_http_failure(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            "unavailable",
+        ));
+        assert!(!should_retry_http_failure(reqwest::StatusCode::OK, "{}"));
     }
 
     #[test]
     fn cancelled_retry_stops_before_sending_another_request() {
         let cancellation = AtomicBool::new(true);
-        let error = tauri::async_runtime::block_on(send_http_request_with_overload_retry(
+        let error = tauri::async_runtime::block_on(send_http_request_with_retry(
             &reqwest::Client::new(),
             "http://127.0.0.1:1/v1/responses",
             "test-key",
@@ -3307,6 +3364,24 @@ mod tests {
         assert!(names.contains(&"move_path"));
         assert!(names.contains(&"apply_patch"));
         assert!(names.contains(&"run_command"));
+
+        let apply_patch_tool = schema
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| {
+                tool.get("function")
+                    .and_then(|function| function.get("name"))
+                    .and_then(Value::as_str)
+                    == Some("apply_patch")
+            })
+            .expect("apply_patch tool should be present");
+        let apply_patch_description = apply_patch_tool["function"]["description"]
+            .as_str()
+            .expect("apply_patch should describe safe patch construction");
+        assert!(apply_patch_description.contains("read the exact current target location"));
+        assert!(apply_patch_description.contains("hand-guessed line numbers"));
+        assert!(apply_patch_description.contains("checkOnly=true"));
     }
 
     #[test]
