@@ -184,6 +184,7 @@
       "detail": "详情",
       "expand": "展开执行过程",
       "kind": {
+        "network": "网络",
         "reasoning": "推理",
         "status": "状态",
         "tool": "工具"
@@ -346,6 +347,10 @@
   "chatRuntime": {
     "callFailedContent": "调用失败：{error}",
     "commandOutputStreaming": "正在捕获命令输出...",
+    "retryFailed": "连接重试失败。",
+    "retryInterrupted": "已停止连接重试。",
+    "retryRecovered": "连接已恢复，共重试 {attempts} 次。",
+    "retryWaiting": "New API 负载过高，第 {attempt} 次重试将在 {seconds} 秒后进行...",
     "consensusLimit": "本轮讨论达到共识轮次上限，仍存在分歧。请人工收束问题或调整群友角色后继续。",
     "decisionPendingContent": "正在判断是否需要发言...",
     "decisionWaitContent": "本轮先观望。",

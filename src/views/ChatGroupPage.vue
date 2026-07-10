@@ -113,6 +113,7 @@ interface ChatCompletionInvokeRequest {
   codeToolsEnabled?: boolean;
   canWrite?: boolean;
   streamId?: string;
+  cancellationId?: string;
   systemPrompt: string;
   messages: ApiChatMessage[];
 }
@@ -1625,6 +1626,7 @@ async function invokeStreamingCompletion(
       request: {
         ...request,
         streamId: messageId,
+        cancellationId: runId,
       },
     });
 
@@ -1677,8 +1679,10 @@ function stopGeneration() {
     return;
   }
 
+  const runId = activeRunId.value;
   activeRunId.value = "";
   sending.value = false;
+  void invoke("cancel_chat_completion", { cancellationId: runId }).catch(() => undefined);
 
   for (const messageId of pendingMessageIds.value) {
     const message = activeMessages.value.find((item) => item.id === messageId);
@@ -1711,6 +1715,11 @@ async function resetCurrentSession() {
     );
   } catch {
     return;
+  }
+
+  const runId = activeRunId.value;
+  if (runId) {
+    void invoke("cancel_chat_completion", { cancellationId: runId }).catch(() => undefined);
   }
 
   for (const timer of speakingTimers.values()) {
@@ -2041,6 +2050,7 @@ async function voteOnAnswer(
         wireApi: provider.wireApi,
         reasoningEffort: voter.reasoningEffort,
         temperature: 0,
+        cancellationId: runId,
         systemPrompt: buildSystemPrompt(
           voter,
           activeGroup.value,
@@ -2313,6 +2323,7 @@ async function sendMessage() {
       }
     }
   } finally {
+    await invoke("finish_chat_completion", { cancellationId: runId }).catch(() => undefined);
     if (activeRunId.value === runId) {
       activeRunId.value = "";
       sending.value = false;

@@ -4,11 +4,16 @@ use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Manager, State};
 
 mod dsml;
 mod tools;
@@ -56,6 +61,7 @@ struct ChatCompletionRequest {
     code_tools_enabled: Option<bool>,
     can_write: Option<bool>,
     stream_id: Option<String>,
+    cancellation_id: Option<String>,
     messages: Vec<ChatMessage>,
 }
 
@@ -94,6 +100,14 @@ struct ChatCompletionStreamEvent {
     text: String,
     detail: Option<String>,
     usage: Option<ChatCompletionUsage>,
+    retry_attempt: Option<usize>,
+    retry_delay_ms: Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverloadRetryProgress {
+    Waiting { attempt: usize, delay: Duration },
+    Recovered { attempts: usize },
 }
 
 #[derive(Debug, Default)]
@@ -102,6 +116,36 @@ struct ToolCallAccumulator {
     call_type: String,
     function_name: String,
     function_arguments: String,
+}
+
+#[derive(Default)]
+struct ChatCancellationState {
+    tokens: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+impl ChatCancellationState {
+    fn token(&self, cancellation_id: &str) -> Arc<AtomicBool> {
+        let mut tokens = self
+            .tokens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        tokens
+            .entry(cancellation_id.to_string())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone()
+    }
+
+    fn cancel(&self, cancellation_id: &str) {
+        let token = self.token(cancellation_id);
+        token.store(true, Ordering::Release);
+    }
+
+    fn finish(&self, cancellation_id: &str) {
+        self.tokens
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .remove(cancellation_id);
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,6 +188,9 @@ const MAX_EDIT_RECOVERY_TOOL_ROUNDS: usize = 4;
 const MAX_CHAT_TRACE_STEPS: usize = 160;
 const TRACE_STEP_TEXT_LIMIT: usize = 280;
 const CHAT_COMPLETION_STREAM_EVENT: &str = "chat-completion-stream";
+const NEW_API_OVERLOAD_INITIAL_RETRY_DELAY: Duration = Duration::from_secs(1);
+const NEW_API_OVERLOAD_MAX_RETRY_DELAY: Duration = Duration::from_secs(15);
+const RETRY_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const FINAL_ANSWER_INSTRUCTION: &str =
     "Use the tool results already provided and write the final answer now.";
 const EDIT_FAILURE_RECOVERY_INSTRUCTION: &str = "The previous edit tool call failed. Do not stop or provide a final answer solely because an edit did not apply. Recover using the error and the current workspace state: re-read the target when the context may be stale, then retry with a corrected smaller patch or a different available edit tool. Do not repeat the identical failing call. Continue until the requested change is complete or no available tool can resolve a genuine blocker.";
@@ -739,6 +786,7 @@ async fn copy_avatar_to_cache(
 async fn chat_completion(
     app: AppHandle,
     request: ChatCompletionRequest,
+    cancellation_state: State<'_, ChatCancellationState>,
 ) -> Result<ChatCompletionResponse, String> {
     if request.api_key.trim().is_empty() {
         return Err(format!(
@@ -758,6 +806,10 @@ async fn chat_completion(
     } else {
         None
     };
+    let cancellation = request
+        .cancellation_id
+        .as_deref()
+        .map(|cancellation_id| cancellation_state.token(cancellation_id));
 
     let mut messages: Vec<Value> = Vec::new();
     if let Some(system_prompt) = request.system_prompt.as_deref() {
@@ -780,7 +832,7 @@ async fn chat_completion(
     let is_deepseek = is_deepseek_provider(&request.provider_name, &request.base_url);
 
     if should_use_responses_api(&request, is_deepseek) {
-        return openai_responses_completion(app, request, code_workspace).await;
+        return openai_responses_completion(app, request, code_workspace, cancellation).await;
     }
 
     let endpoint = chat_completions_endpoint(&request.base_url);
@@ -851,6 +903,7 @@ async fn chat_completion(
             &request.api_key,
             &request.provider_name,
             &payload,
+            cancellation.as_deref(),
         )
         .await
         {
@@ -878,6 +931,7 @@ async fn chat_completion(
                     &request.api_key,
                     &request.provider_name,
                     &payload,
+                    cancellation.as_deref(),
                 )
                 .await
                 .map_err(|fallback_error| {
@@ -1065,10 +1119,27 @@ async fn chat_completion(
     ))
 }
 
+#[tauri::command(rename_all = "camelCase")]
+fn cancel_chat_completion(
+    cancellation_id: String,
+    cancellation_state: State<'_, ChatCancellationState>,
+) {
+    cancellation_state.cancel(cancellation_id.trim());
+}
+
+#[tauri::command(rename_all = "camelCase")]
+fn finish_chat_completion(
+    cancellation_id: String,
+    cancellation_state: State<'_, ChatCancellationState>,
+) {
+    cancellation_state.finish(cancellation_id.trim());
+}
+
 async fn openai_responses_completion(
     app: AppHandle,
     request: ChatCompletionRequest,
     code_workspace: Option<PathBuf>,
+    cancellation: Option<Arc<AtomicBool>>,
 ) -> Result<ChatCompletionResponse, String> {
     let endpoint = responses_endpoint(&request.base_url);
     let client = reqwest::Client::new();
@@ -1151,6 +1222,7 @@ async fn openai_responses_completion(
             &request.api_key,
             &request.provider_name,
             &payload,
+            cancellation.as_deref(),
         )
         .await?;
 
@@ -1809,33 +1881,138 @@ fn append_reasoning_trace_steps(trace_steps: &mut Vec<ChatTraceStep>, message: &
     append_trace_steps(trace_steps, steps);
 }
 
+fn is_new_api_resource_overload(status: reqwest::StatusCode, body: &str) -> bool {
+    if status != reqwest::StatusCode::SERVICE_UNAVAILABLE {
+        return false;
+    }
+
+    let Ok(parsed) = serde_json::from_str::<Value>(body) else {
+        return false;
+    };
+    let Some(error) = parsed.get("error") else {
+        return false;
+    };
+    let error_type = error.get("type").and_then(Value::as_str);
+    let error_code = error.get("code").and_then(Value::as_str);
+
+    error_type == Some("new_api_error")
+        && matches!(
+            error_code,
+            Some("system_cpu_overloaded" | "system_memory_overloaded" | "system_disk_overloaded")
+        )
+}
+
+fn request_was_cancelled(cancellation: Option<&AtomicBool>) -> bool {
+    cancellation.is_some_and(|token| token.load(Ordering::Acquire))
+}
+
+async fn wait_for_overload_retry(
+    delay: Duration,
+    cancellation: Option<&AtomicBool>,
+) -> Result<(), String> {
+    let deadline = Instant::now() + delay;
+
+    loop {
+        if request_was_cancelled(cancellation) {
+            return Err("Chat completion was cancelled.".to_string());
+        }
+
+        let now = Instant::now();
+        if now >= deadline {
+            return Ok(());
+        }
+
+        tokio::time::sleep((deadline - now).min(RETRY_CANCELLATION_POLL_INTERVAL)).await;
+    }
+}
+
+async fn send_http_request_with_overload_retry(
+    client: &reqwest::Client,
+    endpoint: &str,
+    api_key: &str,
+    provider_name: &str,
+    payload: &Value,
+    cancellation: Option<&AtomicBool>,
+    retry_progress: Option<&dyn Fn(OverloadRetryProgress)>,
+    initial_retry_delay: Duration,
+) -> Result<reqwest::Response, String> {
+    let mut retry_delay = initial_retry_delay;
+    let mut retry_attempt = 0;
+
+    loop {
+        if request_was_cancelled(cancellation) {
+            return Err("Chat completion was cancelled.".to_string());
+        }
+
+        let response = client
+            .post(endpoint)
+            .bearer_auth(api_key.trim())
+            .json(payload)
+            .send()
+            .await
+            .map_err(|error| format!("Request to {} failed: {}", provider_name, error))?;
+        let status = response.status();
+
+        if status.is_success() {
+            if retry_attempt > 0 {
+                if let Some(notify) = retry_progress {
+                    notify(OverloadRetryProgress::Recovered {
+                        attempts: retry_attempt,
+                    });
+                }
+            }
+            return Ok(response);
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|error| format!("Failed to read {} response: {}", provider_name, error))?;
+
+        if !is_new_api_resource_overload(status, &body) {
+            return Err(format!(
+                "{} returned HTTP {}: {}",
+                provider_name, status, body
+            ));
+        }
+
+        retry_attempt += 1;
+        if let Some(notify) = retry_progress {
+            notify(OverloadRetryProgress::Waiting {
+                attempt: retry_attempt,
+                delay: retry_delay,
+            });
+        }
+        wait_for_overload_retry(retry_delay, cancellation).await?;
+        retry_delay = retry_delay
+            .saturating_mul(2)
+            .min(NEW_API_OVERLOAD_MAX_RETRY_DELAY);
+    }
+}
+
 async fn send_chat_completion_request(
     client: &reqwest::Client,
     endpoint: &str,
     api_key: &str,
     provider_name: &str,
     payload: &Value,
+    cancellation: Option<&AtomicBool>,
 ) -> Result<Value, String> {
-    let response = client
-        .post(endpoint)
-        .bearer_auth(api_key.trim())
-        .json(payload)
-        .send()
-        .await
-        .map_err(|error| format!("Request to {} failed: {}", provider_name, error))?;
-
-    let status = response.status();
+    let response = send_http_request_with_overload_retry(
+        client,
+        endpoint,
+        api_key,
+        provider_name,
+        payload,
+        cancellation,
+        None,
+        NEW_API_OVERLOAD_INITIAL_RETRY_DELAY,
+    )
+    .await?;
     let body = response
         .text()
         .await
         .map_err(|error| format!("Failed to read {} response: {}", provider_name, error))?;
-
-    if !status.is_success() {
-        return Err(format!(
-            "{} returned HTTP {}: {}",
-            provider_name, status, body
-        ));
-    }
 
     serde_json::from_str(&body)
         .map_err(|error| format!("Failed to parse {} response: {}", provider_name, error))
@@ -1849,6 +2026,7 @@ async fn send_chat_completion_request_maybe_stream(
     api_key: &str,
     provider_name: &str,
     payload: &Value,
+    cancellation: Option<&AtomicBool>,
 ) -> Result<Value, String> {
     if let Some(stream_id) = stream_id {
         send_chat_completion_stream_request(
@@ -1859,10 +2037,19 @@ async fn send_chat_completion_request_maybe_stream(
             api_key,
             provider_name,
             payload,
+            cancellation,
         )
         .await
     } else {
-        send_chat_completion_request(client, endpoint, api_key, provider_name, payload).await
+        send_chat_completion_request(
+            client,
+            endpoint,
+            api_key,
+            provider_name,
+            payload,
+            cancellation,
+        )
+        .await
     }
 }
 
@@ -1872,27 +2059,23 @@ async fn send_responses_request(
     api_key: &str,
     provider_name: &str,
     payload: &Value,
+    cancellation: Option<&AtomicBool>,
 ) -> Result<Value, String> {
-    let response = client
-        .post(endpoint)
-        .bearer_auth(api_key.trim())
-        .json(payload)
-        .send()
-        .await
-        .map_err(|error| format!("Request to {} failed: {}", provider_name, error))?;
-
-    let status = response.status();
+    let response = send_http_request_with_overload_retry(
+        client,
+        endpoint,
+        api_key,
+        provider_name,
+        payload,
+        cancellation,
+        None,
+        NEW_API_OVERLOAD_INITIAL_RETRY_DELAY,
+    )
+    .await?;
     let body = response
         .text()
         .await
         .map_err(|error| format!("Failed to read {} response: {}", provider_name, error))?;
-
-    if !status.is_success() {
-        return Err(format!(
-            "{} returned HTTP {}: {}",
-            provider_name, status, body
-        ));
-    }
 
     serde_json::from_str(&body)
         .map_err(|error| format!("Failed to parse {} response: {}", provider_name, error))
@@ -1906,6 +2089,7 @@ async fn send_responses_request_maybe_stream(
     api_key: &str,
     provider_name: &str,
     payload: &Value,
+    cancellation: Option<&AtomicBool>,
 ) -> Result<Value, String> {
     if let Some(stream_id) = stream_id {
         send_responses_stream_request(
@@ -1916,10 +2100,19 @@ async fn send_responses_request_maybe_stream(
             api_key,
             provider_name,
             payload,
+            cancellation,
         )
         .await
     } else {
-        send_responses_request(client, endpoint, api_key, provider_name, payload).await
+        send_responses_request(
+            client,
+            endpoint,
+            api_key,
+            provider_name,
+            payload,
+            cancellation,
+        )
+        .await
     }
 }
 
@@ -1945,6 +2138,37 @@ fn emit_stream_event(
             text: text.into(),
             detail,
             usage,
+            retry_attempt: None,
+            retry_delay_ms: None,
+        },
+    );
+}
+
+fn emit_overload_retry_event(
+    app: &AppHandle,
+    stream_id: &str,
+    progress: OverloadRetryProgress,
+) {
+    let (event_type, retry_attempt, retry_delay_ms) = match progress {
+        OverloadRetryProgress::Waiting { attempt, delay } => (
+            "retryWaiting",
+            attempt,
+            Some(delay.as_millis().min(u64::MAX as u128) as u64),
+        ),
+        OverloadRetryProgress::Recovered { attempts } => ("retryRecovered", attempts, None),
+    };
+
+    let _ = app.emit(
+        CHAT_COMPLETION_STREAM_EVENT,
+        ChatCompletionStreamEvent {
+            stream_id: stream_id.to_string(),
+            event_type: event_type.to_string(),
+            trace_kind: None,
+            text: String::new(),
+            detail: None,
+            usage: None,
+            retry_attempt: Some(retry_attempt),
+            retry_delay_ms,
         },
     );
 }
@@ -2135,32 +2359,24 @@ async fn send_chat_completion_stream_request(
     api_key: &str,
     provider_name: &str,
     payload: &Value,
+    cancellation: Option<&AtomicBool>,
 ) -> Result<Value, String> {
     let mut payload = payload.clone();
     payload["stream"] = json!(true);
     payload["stream_options"] = json!({ "include_usage": true });
+    let report_retry = |progress| emit_overload_retry_event(app, stream_id, progress);
 
-    let response = client
-        .post(endpoint)
-        .bearer_auth(api_key.trim())
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|error| format!("Request to {} failed: {}", provider_name, error))?;
-
-    let status = response.status();
-
-    if !status.is_success() {
-        let body = response
-            .text()
-            .await
-            .map_err(|error| format!("Failed to read {} response: {}", provider_name, error))?;
-
-        return Err(format!(
-            "{} returned HTTP {}: {}",
-            provider_name, status, body
-        ));
-    }
+    let response = send_http_request_with_overload_retry(
+        client,
+        endpoint,
+        api_key,
+        provider_name,
+        &payload,
+        cancellation,
+        Some(&report_retry),
+        NEW_API_OVERLOAD_INITIAL_RETRY_DELAY,
+    )
+    .await?;
 
     let mut content = String::new();
     let mut reasoning = String::new();
@@ -2428,31 +2644,23 @@ async fn send_responses_stream_request(
     api_key: &str,
     provider_name: &str,
     payload: &Value,
+    cancellation: Option<&AtomicBool>,
 ) -> Result<Value, String> {
     let mut payload = payload.clone();
     payload["stream"] = json!(true);
+    let report_retry = |progress| emit_overload_retry_event(app, stream_id, progress);
 
-    let response = client
-        .post(endpoint)
-        .bearer_auth(api_key.trim())
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|error| format!("Request to {} failed: {}", provider_name, error))?;
-
-    let status = response.status();
-
-    if !status.is_success() {
-        let body = response
-            .text()
-            .await
-            .map_err(|error| format!("Failed to read {} response: {}", provider_name, error))?;
-
-        return Err(format!(
-            "{} returned HTTP {}: {}",
-            provider_name, status, body
-        ));
-    }
+    let response = send_http_request_with_overload_retry(
+        client,
+        endpoint,
+        api_key,
+        provider_name,
+        &payload,
+        cancellation,
+        Some(&report_retry),
+        NEW_API_OVERLOAD_INITIAL_RETRY_DELAY,
+    )
+    .await?;
 
     let mut content = String::new();
     let mut reasoning = String::new();
@@ -2557,6 +2765,50 @@ async fn send_responses_stream_request(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+
+    fn spawn_overload_then_success_server(
+        overload_count: usize,
+    ) -> (String, thread::JoinHandle<usize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("test server should bind");
+        let address = listener
+            .local_addr()
+            .expect("test server should have an address");
+        let handle = thread::spawn(move || {
+            let mut requests = 0;
+
+            for attempt in 0..=overload_count {
+                let (mut stream, _) = listener.accept().expect("test server should accept");
+                let mut request = [0_u8; 4096];
+                let _ = stream
+                    .read(&mut request)
+                    .expect("test server should read request");
+                requests += 1;
+
+                let (status, body) = if attempt < overload_count {
+                    (
+                        "503 Service Unavailable",
+                        r#"{"error":{"message":"system cpu overloaded (current: 93.1%, threshold: 85%)","type":"new_api_error","param":"","code":"system_cpu_overloaded"}}"#,
+                    )
+                } else {
+                    ("200 OK", r#"{"output_text":"recovered"}"#)
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("test server should write response");
+            }
+
+            requests
+        });
+
+        (format!("http://{address}/v1/responses"), handle)
+    }
 
     #[test]
     fn normalizes_codegraph_max_files() {
@@ -2575,6 +2827,80 @@ mod tests {
     #[test]
     fn chat_completion_turn_guard_allows_multiple_tool_rounds() {
         assert!(MAX_CHAT_COMPLETION_TURNS >= 16);
+    }
+
+    #[test]
+    fn retries_new_api_resource_overload_until_request_succeeds() {
+        let (endpoint, server) = spawn_overload_then_success_server(2);
+        let progress = std::cell::RefCell::new(Vec::new());
+        let record_progress = |event| progress.borrow_mut().push(event);
+        let response = tauri::async_runtime::block_on(send_http_request_with_overload_retry(
+            &reqwest::Client::new(),
+            &endpoint,
+            "test-key",
+            "ChatGPT",
+            &json!({ "model": "gpt-5.5", "input": "test" }),
+            None,
+            Some(&record_progress),
+            std::time::Duration::ZERO,
+        ))
+        .expect("resource overload should be retried");
+        let body: Value =
+            tauri::async_runtime::block_on(response.json()).expect("response should parse");
+
+        assert_eq!(body["output_text"], "recovered");
+        assert_eq!(server.join().expect("test server should finish"), 3);
+        assert_eq!(
+            progress.into_inner(),
+            vec![
+                OverloadRetryProgress::Waiting {
+                    attempt: 1,
+                    delay: Duration::ZERO,
+                },
+                OverloadRetryProgress::Waiting {
+                    attempt: 2,
+                    delay: Duration::ZERO,
+                },
+                OverloadRetryProgress::Recovered { attempts: 2 },
+            ]
+        );
+    }
+
+    #[test]
+    fn only_retries_explicit_new_api_resource_overload_errors() {
+        let cpu_overload = r#"{"error":{"type":"new_api_error","code":"system_cpu_overloaded"}}"#;
+        let generic_unavailable = r#"{"error":{"type":"server_error","code":"unavailable"}}"#;
+
+        assert!(is_new_api_resource_overload(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            cpu_overload,
+        ));
+        assert!(!is_new_api_resource_overload(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+            generic_unavailable,
+        ));
+        assert!(!is_new_api_resource_overload(
+            reqwest::StatusCode::BAD_GATEWAY,
+            cpu_overload,
+        ));
+    }
+
+    #[test]
+    fn cancelled_retry_stops_before_sending_another_request() {
+        let cancellation = AtomicBool::new(true);
+        let error = tauri::async_runtime::block_on(send_http_request_with_overload_retry(
+            &reqwest::Client::new(),
+            "http://127.0.0.1:1/v1/responses",
+            "test-key",
+            "ChatGPT",
+            &json!({ "model": "gpt-5.5", "input": "test" }),
+            Some(&cancellation),
+            None,
+            Duration::ZERO,
+        ))
+        .expect_err("cancelled request should stop");
+
+        assert_eq!(error, "Chat completion was cancelled.");
     }
 
     #[test]
@@ -2742,6 +3068,7 @@ mod tests {
             code_tools_enabled: None,
             can_write: None,
             stream_id: None,
+            cancellation_id: None,
             messages: vec![],
         };
 
@@ -3288,6 +3615,7 @@ wire_api = "chat"
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .manage(ChatCancellationState::default())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
@@ -3297,6 +3625,8 @@ pub fn run() {
             copy_avatar_to_cache,
             load_ccswitch_openai_config,
             chat_completion,
+            cancel_chat_completion,
+            finish_chat_completion,
             tools::inspect_code_workspace,
             tools::apply_patch_proposal
         ])

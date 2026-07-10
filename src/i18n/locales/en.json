@@ -184,6 +184,7 @@
       "detail": "Details",
       "expand": "Expand execution",
       "kind": {
+        "network": "Network",
         "reasoning": "Reasoning",
         "status": "Status",
         "tool": "Tool"
@@ -346,6 +347,10 @@
   "chatRuntime": {
     "callFailedContent": "Call failed: {error}",
     "commandOutputStreaming": "Capturing command output...",
+    "retryFailed": "Connection retry failed.",
+    "retryInterrupted": "Connection retry stopped.",
+    "retryRecovered": "Connection restored after {attempts} retries.",
+    "retryWaiting": "New API is overloaded. Retry {attempt} starts in {seconds}s...",
     "consensusLimit": "This discussion reached the consensus round limit and still has disagreements. Please narrow the question manually or adjust member roles before continuing.",
     "decisionPendingContent": "Deciding whether to speak...",
     "decisionWaitContent": "Observing this round.",

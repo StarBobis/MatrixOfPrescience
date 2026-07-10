@@ -10,6 +10,7 @@ import {
   RefreshLeft,
   Tools,
 } from "@element-plus/icons-vue";
+import { Wifi } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import PatchApprovalPanel from "./PatchApprovalPanel.vue";
 import { getAvatarSrc } from "../utils/avatar";
@@ -827,6 +828,10 @@ function getLatestExecutionItems(message: ChatMessage) {
 }
 
 function getExecutionIcon(item: ChatMessageExecutionItem) {
+  if (item.kind === "network") {
+    return Wifi;
+  }
+
   return item.kind === "tool" ? Tools : RefreshLeft;
 }
 
