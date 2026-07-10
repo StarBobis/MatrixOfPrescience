@@ -14,6 +14,7 @@ import {
   type ChatMessageActivityItem,
   type ChatMessageActivityKind,
   type ChatMessageActivityStatus,
+  type ChatMessageContentSegment,
   type ChatMessageExecutionItem,
   type ChatMessageExecutionKind,
   type ChatMessageExecutionStatus,
@@ -177,6 +178,10 @@ const streamingTraceLines = new Map<
   { kind: ChatTraceStep["kind"]; itemId: string; index: number; text: string }
 >();
 const streamingToolOutputs = new Map<string, { itemId: string; detail: string }>();
+const streamingExecutionSegments = new Map<
+  string,
+  { executionSegmentId?: string; contentSegmentId?: string; phase: "content" | "execution" }
+>();
 
 const newGroupName = ref(t("defaults.newGroup.name"));
 const newGroupDescription = ref(t("defaults.newGroup.description"));
@@ -1125,15 +1130,116 @@ function createExecutionItem(
   text: string,
   status: ChatMessageExecutionStatus = "info",
   detail = "",
+  segmentId = "",
 ): ChatMessageExecutionItem {
   return {
     id: crypto.randomUUID(),
+    segmentId: segmentId || undefined,
     kind,
     status,
     text: limitRuntimeText(text, MAX_TRACE_TEXT_CHARS),
     detail: detail.trim() ? limitRuntimeText(detail.trim(), MAX_TRACE_DETAIL_CHARS) : undefined,
     createdAt: Date.now(),
   };
+}
+
+function createMessageSegmentId(messageId: string, kind: "content" | "execution") {
+  return `${messageId}-${kind}-${crypto.randomUUID()}`;
+}
+
+function ensureExecutionSegmentId(messageId: string) {
+  const current = streamingExecutionSegments.get(messageId);
+
+  if (current?.phase === "execution") {
+    if (current.executionSegmentId) {
+      return current.executionSegmentId;
+    }
+  }
+
+  const next = {
+    ...current,
+    executionSegmentId: createMessageSegmentId(messageId, "execution"),
+    phase: "execution" as const,
+  };
+  streamingExecutionSegments.set(messageId, next);
+  return next.executionSegmentId;
+}
+
+function ensureContentSegmentId(messageId: string) {
+  const current = streamingExecutionSegments.get(messageId);
+
+  if (current?.phase === "content" && current.contentSegmentId) {
+    return current.contentSegmentId;
+  }
+
+  const next = {
+    ...current,
+    contentSegmentId: createMessageSegmentId(messageId, "content"),
+    phase: "content" as const,
+  };
+  streamingExecutionSegments.set(messageId, next);
+  return next.contentSegmentId;
+}
+
+function markContentStreamPhase(messageId: string) {
+  const current = streamingExecutionSegments.get(messageId);
+
+  if (current?.phase === "execution") {
+    chatPanel.value?.collapseExecutionPanel(messageId);
+    ensureContentSegmentId(messageId);
+    return;
+  }
+
+  if (!current) {
+    ensureContentSegmentId(messageId);
+  }
+}
+
+function appendContentSegment(
+  segments: ChatMessageContentSegment[],
+  segmentId: string,
+  chunk: string,
+) {
+  const timestamp = Date.now();
+  const nextSegments = [...segments];
+  const segmentIndex = nextSegments.findIndex((segment) => segment.id === segmentId);
+
+  if (segmentIndex >= 0) {
+    const segment = nextSegments[segmentIndex];
+    nextSegments[segmentIndex] = {
+      ...segment,
+      text: `${segment.text}${chunk}`,
+      updatedAt: timestamp,
+    };
+    return nextSegments;
+  }
+
+  nextSegments.push({
+    id: segmentId,
+    text: chunk,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  });
+  return nextSegments;
+}
+
+function getFinalContentSegments(messageId: string, content: string) {
+  const message = activeMessages.value.find((item) => item.id === messageId);
+  const segments = message?.contentSegments ?? [];
+
+  if (segments.length > 0 || !content.trim()) {
+    return segments;
+  }
+
+  const timestamp = Date.now();
+  return [
+    {
+      id: createMessageSegmentId(messageId, "content"),
+      text: content,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    },
+  ];
 }
 
 function addActivityItem(
@@ -1151,7 +1257,13 @@ function addActivityItem(
 
   const message = activeMessages.value.find((item) => item.id === messageId);
   const activityItem = createActivityItem(kind, trimmed, status, detail);
-  const executionItem = createExecutionItem(kind, trimmed, status, detail);
+  const executionItem = createExecutionItem(
+    kind,
+    trimmed,
+    status,
+    detail,
+    ensureExecutionSegmentId(messageId),
+  );
   settingsStore.updateMessage(messageId, {
     activityItems: [
       ...(message?.activityItems ?? []),
@@ -1178,7 +1290,13 @@ function addExecutionItem(
   }
 
   const message = activeMessages.value.find((item) => item.id === messageId);
-  const executionItem = createExecutionItem(kind, trimmed, status, detail);
+  const executionItem = createExecutionItem(
+    kind,
+    trimmed,
+    status,
+    detail,
+    ensureExecutionSegmentId(messageId),
+  );
   settingsStore.updateMessage(messageId, {
     executionItems: [
       ...(message?.executionItems ?? []),
@@ -1398,14 +1516,19 @@ function appendStreamingContentChunk(messageId: string, chunk: string) {
 
   const previousContent = streamingContent.get(messageId) ?? "";
 
-  if (!previousContent) {
-    chatPanel.value?.collapseExecutionPanel(messageId);
-  }
+  markContentStreamPhase(messageId);
 
   const nextContent = `${previousContent}${chunk}`;
+  const message = activeMessages.value.find((item) => item.id === messageId);
+  const contentSegments = appendContentSegment(
+    message?.contentSegments ?? [],
+    ensureContentSegmentId(messageId),
+    chunk,
+  );
   streamingContent.set(messageId, nextContent);
   settingsStore.updateMessage(messageId, {
     content: nextContent,
+    contentSegments,
   });
 }
 
@@ -1509,6 +1632,7 @@ function releasePendingMessage(messageId: string, startedAt?: number) {
   flushStreamingTraceLine(messageId);
   flushStreamingToolOutput(messageId);
   streamingContent.delete(messageId);
+  streamingExecutionSegments.delete(messageId);
   stopSpeakingTimer(messageId, startedAt);
   pendingMessageIds.value = pendingMessageIds.value.filter((id) => id !== messageId);
 }
@@ -1586,7 +1710,9 @@ async function resetCurrentSession() {
   }
   speakingTimers.clear();
   streamingTraceLines.clear();
+  streamingToolOutputs.clear();
   streamingContent.clear();
+  streamingExecutionSegments.clear();
 
   activeRunId.value = "";
   sending.value = false;
@@ -1637,7 +1763,13 @@ async function decideMemberResponse(
       createActivityItem("status", t("chatRuntime.stepCheckingDecision"), "running"),
     ],
     executionItems: [
-      createExecutionItem("status", t("chatRuntime.stepCheckingDecision"), "running"),
+      createExecutionItem(
+        "status",
+        t("chatRuntime.stepCheckingDecision"),
+        "running",
+        "",
+        ensureExecutionSegmentId(pendingId),
+      ),
     ],
   });
   startSpeakingTimer(pendingId, startedAt);
@@ -1773,7 +1905,15 @@ async function askMember(
       color: member.color,
       thoughtSteps: [],
       activityItems: [createActivityItem("status", t("chatRuntime.stepQueued"), "running")],
-      executionItems: [createExecutionItem("status", t("chatRuntime.stepQueued"), "running")],
+      executionItems: [
+        createExecutionItem(
+          "status",
+          t("chatRuntime.stepQueued"),
+          "running",
+          "",
+          ensureExecutionSegmentId(pendingId),
+        ),
+      ],
     });
     startSpeakingTimer(pendingId, startedAt);
   }
@@ -1820,6 +1960,7 @@ async function askMember(
     settingsStore.updateMessage(pendingId, {
       status: "done",
       content: finalContent,
+      contentSegments: getFinalContentSegments(pendingId, finalContent),
     });
     applyCompletionUsage(pendingId, response.usage);
     releasePendingMessage(pendingId, startedAt);

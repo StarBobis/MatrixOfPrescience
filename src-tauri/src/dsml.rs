@@ -22,13 +22,13 @@ fn split_first_token(text: &str) -> (&str, &str) {
 }
 
 fn is_dsml_quote(ch: char) -> bool {
-    matches!(ch, '"' | '\'' | '“' | '”' | '‘' | '’')
+    matches!(ch, '"' | '\'' | '\u{201C}' | '\u{201D}' | '\u{2018}' | '\u{2019}')
 }
 
 fn dsml_closing_quote(opening: char) -> char {
     match opening {
-        '“' => '”',
-        '‘' => '’',
+        '\u{201C}' => '\u{201D}',
+        '\u{2018}' => '\u{2019}',
         other => other,
     }
 }
@@ -112,6 +112,10 @@ fn dsml_attr_bool(attrs: &[(String, String)], key: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Try to find a DSML tag starting at `from` in `content`.
+///
+/// Recognises both `<DSML | ` (ASCII pipe) and `<DSML \u{FF5C} ` (fullwidth pipe)
+/// opening/closing tag prefixes, with optional whitespace around the delimiter.
 fn next_dsml_tag(content: &str, from: usize) -> Option<DsmlTag> {
     let mut search_from = from;
 
@@ -119,16 +123,52 @@ fn next_dsml_tag(content: &str, from: usize) -> Option<DsmlTag> {
         let relative_start = content[search_from..].find('<')?;
         let start = search_from + relative_start;
         let remaining = &content[start..];
-        let (closing, prefix_len) = if remaining.starts_with("<｜｜DSML｜｜") {
-            (false, "<｜｜DSML｜｜".len())
-        } else if remaining.starts_with("</｜｜DSML｜｜") {
-            (true, "</｜｜DSML｜｜".len())
-        } else {
+
+        // Detect opening or closing tag: "<DSML" or "</DSML"
+        let closing = remaining.starts_with("</DSML");
+        if !closing && !remaining.starts_with("<DSML") {
             search_from = start + '<'.len_utf8();
             continue;
-        };
+        }
 
-        let body_start = start + prefix_len;
+        let prefix_len = if closing { "</DSML".len() } else { "<DSML".len() };
+        let after_prefix = &content[start + prefix_len..];
+
+        // Consume optional whitespace, then the pipe delimiter (ASCII | or fullwidth \u{FF5C}),
+        // then optional whitespace again.  Compute the byte offset past the delimiter.
+        let mut chars = after_prefix.chars();
+        let mut skip = 0usize;
+
+        // optional whitespace before delimiter
+        for ch in chars.by_ref() {
+            if !ch.is_whitespace() {
+                // put-back: this is the delimiter (or something else)
+                let is_pipe = ch == '|' || ch == '\u{FF5C}';
+                if !is_pipe {
+                    // not a valid DSML tag — advance past '<' and keep searching
+                    search_from = start + '<'.len_utf8();
+                    break;
+                }
+                skip += ch.len_utf8(); // count the pipe char
+                break;
+            }
+            skip += ch.len_utf8();
+        }
+
+        // If we broke out of the loop early (not a pipe), continue outer while
+        if search_from > start {
+            continue;
+        }
+
+        // optional whitespace after delimiter
+        for ch in chars {
+            if !ch.is_whitespace() {
+                break;
+            }
+            skip += ch.len_utf8();
+        }
+
+        let body_start = start + prefix_len + skip;
         let body_end = body_start + content[body_start..].find('>')?;
         let end = body_end + '>'.len_utf8();
         let body = content[body_start..body_end].trim();
@@ -312,11 +352,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_deepseek_dsml_tool_call_content() {
-        let content = "<｜｜DSML｜｜tool_calls>\n\
-<｜｜DSML｜｜invoke name=“write_file”>\n\
-<｜｜DSML｜｜parameter name=“file” string=“true”>include/DX12ShaderDump.hpp\n\
-<｜｜DSML｜｜parameter name=“content” string=“true”>#pragma once\n\n#include <Windows.h>\n";
+    fn parses_ascii_pipe_dsml_tool_call() {
+        let content = "\
+<DSML | tool_calls>\n\
+<DSML | invoke name=\"write_file\">\n\
+<DSML | parameter name=\"file\" string=\"true\">include/DX12ShaderDump.hpp\n\
+<DSML | parameter name=\"content\" string=\"true\">#pragma once\n\n#include <Windows.h>\n";
 
         let tool_calls = extract_dsml_tool_calls_from_content(content);
 
@@ -335,10 +376,85 @@ mod tests {
     }
 
     #[test]
+    fn parses_fullwidth_pipe_dsml_tool_call() {
+        let content = format!(
+            "\
+<DSML {} tool_calls>\n\
+<DSML {} invoke name=\"read_file\">\n\
+<DSML {} parameter name=\"file\" string=\"true\">src/main.rs\n\
+</DSML {} invoke>\n\
+</DSML {} tool_calls>",
+            '\u{FF5C}', '\u{FF5C}', '\u{FF5C}', '\u{FF5C}', '\u{FF5C}'
+        );
+
+        let tool_calls = extract_dsml_tool_calls_from_content(&content);
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0]["function"]["name"], json!("read_file"));
+        let args: Value =
+            serde_json::from_str(tool_calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args["file"], json!("src/main.rs"));
+    }
+
+    #[test]
+    fn parses_multiple_tool_calls_with_different_functions() {
+        let content = "\
+<DSML | tool_calls>\n\
+<DSML | invoke name=\"list_files\">\n\
+<DSML | parameter name=\"path\" string=\"true\">src/\n\
+<DSML | invoke name=\"write_file\">\n\
+<DSML | parameter name=\"file\" string=\"true\">src/lib.rs\n\
+<DSML | parameter name=\"content\" string=\"true\">pub fn main() {}\n\
+</DSML | invoke>\n\
+<DSML | invoke name=\"run_command\">\n\
+<DSML | parameter name=\"command\" string=\"true\">cargo\n\
+<DSML | parameter name=\"args\" string=\"false\">[\"build\"]\n\
+</DSML | invoke>\n\
+</DSML | tool_calls>";
+
+        let tool_calls = extract_dsml_tool_calls_from_content(content);
+
+        assert_eq!(tool_calls.len(), 3);
+
+        assert_eq!(tool_calls[0]["function"]["name"], json!("list_files"));
+        let args0: Value =
+            serde_json::from_str(tool_calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args0["path"], json!("src/"));
+
+        assert_eq!(tool_calls[1]["function"]["name"], json!("write_file"));
+        let args1: Value =
+            serde_json::from_str(tool_calls[1]["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args1["file"], json!("src/lib.rs"));
+        assert_eq!(args1["content"], json!("pub fn main() {}"));
+
+        assert_eq!(tool_calls[2]["function"]["name"], json!("run_command"));
+        let args2: Value =
+            serde_json::from_str(tool_calls[2]["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args2["command"], json!("cargo"));
+        assert_eq!(args2["args"], json!(["build"]));
+    }
+
+    #[test]
+    fn parses_tool_calls_without_wrapper() {
+        let content = "\
+<DSML | invoke name=\"read_file\">\n\
+<DSML | parameter name=\"file\" string=\"true\">src/main.rs\n\
+</DSML | invoke>";
+
+        let tool_calls = extract_dsml_tool_calls_from_content(content);
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0]["function"]["name"], json!("read_file"));
+        let args: Value =
+            serde_json::from_str(tool_calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args["file"], json!("src/main.rs"));
+    }
+
+    #[test]
     fn normalizes_deepseek_dsml_content_into_tool_calls() {
         let message = normalize_dsml_tool_calls_in_message(json!({
             "role": "assistant",
-            "content": "<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=“write_file”>\n<｜｜DSML｜｜parameter name=“content” string=“true”>body"
+            "content": "<DSML | tool_calls>\n<DSML | invoke name=\"write_file\">\n<DSML | parameter name=\"content\" string=\"true\">body"
         }));
 
         assert_eq!(message["content"], json!(""));
@@ -346,5 +462,31 @@ mod tests {
             message["tool_calls"][0]["function"]["name"],
             json!("write_file")
         );
+    }
+
+    #[test]
+    fn normalize_skips_when_already_has_tool_calls() {
+        let message = normalize_dsml_tool_calls_in_message(json!({
+            "role": "assistant",
+            "content": "<DSML | tool_calls>...",
+            "tool_calls": [{"id": "existing", "type": "function", "function": {"name": "f", "arguments": "{}"}}]
+        }));
+
+        assert_eq!(message["content"], json!("<DSML | tool_calls>..."));
+        assert_eq!(message["tool_calls"][0]["id"], json!("existing"));
+    }
+
+    #[test]
+    fn normalize_skips_no_dsml_content() {
+        let message = normalize_dsml_tool_calls_in_message(json!({
+            "role": "assistant",
+            "content": "plain text without any special markers"
+        }));
+
+        assert_eq!(
+            message["content"],
+            json!("plain text without any special markers")
+        );
+        assert!(message.get("tool_calls").is_none());
     }
 }

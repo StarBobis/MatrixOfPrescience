@@ -53,8 +53,16 @@ export interface ChatMessageActivityItem {
   detail?: string;
 }
 
+export interface ChatMessageContentSegment {
+  id: string;
+  text: string;
+  createdAt?: number;
+  updatedAt?: number;
+}
+
 export interface ChatMessageExecutionItem {
   id: string;
+  segmentId?: string;
   kind: ChatMessageExecutionKind;
   status: ChatMessageExecutionStatus;
   text: string;
@@ -80,6 +88,7 @@ export interface ChatMessage {
   contextCacheMissTokens?: number;
   status: MessageStatus;
   content: string;
+  contentSegments?: ChatMessageContentSegment[];
   time: string;
   color: string;
   agreeMemberIds?: string[];
@@ -292,6 +301,7 @@ function normalizeGroup(group: ChatGroup): ChatGroup {
       thoughtSteps: message.thoughtSteps ?? [],
       activityItems: message.activityItems ?? [],
       executionItems: message.executionItems ?? [],
+      contentSegments: message.contentSegments ?? [],
     })),
   };
 }
@@ -335,6 +345,7 @@ function createSystemMessage(content: string): ChatMessage {
     reasoningEffort: "off",
     status: "done",
     content,
+    contentSegments: [],
     time: nowText(),
     color: "#6c6f75",
     agreeMemberIds: [],
@@ -460,6 +471,10 @@ function toPersistedMessage(message: ChatMessage, mode: Exclude<PersistenceMode,
   return {
     ...message,
     content: truncateText(message.content, contentLimit),
+    contentSegments: (message.contentSegments ?? []).map((segment) => ({
+      ...segment,
+      text: truncateText(segment.text, contentLimit),
+    })),
     thoughtSteps: (message.thoughtSteps ?? [])
       .slice(-THOUGHT_STEP_LIMIT)
       .map((step) => truncateText(step, THOUGHT_STEP_TEXT_LIMIT)),
@@ -1099,6 +1114,7 @@ export const useSettingsStore = defineStore("settings", {
         thoughtSteps: message.thoughtSteps ?? [],
         activityItems: message.activityItems ?? [],
         executionItems: message.executionItems ?? [],
+        contentSegments: message.contentSegments ?? [],
       });
       group.updatedAt = new Date().toISOString();
     },
@@ -1115,6 +1131,7 @@ export const useSettingsStore = defineStore("settings", {
         thoughtSteps: message.thoughtSteps ?? [],
         activityItems: message.activityItems ?? [],
         executionItems: message.executionItems ?? [],
+        contentSegments: message.contentSegments ?? [],
       });
       group.updatedAt = new Date().toISOString();
     },

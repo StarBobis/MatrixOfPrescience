@@ -17,6 +17,7 @@ import type {
   AgentModel,
   ChatGroup,
   ChatMessage,
+  ChatMessageContentSegment,
   ChatMessageExecutionItem,
   PatchApprovalStatus,
 } from "../stores/settings";
@@ -45,6 +46,22 @@ interface ExecutionRenderBlock {
   type: "markdown" | "code";
   text: string;
   language?: string;
+}
+
+interface ExecutionRenderSegment {
+  id: string;
+  items: ChatMessageExecutionItem[];
+  blocks: ExecutionRenderBlock[];
+  startedAt?: number;
+  endedAt?: number;
+}
+
+interface MessageTimelineEntry {
+  id: string;
+  order: number;
+  timestamp?: number;
+  content?: ChatMessageContentSegment;
+  execution?: ExecutionRenderSegment;
 }
 
 const props = defineProps<{
@@ -76,7 +93,7 @@ const messagesPanel = ref<HTMLElement | null>(null);
 const messagesStack = ref<HTMLElement | null>(null);
 const messagesEnd = ref<HTMLElement | null>(null);
 const composerFooter = ref<HTMLElement | null>(null);
-const executionPanelOpen = ref<Record<string, boolean>>({});
+const executionSegmentOpen = ref<Record<string, boolean>>({});
 const failedMentionAvatars = ref<Set<string>>(new Set());
 const stickToBottom = ref(true);
 const { t } = useI18n();
@@ -324,6 +341,9 @@ const messageScrollSignature = computed(() =>
         message.id,
         message.status,
         message.content.length,
+        (message.contentSegments ?? [])
+          .map((segment) => `${segment.id}:${segment.createdAt ?? 0}:${segment.updatedAt ?? 0}:${segment.text.length}`)
+          .join(","),
         message.durationMs ?? 0,
         message.contextUsedTokens ?? 0,
         message.contextCacheHitTokens ?? 0,
@@ -333,7 +353,10 @@ const messageScrollSignature = computed(() =>
           .map((item) => `${item.id}:${item.status}:${item.text.length}:${item.detail?.length ?? 0}`)
           .join(","),
         (message.executionItems ?? [])
-          .map((item) => `${item.id}:${item.kind}:${item.status}:${item.text.length}:${item.detail?.length ?? 0}`)
+          .map(
+            (item) =>
+              `${item.id}:${item.segmentId ?? ""}:${item.kind}:${item.status}:${item.createdAt ?? 0}:${item.text.length}:${item.detail?.length ?? 0}`,
+          )
           .join(","),
       ].join(":"),
     )
@@ -351,16 +374,23 @@ watch(
 watch(
   () => props.messages.map((message) => `${message.id}:${message.status}`).join("|"),
   () => {
-    const nextOpenState = { ...executionPanelOpen.value };
+    const nextOpenState = { ...executionSegmentOpen.value };
     const activeMessageIds = new Set(props.messages.map((message) => message.id));
+    const activeSegmentIds = new Set(
+      props.messages.flatMap((message) => getExecutionSegments(message).map((segment) => segment.id)),
+    );
     let changed = false;
 
     for (const message of props.messages) {
       const previousStatus = previousMessageStatuses.get(message.id);
 
       if (previousStatus === "thinking" && message.status !== "thinking") {
-        nextOpenState[message.id] = false;
-        changed = true;
+        for (const segment of getExecutionSegments(message)) {
+          if (nextOpenState[segment.id] !== false) {
+            nextOpenState[segment.id] = false;
+            changed = true;
+          }
+        }
       }
 
       previousMessageStatuses.set(message.id, message.status);
@@ -369,13 +399,19 @@ watch(
     for (const messageId of previousMessageStatuses.keys()) {
       if (!activeMessageIds.has(messageId)) {
         previousMessageStatuses.delete(messageId);
-        delete nextOpenState[messageId];
+        changed = true;
+      }
+    }
+
+    for (const segmentId of Object.keys(nextOpenState)) {
+      if (!activeSegmentIds.has(segmentId)) {
+        delete nextOpenState[segmentId];
         changed = true;
       }
     }
 
     if (changed) {
-      executionPanelOpen.value = nextOpenState;
+      executionSegmentOpen.value = nextOpenState;
     }
   },
   { flush: "post", immediate: true },
@@ -587,11 +623,11 @@ function pushCodeExecutionBlock(
   });
 }
 
-function getExecutionBlocks(message: ChatMessage): ExecutionRenderBlock[] {
+function buildExecutionBlocks(items: ChatMessageExecutionItem[]): ExecutionRenderBlock[] {
   const blocks: ExecutionRenderBlock[] = [];
   let openCodeBlock: { item: ChatMessageExecutionItem; language: string; lines: string[] } | null = null;
 
-  getExecutionItems(message).forEach((item, itemIndex) => {
+  items.forEach((item, itemIndex) => {
     if (item.kind !== "reasoning") {
       if (openCodeBlock) {
         pushCodeExecutionBlock(blocks, openCodeBlock);
@@ -644,6 +680,97 @@ function getExecutionBlocks(message: ChatMessage): ExecutionRenderBlock[] {
   return blocks;
 }
 
+function getExecutionItemSegmentId(message: ChatMessage, item: ChatMessageExecutionItem) {
+  return item.segmentId ?? `${message.id}-legacy-execution`;
+}
+
+function getExecutionTimestamp(item: ChatMessageExecutionItem) {
+  const timestamp = item.createdAt;
+  return typeof timestamp === "number" && timestamp > 946684800000 ? timestamp : undefined;
+}
+
+function getExecutionSegments(message: ChatMessage): ExecutionRenderSegment[] {
+  const draftSegments: Array<{ id: string; items: ChatMessageExecutionItem[] }> = [];
+  const draftById = new Map<string, { id: string; items: ChatMessageExecutionItem[] }>();
+
+  getExecutionItems(message).forEach((item) => {
+    const segmentId = getExecutionItemSegmentId(message, item);
+    let draft = draftById.get(segmentId);
+
+    if (!draft) {
+      draft = { id: segmentId, items: [] };
+      draftById.set(segmentId, draft);
+      draftSegments.push(draft);
+    }
+
+    draft.items.push(item);
+  });
+
+  return draftSegments
+    .map((draft) => {
+      const timestamps = draft.items
+        .map(getExecutionTimestamp)
+        .filter((timestamp): timestamp is number => typeof timestamp === "number");
+
+      return {
+        id: draft.id,
+        items: draft.items,
+        blocks: buildExecutionBlocks(draft.items),
+        startedAt: timestamps[0],
+        endedAt: timestamps[timestamps.length - 1],
+      };
+    })
+    .filter((segment) => segment.blocks.length > 0);
+}
+
+function getContentSegments(message: ChatMessage): ChatMessageContentSegment[] {
+  const segments = (message.contentSegments ?? []).filter((segment) => segment.text.trim().length > 0);
+
+  if (segments.length > 0) {
+    return segments;
+  }
+
+  return message.content.trim()
+    ? [
+        {
+          id: `${message.id}-content`,
+          text: message.content,
+        },
+      ]
+    : [];
+}
+
+function getMessageTimeline(message: ChatMessage): MessageTimelineEntry[] {
+  const contentEntries: MessageTimelineEntry[] = getContentSegments(message).map((content, index) => ({
+    id: content.id,
+    order: index * 2,
+    timestamp: content.createdAt,
+    content,
+  }));
+  const executionEntries: MessageTimelineEntry[] = getExecutionSegments(message).map((execution, index) => ({
+    id: execution.id,
+    order: index * 2 + 1,
+    timestamp: execution.startedAt,
+    execution,
+  }));
+
+  return [...contentEntries, ...executionEntries].sort((left, right) => {
+    if (left.timestamp !== undefined && right.timestamp !== undefined && left.timestamp !== right.timestamp) {
+      return left.timestamp - right.timestamp;
+    }
+
+    if (left.timestamp !== undefined && right.timestamp === undefined) {
+      return 1;
+    }
+
+    if (left.timestamp === undefined && right.timestamp !== undefined) {
+      return -1;
+    }
+
+    return left.order - right.order;
+  });
+}
+
 function hasExecutionItems(message: ChatMessage) {
   return getExecutionItems(message).length > 0;
 }
@@ -653,35 +780,81 @@ function shouldShowExecutionToggle(message: ChatMessage) {
 }
 
 function getExecutionCount(message: ChatMessage) {
-  return getExecutionBlocks(message).length;
+  return getExecutionSegments(message).length;
 }
 
 function isExecutionOpen(message: ChatMessage) {
-  return executionPanelOpen.value[message.id] ?? message.status === "thinking";
+  return getExecutionSegments(message).some((segment) => isExecutionSegmentOpen(message, segment));
+}
+
+function isExecutionSegmentOpen(message: ChatMessage, segment: ExecutionRenderSegment) {
+  return executionSegmentOpen.value[segment.id] ?? message.status === "thinking";
+}
+
+function setExecutionSegmentsOpen(message: ChatMessage, open: boolean) {
+  const nextOpenState = { ...executionSegmentOpen.value };
+  let changed = false;
+
+  for (const segment of getExecutionSegments(message)) {
+    if (nextOpenState[segment.id] !== open) {
+      nextOpenState[segment.id] = open;
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    executionSegmentOpen.value = nextOpenState;
+    scheduleFollowScroll();
+  }
 }
 
 function toggleExecutionPanel(message: ChatMessage) {
-  executionPanelOpen.value = {
-    ...executionPanelOpen.value,
-    [message.id]: !isExecutionOpen(message),
-  };
-  scheduleFollowScroll();
+  setExecutionSegmentsOpen(message, !isExecutionOpen(message));
 }
 
 function collapseExecutionPanel(messageId: string) {
-  if (!messageId || executionPanelOpen.value[messageId] === false) {
+  if (!messageId) {
     return;
   }
 
-  executionPanelOpen.value = {
-    ...executionPanelOpen.value,
-    [messageId]: false,
-  };
-  scheduleFollowScroll(true);
+  const message = props.messages.find((item) => item.id === messageId);
+
+  if (!message) {
+    return;
+  }
+
+  const nextOpenState = { ...executionSegmentOpen.value };
+  let changed = false;
+
+  for (const segment of getExecutionSegments(message)) {
+    if (nextOpenState[segment.id] !== false) {
+      nextOpenState[segment.id] = false;
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    executionSegmentOpen.value = nextOpenState;
+    scheduleFollowScroll(true);
+  }
 }
 
 function getExecutionToggleLabel(message: ChatMessage) {
   return isExecutionOpen(message) ? t("chat.execution.collapse") : t("chat.execution.expand");
+}
+
+function toggleExecutionSegment(message: ChatMessage, segment: ExecutionRenderSegment) {
+  executionSegmentOpen.value = {
+    ...executionSegmentOpen.value,
+    [segment.id]: !isExecutionSegmentOpen(message, segment),
+  };
+  scheduleFollowScroll();
+}
+
+function getExecutionSegmentToggleLabel(message: ChatMessage, segment: ExecutionRenderSegment) {
+  return isExecutionSegmentOpen(message, segment)
+    ? t("chat.execution.collapse")
+    : t("chat.execution.expand");
 }
 
 function getLatestExecutionItem(message: ChatMessage) {
@@ -700,6 +873,52 @@ function getExecutionIcon(item: ChatMessageExecutionItem) {
 
 function getExecutionKindLabel(item: ChatMessageExecutionItem) {
   return t(`chat.execution.kind.${item.kind}`);
+}
+
+function formatExecutionTimestamp(timestamp?: number) {
+  if (!Number.isFinite(timestamp)) {
+    return "";
+  }
+
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date(timestamp ?? 0));
+}
+
+function formatExecutionSegmentTime(segment: ExecutionRenderSegment) {
+  const startedAt = formatExecutionTimestamp(segment.startedAt);
+  const endedAt = formatExecutionTimestamp(segment.endedAt);
+
+  if (!startedAt || !endedAt || startedAt === endedAt) {
+    return startedAt;
+  }
+
+  return `${startedAt} - ${endedAt}`;
+}
+
+function getExecutionSegmentTitle(segment: ExecutionRenderSegment) {
+  const kinds = new Set(segment.items.map((item) => item.kind));
+
+  if (kinds.size === 1) {
+    return getExecutionKindLabel(segment.items[0]);
+  }
+
+  return t("chat.execution.title");
+}
+
+function getExecutionSegmentIcon(segment: ExecutionRenderSegment) {
+  return getExecutionIcon(segment.items[0]);
+}
+
+function getExecutionSegmentKindClass(segment: ExecutionRenderSegment) {
+  const kinds = new Set(segment.items.map((item) => item.kind));
+  return kinds.size === 1 ? segment.items[0].kind : "mixed";
+}
+
+function getExecutionSegmentStatus(segment: ExecutionRenderSegment) {
+  return segment.items[segment.items.length - 1]?.status ?? "info";
 }
 
 function renderExecutionMarkdown(text: string) {
@@ -1164,63 +1383,105 @@ defineExpose({
             </div>
           </div>
 
-          <div class="message-body" v-html="renderMarkdown(message.content)"></div>
+          <div class="message-timeline">
+            <template v-for="entry in getMessageTimeline(message)" :key="entry.id">
+              <div
+                v-if="entry.content"
+                class="message-body message-content-segment"
+                v-html="renderMarkdown(entry.content.text)"
+              ></div>
 
-          <section
-            v-if="hasExecutionItems(message) && isExecutionOpen(message)"
-            class="execution-panel"
-          >
-            <div
-              v-for="block in getExecutionBlocks(message)"
-              :key="block.id"
-              class="execution-line"
-              :class="[block.item.kind, block.item.status, block.type]"
-            >
-              <span class="execution-icon">
-                <el-icon>
-                  <component :is="getExecutionIcon(block.item)" />
-                </el-icon>
-              </span>
-              <span class="execution-kind">{{ getExecutionKindLabel(block.item) }}</span>
-              <div class="execution-copy">
-                <div v-if="block.type === 'code'" class="execution-code-block">
-                  <div class="execution-code-header">
-                    <span>{{ formatExecutionCodeLanguage(block.language) }}</span>
-                    <button
-                      class="execution-copy-button"
-                      type="button"
-                      :title="t('chat.copy.copyCode')"
-                      :aria-label="t('chat.copy.copyCode')"
-                      @click="copyExecutionBlock(block)"
-                    >
-                      <el-icon><CopyDocument /></el-icon>
-                    </button>
-                  </div>
-                  <pre class="execution-code-pre"><code v-html="highlightExecutionCode(block.text, block.language)"></code></pre>
-                </div>
-                <div v-else class="execution-markdown" v-html="renderExecutionMarkdown(block.text)"></div>
-                <details
-                  v-if="block.type === 'markdown' && block.item.detail"
-                  class="execution-detail"
-                  @toggle="scheduleFollowScroll()"
+              <section
+                v-else-if="entry.execution"
+                class="execution-panel"
+              >
+                <section
+                  class="execution-segment"
+                  :class="[
+                    getExecutionSegmentKindClass(entry.execution),
+                    getExecutionSegmentStatus(entry.execution),
+                    { collapsed: !isExecutionSegmentOpen(message, entry.execution) },
+                  ]"
                 >
-                  <summary>
-                    <span>{{ t("chat.execution.detail") }}</span>
-                    <button
-                      class="execution-copy-button"
-                      type="button"
-                      :title="t('chat.copy.copyDetail')"
-                      :aria-label="t('chat.copy.copyDetail')"
-                      @click.stop.prevent="copyExecutionDetail(block.item)"
+                  <button
+                    class="execution-segment-summary"
+                    type="button"
+                    :title="getExecutionSegmentToggleLabel(message, entry.execution)"
+                    :aria-label="getExecutionSegmentToggleLabel(message, entry.execution)"
+                    :aria-expanded="isExecutionSegmentOpen(message, entry.execution)"
+                    @click="toggleExecutionSegment(message, entry.execution)"
+                  >
+                    <span class="execution-icon">
+                      <el-icon>
+                        <component :is="getExecutionSegmentIcon(entry.execution)" />
+                      </el-icon>
+                    </span>
+                    <span class="execution-segment-title">{{ getExecutionSegmentTitle(entry.execution) }}</span>
+                    <span class="execution-segment-count">{{ entry.execution.blocks.length }}</span>
+                    <time v-if="formatExecutionSegmentTime(entry.execution)" class="execution-segment-time">
+                      {{ formatExecutionSegmentTime(entry.execution) }}
+                    </time>
+                  </button>
+
+                  <div
+                    v-if="isExecutionSegmentOpen(message, entry.execution)"
+                    class="execution-segment-body"
+                  >
+                    <div
+                      v-for="block in entry.execution.blocks"
+                      :key="block.id"
+                      class="execution-line"
+                      :class="[block.item.kind, block.item.status, block.type]"
                     >
-                      <el-icon><CopyDocument /></el-icon>
-                    </button>
-                  </summary>
-                  <pre>{{ block.item.detail }}</pre>
-                </details>
-              </div>
-            </div>
-          </section>
+                      <span class="execution-icon">
+                        <el-icon>
+                          <component :is="getExecutionIcon(block.item)" />
+                        </el-icon>
+                      </span>
+                      <span class="execution-kind">{{ getExecutionKindLabel(block.item) }}</span>
+                      <div class="execution-copy">
+                        <div v-if="block.type === 'code'" class="execution-code-block">
+                          <div class="execution-code-header">
+                            <span>{{ formatExecutionCodeLanguage(block.language) }}</span>
+                            <button
+                              class="execution-copy-button"
+                              type="button"
+                              :title="t('chat.copy.copyCode')"
+                              :aria-label="t('chat.copy.copyCode')"
+                              @click="copyExecutionBlock(block)"
+                            >
+                              <el-icon><CopyDocument /></el-icon>
+                            </button>
+                          </div>
+                          <pre class="execution-code-pre"><code v-html="highlightExecutionCode(block.text, block.language)"></code></pre>
+                        </div>
+                        <div v-else class="execution-markdown" v-html="renderExecutionMarkdown(block.text)"></div>
+                        <details
+                          v-if="block.type === 'markdown' && block.item.detail"
+                          class="execution-detail"
+                          @toggle="scheduleFollowScroll()"
+                        >
+                          <summary>
+                            <span>{{ t("chat.execution.detail") }}</span>
+                            <button
+                              class="execution-copy-button"
+                              type="button"
+                              :title="t('chat.copy.copyDetail')"
+                              :aria-label="t('chat.copy.copyDetail')"
+                              @click.stop.prevent="copyExecutionDetail(block.item)"
+                            >
+                              <el-icon><CopyDocument /></el-icon>
+                            </button>
+                          </summary>
+                          <pre>{{ block.item.detail }}</pre>
+                        </details>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              </section>
+            </template>
+          </div>
 
           <div class="message-status-bar" :class="message.status">
             <div class="message-activity-feed">
@@ -1758,14 +2019,98 @@ defineExpose({
   color: #1f2c25;
 }
 
+.message-timeline {
+  display: grid;
+  gap: 10px;
+}
+
+.message-content-segment {
+  min-width: 0;
+}
+
 .execution-panel {
   display: grid;
   gap: 8px;
-  margin-top: 10px;
   border: 1px solid #dfe9e3;
   border-radius: 8px;
   background: #f7faf8;
   padding: 10px;
+}
+
+.execution-segment {
+  overflow: hidden;
+  border: 1px solid #dfe8e2;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.execution-segment.collapsed {
+  background: #fbfdfb;
+}
+
+.execution-segment-summary {
+  display: flex;
+  width: 100%;
+  min-height: 34px;
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  padding: 6px 8px;
+  color: #3c4a42;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.execution-segment-summary:hover {
+  background: #f2f7f4;
+}
+
+.execution-segment-title {
+  min-width: 0;
+  overflow: hidden;
+  color: #304039;
+  font-size: 12px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.execution-segment-count {
+  display: inline-flex;
+  flex: 0 0 auto;
+  min-width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #dfe8e2;
+  border-radius: 999px;
+  padding: 0 6px;
+  color: #617168;
+  background: #f7faf8;
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.execution-segment-time {
+  flex: 0 1 auto;
+  margin-left: auto;
+  overflow: hidden;
+  color: #7a867e;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.execution-segment-body {
+  display: grid;
+  gap: 8px;
+  border-top: 1px solid #edf2ee;
+  padding: 8px 10px 10px;
 }
 
 .execution-line {
@@ -1789,25 +2134,35 @@ defineExpose({
   background: #ffffff;
 }
 
-.execution-line.tool .execution-icon {
+.execution-line.tool .execution-icon,
+.execution-segment.tool .execution-icon {
   border-color: #bed9cb;
   color: #24634f;
   background: #eef8f2;
 }
 
-.execution-line.reasoning .execution-icon {
+.execution-line.reasoning .execution-icon,
+.execution-segment.reasoning .execution-icon {
   border-color: #d8e2ee;
   color: #355d80;
   background: #f3f8fd;
 }
 
-.execution-line.error .execution-icon {
+.execution-segment.mixed .execution-icon {
+  border-color: #d8e2ee;
+  color: #4d6375;
+  background: #f7fafc;
+}
+
+.execution-line.error .execution-icon,
+.execution-segment.error .execution-icon {
   border-color: #f0c7c7;
   color: #a33d3d;
   background: #fff0f0;
 }
 
-.execution-line.interrupted .execution-icon {
+.execution-line.interrupted .execution-icon,
+.execution-segment.interrupted .execution-icon {
   border-color: #efd7ad;
   color: #9a650c;
   background: #fff8ea;
