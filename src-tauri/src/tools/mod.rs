@@ -253,6 +253,102 @@ fn finalize_tool_function(mut function: Value, strict: bool) -> Value {
     })
 }
 
+const CODEGRAPH_READ_COMMANDS: &[&str] = &[
+    "status", "query", "node", "files", "callers", "callees", "impact", "affected",
+];
+const CODEGRAPH_WRITE_COMMANDS: &[&str] = &["init", "index", "sync", "unlock"];
+
+fn codegraph_command_tool_schema(strict: bool, allow_writes: bool) -> Value {
+    let mut commands = CODEGRAPH_READ_COMMANDS.to_vec();
+    if allow_writes {
+        commands.extend_from_slice(CODEGRAPH_WRITE_COMMANDS);
+    }
+
+    finalize_tool_function(
+        json!({
+            "name": "codegraph_command",
+            "description": "Run a supported CodeGraph CLI command in the current workspace. Use status/query/node/files/callers/callees/impact/affected for focused graph reads. Use init/index/sync/unlock to create, rebuild, refresh, or repair the index when write permission allows it. Destructive uninit and global install/upgrade/daemon commands are not available.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "enum": commands,
+                        "description": "CodeGraph subcommand to run."
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Required search text for query."
+                    },
+                    "symbol": {
+                        "type": "string",
+                        "description": "Required symbol for callers, callees, or impact; optional symbol name for node."
+                    },
+                    "file": {
+                        "type": "string",
+                        "description": "Optional indexed file path for node file mode or symbol disambiguation."
+                    },
+                    "files": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Changed source files used by affected."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 200,
+                        "description": "Maximum results for query, callers, callees, or node file lines."
+                    },
+                    "kind": {
+                        "type": "string",
+                        "description": "Optional symbol kind filter for query, such as function or class."
+                    },
+                    "depth": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 20,
+                        "description": "Dependency traversal depth for impact or affected."
+                    },
+                    "filter": {
+                        "type": "string",
+                        "description": "Directory filter for files, or test glob filter for affected."
+                    },
+                    "pattern": {
+                        "type": "string",
+                        "description": "Optional glob pattern for files."
+                    },
+                    "format": {
+                        "type": "string",
+                        "enum": ["tree", "flat", "grouped"],
+                        "description": "Output format for files. Defaults to tree."
+                    },
+                    "maxDepth": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 20,
+                        "description": "Maximum directory depth for files tree output."
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "description": "1-based starting line for node file mode."
+                    },
+                    "symbolsOnly": {
+                        "type": "boolean",
+                        "description": "For node file mode, return only the symbol map and dependents."
+                    },
+                    "json": {
+                        "type": "boolean",
+                        "description": "Request JSON output when supported."
+                    }
+                },
+                "required": ["command"]
+            }
+        }),
+        strict,
+    )
+}
+
 pub(crate) fn code_tools_schema(strict: bool, allow_writes: bool) -> Value {
     let mut tools = vec![
         finalize_tool_function(
@@ -278,6 +374,7 @@ pub(crate) fn code_tools_schema(strict: bool, allow_writes: bool) -> Value {
             }),
             strict,
         ),
+        codegraph_command_tool_schema(strict, allow_writes),
         finalize_tool_function(
             json!({
                 "name": "read_file",
@@ -556,7 +653,7 @@ pub(crate) fn code_tools_schema(strict: bool, allow_writes: bool) -> Value {
     json!(tools)
 }
 
-fn is_write_code_tool(name: &str) -> bool {
+fn is_write_code_tool(name: &str, arguments: &Value) -> bool {
     matches!(
         name,
         "write_file"
@@ -565,7 +662,11 @@ fn is_write_code_tool(name: &str) -> bool {
             | "move_path"
             | "apply_patch"
             | "run_command"
-    )
+    ) || (name == "codegraph_command"
+        && arguments
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(|command| CODEGRAPH_WRITE_COMMANDS.contains(&command)))
 }
 
 pub(crate) fn execute_code_tool_call(
@@ -582,7 +683,7 @@ pub(crate) fn execute_code_tool_call(
     let name = function.get("name").and_then(Value::as_str).unwrap_or("");
     let arguments = parsed_tool_arguments(function);
 
-    let content = if !allow_writes && is_write_code_tool(name) {
+    let content = if !allow_writes && is_write_code_tool(name, &arguments) {
         Err(
             "This member's write permission is disabled. Only read-only code tools are available."
                 .to_string(),
@@ -590,6 +691,7 @@ pub(crate) fn execute_code_tool_call(
     } else {
         match name {
             "codegraph_explore" => execute_codegraph_explore_tool(workspace, &arguments),
+            "codegraph_command" => execute_codegraph_command_tool(workspace, &arguments),
             "read_file" => read_workspace_file_tool(workspace, &arguments),
             "list_files" => list_workspace_files_tool(workspace, &arguments),
             "search_files" => search_workspace_files_tool(workspace, &arguments),
@@ -638,6 +740,174 @@ fn execute_codegraph_explore_tool(workspace: &Path, arguments: &Value) -> Result
                 )
             }),
     }
+}
+
+fn codegraph_required_arg(arguments: &Value, key: &str, command: &str) -> Result<String, String> {
+    let value = tool_arg_string(arguments, key);
+    if value.is_empty() {
+        Err(format!(
+            "codegraph_command requires `{}` when command is `{}`.",
+            key, command
+        ))
+    } else {
+        Ok(value.to_string())
+    }
+}
+
+fn push_codegraph_number_arg(
+    args: &mut Vec<String>,
+    arguments: &Value,
+    key: &str,
+    flag: &str,
+    maximum: u64,
+) {
+    if let Some(value) = arguments.get(key).and_then(Value::as_u64) {
+        args.push(flag.to_string());
+        args.push(value.clamp(1, maximum).to_string());
+    }
+}
+
+fn push_codegraph_string_arg(args: &mut Vec<String>, value: &str, flag: &str) {
+    if !value.is_empty() {
+        args.push(flag.to_string());
+        args.push(value.to_string());
+    }
+}
+
+fn build_codegraph_command_args(arguments: &Value) -> Result<(Vec<String>, bool), String> {
+    let command = tool_arg_string(arguments, "command");
+    let mut args = vec![command.to_string()];
+    let mut requires_index = true;
+
+    match command {
+        "status" => {
+            if tool_arg_bool(arguments, "json", false) {
+                args.push("--json".to_string());
+            }
+        }
+        "query" => {
+            push_codegraph_number_arg(&mut args, arguments, "limit", "--limit", 200);
+            push_codegraph_string_arg(&mut args, tool_arg_string(arguments, "kind"), "--kind");
+            if tool_arg_bool(arguments, "json", false) {
+                args.push("--json".to_string());
+            }
+            args.push(codegraph_required_arg(arguments, "query", command)?);
+        }
+        "node" => {
+            let symbol = tool_arg_string(arguments, "symbol");
+            let file = tool_arg_string(arguments, "file");
+            if symbol.is_empty() && file.is_empty() {
+                return Err(
+                    "codegraph_command requires `symbol` or `file` when command is `node`."
+                        .to_string(),
+                );
+            }
+            push_codegraph_string_arg(&mut args, file, "--file");
+            push_codegraph_number_arg(&mut args, arguments, "offset", "--offset", u64::MAX);
+            push_codegraph_number_arg(&mut args, arguments, "limit", "--limit", 2_000);
+            if tool_arg_bool(arguments, "symbolsOnly", false) {
+                args.push("--symbols-only".to_string());
+            }
+            if !symbol.is_empty() {
+                args.push(symbol.to_string());
+            }
+        }
+        "files" => {
+            push_codegraph_string_arg(&mut args, tool_arg_string(arguments, "filter"), "--filter");
+            push_codegraph_string_arg(
+                &mut args,
+                tool_arg_string(arguments, "pattern"),
+                "--pattern",
+            );
+            push_codegraph_string_arg(&mut args, tool_arg_string(arguments, "format"), "--format");
+            push_codegraph_number_arg(&mut args, arguments, "maxDepth", "--max-depth", 20);
+            if tool_arg_bool(arguments, "json", false) {
+                args.push("--json".to_string());
+            }
+        }
+        "callers" | "callees" => {
+            push_codegraph_number_arg(&mut args, arguments, "limit", "--limit", 200);
+            if tool_arg_bool(arguments, "json", false) {
+                args.push("--json".to_string());
+            }
+            args.push(codegraph_required_arg(arguments, "symbol", command)?);
+        }
+        "impact" => {
+            push_codegraph_number_arg(&mut args, arguments, "depth", "--depth", 20);
+            if tool_arg_bool(arguments, "json", false) {
+                args.push("--json".to_string());
+            }
+            args.push(codegraph_required_arg(arguments, "symbol", command)?);
+        }
+        "affected" => {
+            push_codegraph_number_arg(&mut args, arguments, "depth", "--depth", 20);
+            push_codegraph_string_arg(&mut args, tool_arg_string(arguments, "filter"), "--filter");
+            if tool_arg_bool(arguments, "json", false) {
+                args.push("--json".to_string());
+            }
+            args.extend(tool_arg_string_array(arguments, "files"));
+        }
+        "init" | "unlock" => requires_index = false,
+        "index" => {
+            requires_index = false;
+            args.push("--quiet".to_string());
+        }
+        "sync" => args.push("--quiet".to_string()),
+        _ => {
+            return Err(format!(
+                "Unsupported CodeGraph command `{}`. Allowed commands: {}.",
+                command,
+                CODEGRAPH_READ_COMMANDS
+                    .iter()
+                    .chain(CODEGRAPH_WRITE_COMMANDS.iter())
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ))
+        }
+    }
+
+    Ok((args, requires_index))
+}
+
+fn execute_codegraph_command_tool(workspace: &Path, arguments: &Value) -> Result<String, String> {
+    let (args, requires_index) = build_codegraph_command_args(arguments)?;
+    let command = args.first().map(String::as_str).unwrap_or("command");
+
+    if requires_index && !has_codegraph_index(workspace) {
+        return Err(format!(
+            "No .codegraph index was found for {}. Run codegraph_command with command `init` first.",
+            workspace.display()
+        ));
+    }
+
+    let arg_refs = args.iter().map(String::as_str).collect::<Vec<_>>();
+    let output = run_codegraph_command(workspace, &arg_refs)?;
+    let stdout = strip_ansi_escape_sequences(&String::from_utf8_lossy(&output.stdout));
+    let stderr = strip_ansi_escape_sequences(&String::from_utf8_lossy(&output.stderr));
+    let detail = match (stdout.trim().is_empty(), stderr.trim().is_empty()) {
+        (false, false) => format!("stdout:\n{}\n\nstderr:\n{}", stdout.trim(), stderr.trim()),
+        (false, true) => stdout.trim().to_string(),
+        (true, false) => stderr.trim().to_string(),
+        (true, true) => format!("CodeGraph {} completed successfully.", command),
+    };
+
+    if !output.status.success() {
+        let code = output
+            .status
+            .code()
+            .map(|value| value.to_string())
+            .unwrap_or_else(|| "terminated".to_string());
+        return Err(format!(
+            "CodeGraph {} failed with exit code {}:\n{}",
+            command, code, detail
+        ));
+    }
+
+    Ok(truncate_text(
+        format!("CodeGraph {} result:\n{}", command, detail),
+        20_000,
+    ))
 }
 
 fn tool_arg_string<'a>(arguments: &'a Value, key: &str) -> &'a str {
@@ -2208,6 +2478,70 @@ pub(crate) async fn apply_patch_proposal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn builds_supported_codegraph_read_command_arguments() {
+        let (query, query_requires_index) = build_codegraph_command_args(&json!({
+            "command": "query",
+            "query": "ChatGroupPage",
+            "limit": 12,
+            "kind": "function",
+            "json": true
+        }))
+        .unwrap();
+        assert_eq!(
+            query,
+            vec![
+                "query",
+                "--limit",
+                "12",
+                "--kind",
+                "function",
+                "--json",
+                "ChatGroupPage"
+            ]
+        );
+        assert!(query_requires_index);
+
+        let (node, _) = build_codegraph_command_args(&json!({
+            "command": "node",
+            "file": "src/main.rs",
+            "offset": 20,
+            "limit": 40,
+            "symbolsOnly": true
+        }))
+        .unwrap();
+        assert_eq!(
+            node,
+            vec![
+                "node",
+                "--file",
+                "src/main.rs",
+                "--offset",
+                "20",
+                "--limit",
+                "40",
+                "--symbols-only"
+            ]
+        );
+    }
+
+    #[test]
+    fn validates_codegraph_command_arguments_and_index_requirements() {
+        assert!(build_codegraph_command_args(&json!({ "command": "query" })).is_err());
+        assert!(build_codegraph_command_args(&json!({ "command": "node" })).is_err());
+        assert!(build_codegraph_command_args(&json!({ "command": "uninit" })).is_err());
+
+        for command in CODEGRAPH_WRITE_COMMANDS {
+            let (args, requires_index) =
+                build_codegraph_command_args(&json!({ "command": command })).unwrap();
+            assert_eq!(*command == "sync", requires_index);
+            assert_eq!(
+                matches!(*command, "index" | "sync"),
+                args.contains(&"--quiet".to_string())
+            );
+        }
+    }
 
     #[test]
     fn apply_patch_trace_keeps_details_beyond_the_default_tool_limit() {

@@ -3249,6 +3249,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(names.contains(&"codegraph_explore"));
+        assert!(names.contains(&"codegraph_command"));
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"list_files"));
         assert!(names.contains(&"search_files"));
@@ -3272,6 +3273,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert!(names.contains(&"codegraph_explore"));
+        assert!(names.contains(&"codegraph_command"));
         assert!(names.contains(&"read_file"));
         assert!(names.contains(&"list_files"));
         assert!(names.contains(&"search_files"));
@@ -3282,6 +3284,18 @@ mod tests {
         assert!(!names.contains(&"move_path"));
         assert!(!names.contains(&"apply_patch"));
         assert!(!names.contains(&"run_command"));
+
+        let codegraph_commands = schema
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["function"]["name"] == json!("codegraph_command"))
+            .and_then(|tool| {
+                tool["function"]["parameters"]["properties"]["command"]["enum"].as_array()
+            })
+            .unwrap();
+        assert!(codegraph_commands.contains(&json!("status")));
+        assert!(!codegraph_commands.contains(&json!("sync")));
     }
 
     #[test]
@@ -3306,6 +3320,29 @@ mod tests {
 
         assert!(content.contains("write permission is disabled"));
         assert!(!content.contains("should-not-run"));
+    }
+
+    #[test]
+    fn execute_code_tool_call_blocks_codegraph_updates_without_permission() {
+        let tool_result = execute_code_tool_call(
+            Path::new("."),
+            &json!({
+                "id": "call-codegraph-sync",
+                "function": {
+                    "name": "codegraph_command",
+                    "arguments": "{\"command\":\"sync\"}"
+                }
+            }),
+            false,
+            None,
+        );
+
+        let content = tool_result
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+
+        assert!(content.contains("write permission is disabled"));
     }
 
     #[test]
