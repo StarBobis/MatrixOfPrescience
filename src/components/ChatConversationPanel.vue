@@ -1209,6 +1209,9 @@ defineExpose({
           <el-tag type="info" size="small">
             {{ t("chat.onlineMembers", { count: activeMemberCount }) }}
           </el-tag>
+          <el-tag v-if="activeGroup" :type="activeGroup.mode === 'task' ? 'warning' : 'success'" size="small">
+            {{ t(`createGroup.modes.${activeGroup.mode}`) }}
+          </el-tag>
         </div>
       </div>
       <div class="chat-header-tools">

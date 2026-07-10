@@ -4,6 +4,7 @@ import { getI18nLocale, translate as t } from "../i18n";
 import { defaultLocale, normalizeLocale, type AppLocale } from "../i18n/locales";
 
 export type ProviderId = "openai" | "deepseek";
+export type ChatGroupMode = "discussion" | "task";
 export type ChatRole = "user" | "assistant";
 export type MessageStatus = "done" | "thinking" | "error" | "interrupted";
 export type ChatMessageActivityKind = "status" | "tool";
@@ -103,6 +104,7 @@ export interface ChatGroup {
   id: string;
   name: string;
   description: string;
+  mode: ChatGroupMode;
   announcement: string;
   workspacePath: string;
   agentConfig: AgentCollaborationConfig;
@@ -251,11 +253,35 @@ function normalizeAgentConfig(
   return merged;
 }
 
+function enforceTaskAdmin(members: AgentModel[], preferredMemberId = "") {
+  const admin =
+    members.find((member) => member.id === preferredMemberId) ??
+    members.find((member) => member.isAdmin && member.enabled) ??
+    members.find((member) => member.enabled) ??
+    members[0];
+
+  if (!admin) {
+    return;
+  }
+
+  admin.enabled = true;
+  for (const member of members) {
+    member.isAdmin = member.id === admin.id;
+  }
+}
+
 function normalizeGroup(group: ChatGroup): ChatGroup {
   const workspacePath = group.workspacePath ?? "";
+  const mode: ChatGroupMode = group.mode === "task" ? "task" : "discussion";
+  const members = group.members.map(normalizeMember);
+
+  if (mode === "task") {
+    enforceTaskAdmin(members);
+  }
 
   return {
     ...group,
+    mode,
     announcement: group.announcement ?? getDefaultAnnouncement(),
     workspacePath,
     agentConfig: normalizeAgentConfig(group.agentConfig),
@@ -275,7 +301,7 @@ function normalizeGroup(group: ChatGroup): ChatGroup {
         warnings: [t("patchSafety.legacyWarning")],
       },
     })),
-    members: group.members.map(normalizeMember),
+    members,
     messages: group.messages.map((message) => ({
       ...message,
       status: normalizeMessageStatus(message.status),
@@ -546,6 +572,7 @@ function createDefaultGroup(): ChatGroup {
     id: crypto.randomUUID(),
     name: t("defaults.group.name"),
     description: t("defaults.group.description"),
+    mode: "discussion",
     announcement: getDefaultAnnouncement(),
     workspacePath: "",
     agentConfig: structuredClone(defaultAgentConfig),
@@ -859,6 +886,9 @@ export const useSettingsStore = defineStore("settings", {
 
       for (const group of this.groups) {
         let groupChanged = false;
+        const taskAdminId = group.mode === "task"
+          ? group.members.find((member) => member.isAdmin)?.id ?? ""
+          : "";
 
         for (const member of group.members) {
           if (member.libraryId !== libraryId) {
@@ -873,6 +903,9 @@ export const useSettingsStore = defineStore("settings", {
         }
 
         if (groupChanged) {
+          if (group.mode === "task") {
+            enforceTaskAdmin(group.members, taskAdminId);
+          }
           group.updatedAt = new Date().toISOString();
         }
       }
@@ -973,19 +1006,25 @@ export const useSettingsStore = defineStore("settings", {
       description: string,
       announcement: string,
       members: AgentModel[],
+      mode: ChatGroupMode = "discussion",
     ) {
+      const uniqueMembers = members.map((member, index, list) => ({
+        ...member,
+        name: makeUniqueMemberName(member.name, list.slice(0, index)),
+      }));
+      if (mode === "task") {
+        enforceTaskAdmin(uniqueMembers);
+      }
       const group: ChatGroup = {
         id: crypto.randomUUID(),
         name,
         description,
+        mode,
         announcement: announcement.trim() || getDefaultAnnouncement(),
         workspacePath: "",
         agentConfig: structuredClone(defaultAgentConfig),
         patchProposals: [],
-        members: members.map((member, index, list) => ({
-          ...member,
-          name: makeUniqueMemberName(member.name, list.slice(0, index)),
-        })),
+        members: uniqueMembers,
         messages: [
           createSystemMessage(
             t("defaults.group.createdMessage", { name, count: members.length }),
@@ -1090,13 +1129,24 @@ export const useSettingsStore = defineStore("settings", {
     },
 
     updateMemberProfile(member: AgentModel) {
+      const group = this.activeGroup;
+
+      if (group.mode === "task") {
+        enforceTaskAdmin(group.members, member.isAdmin ? member.id : "");
+      }
+
       this.rememberMember(member);
-      this.activeGroup.updatedAt = new Date().toISOString();
+      group.updatedAt = new Date().toISOString();
     },
 
     removeMember(memberId: string) {
       const group = this.activeGroup;
       group.members = group.members.filter((member) => member.id !== memberId);
+
+      if (group.mode === "task") {
+        enforceTaskAdmin(group.members);
+      }
+
       group.updatedAt = new Date().toISOString();
     },
 

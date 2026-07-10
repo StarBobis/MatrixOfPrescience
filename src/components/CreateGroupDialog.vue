@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { CirclePlus, Delete } from "@element-plus/icons-vue";
 import { useI18n } from "vue-i18n";
-import type { AgentModel, ProviderId } from "../stores/settings";
+import type { AgentModel, ChatGroupMode, ProviderId } from "../stores/settings";
 
 const open = defineModel<boolean>("open", { required: true });
 
@@ -9,6 +9,7 @@ defineProps<{
   name: string;
   description: string;
   announcement: string;
+  mode: ChatGroupMode;
   members: AgentModel[];
   friends: AgentModel[];
   providerOptions: Array<{ label: string; value: ProviderId }>;
@@ -19,10 +20,12 @@ const emit = defineEmits<{
   "update:name": [value: string];
   "update:description": [value: string];
   "update:announcement": [value: string];
+  "update:mode": [value: ChatGroupMode];
   addDraftMember: [provider: ProviderId];
   addDraftMemberFromFriend: [friendId: string];
   removeDraftMember: [memberId: string];
   updateDraftMemberProvider: [member: AgentModel];
+  setDraftAdmin: [memberId: string];
   createGroup: [];
 }>();
 
@@ -40,6 +43,15 @@ const { t } = useI18n();
           :model-value="description"
           @update:model-value="emit('update:description', String($event))"
         />
+      </el-form-item>
+      <el-form-item :label="t('createGroup.mode')">
+        <el-radio-group
+          :model-value="mode"
+          @update:model-value="emit('update:mode', $event as ChatGroupMode)"
+        >
+          <el-radio-button value="discussion">{{ t("createGroup.modes.discussion") }}</el-radio-button>
+          <el-radio-button value="task">{{ t("createGroup.modes.task") }}</el-radio-button>
+        </el-radio-group>
       </el-form-item>
       <el-form-item :label="t('createGroup.announcement')">
         <el-input
@@ -87,7 +99,15 @@ const { t } = useI18n();
           <div class="draft-member-toggles">
             <span class="draft-toggle">
               <span>{{ t("members.adminRole") }}</span>
-              <el-switch v-model="member.isAdmin" active-color="#2f7a61" />
+              <el-radio
+                v-if="mode === 'task'"
+                :model-value="member.isAdmin ? member.id : ''"
+                :label="member.id"
+                @change="emit('setDraftAdmin', member.id)"
+              >
+                {{ t("createGroup.taskAdmin") }}
+              </el-radio>
+              <el-switch v-else v-model="member.isAdmin" active-color="#2f7a61" />
             </span>
             <span class="draft-toggle">
               <span>{{ t("members.writePermission") }}</span>

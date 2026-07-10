@@ -77,7 +77,13 @@
     "announcement": "Announcement",
     "create": "Create group chat",
     "description": "Description",
+    "mode": "Group type",
+    "modes": {
+      "discussion": "Discussion",
+      "task": "Task"
+    },
     "name": "Group name",
+    "taskAdmin": "Coordinator",
     "title": "New chat group"
   },
   "members": {
@@ -255,6 +261,8 @@
     "patchBlocked": "This patch was blocked by the safety model and cannot be approved",
     "patchFailedLogged": "Patch application failed. Details were written to the chat.",
     "patchMissingDiff": "This proposal has no applicable diff patch",
+    "taskGroupNeedsAdmin": "A task group needs exactly one active coordinator.",
+    "taskGroupNeedsWorkers": "A task group needs one coordinator and at least one active worker.",
     "unmuteOneMember": "Unmute at least one virtual member"
   },
   "defaults": {
@@ -386,6 +394,13 @@
     "stepNoContext": "No code context is needed for this round.",
     "stepQueued": "Entered speaking queue.",
     "stepWaitingModel": "Waiting for model response.",
+    "taskFallbackAssignment": "Handle an independent work package for the user's request from this specialist role: {role}. Return concrete findings and verify assumptions.",
+    "taskForceFinalRule": "The task workflow has reached its {round}-round limit. Read every worker result and previous review, then give the user the best complete answer now. Clearly disclose unresolved risks. Do not request another dispatch and do not output REDISPATCH.",
+    "taskPlanFormat": "Publish a concise plan in the chat. Use exactly one line per worker below. Format: - @Name: detailed task description. Each task after the colon must be detailed enough (goal, expected output, constraints) for the worker to complete independently. Do not rename, omit, or combine workers. Your plan must NOT include any step you would execute yourself.",
+    "taskPlanRule": "Task workflow round {round}. Your role is COORDINATOR — you plan and delegate. You are NOT an executor.\n\nYou MUST:\n1. Read the user's request and understand the goal\n2. Break the goal into non-overlapping specialist sub-tasks\n3. Assign each sub-task to a worker using the - @Name: format\n\nSTRICTLY FORBIDDEN: executing tasks yourself, writing code, analyzing data, or drawing conclusions. You only break down and delegate — all actual work must go to workers. Prefer each worker's established core role.",
+    "taskReviewRule": "All workers have returned for task round {round}; their replies are in chat. Your role is REVIEWING and SYNTHESIZING — not redoing:\n\n1. Critically compare every result against the user's request\n2. Synthesize all worker returns into the final user-facing answer\n3. If results are sufficient → output the final answer, never mention REDISPATCH\n4. If not ready → put REDISPATCH: on its own first line and explain corrections for the next round\n\nSTRICTLY FORBIDDEN: redoing worker work, adding your own analysis or code. Your answer must ONLY synthesize what workers already returned. Do not report success prematurely.",
+    "taskWorkerAssignment": "Your assigned task: {task}",
+    "taskWorkerRule": "You are a worker in task round {round}. Execute only your assigned specialist task thoroughly and independently. Return concrete evidence, deliverables, risks, or corrections to {'@'}{admin}. Your reply is visible in the chat record, but the coordinator alone will answer the user.",
     "toolTrace": "Tool: {step}",
     "unknownError": "Unknown error",
     "voteFailed": "{name}'s consensus check failed and was treated as agreement: {error}",

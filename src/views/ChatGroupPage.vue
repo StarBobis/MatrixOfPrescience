@@ -10,6 +10,7 @@ import { useI18n } from "vue-i18n";
 import {
   type AgentModel,
   type AgentPatchProposal,
+  type ChatGroupMode,
   type ChatMessage,
   type ChatMessageActivityItem,
   type ChatMessageActivityKind,
@@ -101,6 +102,11 @@ type MemberVote = "agree" | "supplement" | "disagree";
 
 interface MemberAnswer { messageId: string; member: AgentModel; content: string }
 
+interface TaskAssignment {
+  member: AgentModel;
+  instruction: string;
+}
+
 interface PendingMemberMessage {
   id: string;
   startedAt: number;
@@ -129,6 +135,7 @@ interface ChatCompletionInvokeRequest {
 }
 
 const maxConsensusRounds = 8;
+const maxTaskRounds = 3;
 
 const markdown = new MarkdownIt({
   breaks: true,
@@ -201,6 +208,7 @@ const streamingExecutionSegments = new Map<
 const newGroupName = ref(t("defaults.newGroup.name"));
 const newGroupDescription = ref(t("defaults.newGroup.description"));
 const newGroupAnnouncement = ref(t("defaults.newGroup.announcement"));
+const newGroupMode = ref<ChatGroupMode>("discussion");
 const newGroupMembers = ref<AgentModel[]>([]);
 
 const activeMessages = computed<ChatMessage[]>(() => activeGroup.value?.messages ?? []);
@@ -357,11 +365,29 @@ function openCreateGroupDialog() {
   newGroupName.value = t("defaults.newGroup.name");
   newGroupDescription.value = t("defaults.newGroup.description");
   newGroupAnnouncement.value = t("defaults.newGroup.announcement");
+  newGroupMode.value = "discussion";
   newGroupMembers.value = [
     settingsStore.createMemberDraft("openai"),
     settingsStore.createMemberDraft("deepseek"),
   ];
   groupDialogOpen.value = true;
+}
+
+function updateDraftGroupMode(mode: ChatGroupMode) {
+  newGroupMode.value = mode;
+
+  if (mode === "task") {
+    setDraftAdmin(newGroupMembers.value.find((member) => member.enabled)?.id ?? "");
+  }
+}
+
+function setDraftAdmin(memberId: string) {
+  for (const member of newGroupMembers.value) {
+    member.isAdmin = member.id === memberId;
+    if (member.isAdmin) {
+      member.enabled = true;
+    }
+  }
 }
 
 function addDraftMember(provider: ProviderId = "openai") {
@@ -432,11 +458,27 @@ function createGroup() {
     memberNames.add(normalizedName);
   }
 
+  if (newGroupMode.value === "task") {
+    const activeMembers = newGroupMembers.value.filter((member) => member.enabled);
+    const activeAdmins = activeMembers.filter((member) => member.isAdmin);
+
+    if (activeMembers.length < 2) {
+      ElMessage.warning(t("messages.taskGroupNeedsWorkers"));
+      return;
+    }
+
+    if (activeAdmins.length !== 1) {
+      ElMessage.warning(t("messages.taskGroupNeedsAdmin"));
+      return;
+    }
+  }
+
   settingsStore.createGroup(
     groupName,
     newGroupDescription.value.trim(),
     newGroupAnnouncement.value.trim(),
     newGroupMembers.value.map((member) => ({ ...member })),
+    newGroupMode.value,
   );
   groupDialogOpen.value = false;
   scrollToBottom();
@@ -754,13 +796,14 @@ function repairMarkdownCodeFences(content: string) {
 
 function annotateMarkdownCodeFences(content: string) {
   return repairMarkdownCodeFences(content).replace(
-    /(^|\n)([ \t]*)```\s*\n([\s\S]*?)\n[ \t]*```/g,
-    (match, prefix: string, indent: string, code: string) => {
+    /(^|\n)([ \t]*)```([A-Za-z0-9_+.#-]*)\s*\n([\s\S]*?)\n[ \t]*```/g,
+    (match, prefix: string, indent: string, language: string, code: string) => {
       if (!code.trim()) {
         return match;
       }
 
-      return `${prefix}${indent}\`\`\`${inferMarkdownCodeFenceLanguage(code)}\n${code}\n${indent}\`\`\``;
+      const lang = language || inferMarkdownCodeFenceLanguage(code);
+      return `${prefix}${indent}\`\`\`${lang}\n${code}\n${indent}\`\`\``;
     },
   );
 }
@@ -2320,6 +2363,139 @@ async function resolveConsensus(initialAnswer: MemberAnswer | null, runId: strin
   }
 }
 
+function getTaskAssignment(plan: string, member: AgentModel) {
+  const normalizedName = member.name.trim().toLocaleLowerCase();
+  const line = plan.split("\n").find((candidate) => {
+    const normalized = candidate.trim().replace(/^[-*]\s*/, "").toLocaleLowerCase();
+    return normalized.startsWith(`@${normalizedName}:`) || normalized.startsWith(`@${normalizedName}：`);
+  });
+
+  if (!line) {
+    return "";
+  }
+
+  const asciiSeparator = line.indexOf(":");
+  const fullWidthSeparator = line.indexOf("：");
+  const separatorIndex =
+    asciiSeparator < 0
+      ? fullWidthSeparator
+      : fullWidthSeparator < 0
+        ? asciiSeparator
+        : Math.min(asciiSeparator, fullWidthSeparator);
+
+  return separatorIndex < 0 ? "" : line.slice(separatorIndex + 1).trim();
+}
+
+function buildTaskAssignments(plan: string, workers: AgentModel[]): TaskAssignment[] {
+  return workers.map((member) => ({
+    member,
+    instruction:
+      getTaskAssignment(plan, member) ||
+      t("chatRuntime.taskFallbackAssignment", { role: member.systemPrompt.trim() || member.name }),
+  }));
+}
+
+function buildTaskPlanningRule(workers: AgentModel[], round: number) {
+  const workerLines = workers.map((member) => `- @${member.name}:`).join("\n");
+
+  return [
+    t("chatRuntime.taskPlanRule", { round }),
+    t("chatRuntime.taskPlanFormat"),
+    workerLines,
+  ].join("\n");
+}
+
+function buildTaskWorkerRule(assignment: TaskAssignment, admin: AgentModel, round: number) {
+  return [
+    t("chatRuntime.taskWorkerRule", { round, admin: admin.name }),
+    t("chatRuntime.taskWorkerAssignment", { task: assignment.instruction }),
+  ].join("\n");
+}
+
+function buildTaskReviewRule(round: number, forceFinal = false) {
+  return forceFinal
+    ? t("chatRuntime.taskForceFinalRule", { round })
+    : t("chatRuntime.taskReviewRule", { round });
+}
+
+function requestsTaskRedispatch(content: string) {
+  return content
+    .split("\n")
+    .some((line) => line.trim().toLocaleUpperCase().startsWith("REDISPATCH:"));
+}
+
+async function runTaskGroup(
+  members: AgentModel[],
+  runId: string,
+  ownerName: string,
+) {
+  const admin = members.find((member) => member.isAdmin);
+  const workers = members.filter((member) => !member.isAdmin);
+
+  if (!admin || workers.length === 0) {
+    ElMessage.warning(t("messages.taskGroupNeedsWorkers"));
+    return;
+  }
+
+  for (let round = 1; round <= maxTaskRounds; round += 1) {
+    if (isRunInterrupted(runId)) {
+      return;
+    }
+
+    setSpeakerQueue([admin], "queued");
+    const plan = await askMember(
+      admin,
+      buildTaskPlanningRule(workers, round),
+      runId,
+      undefined,
+      ownerName,
+    );
+
+    if (!plan || isRunInterrupted(runId)) {
+      return;
+    }
+
+    const assignments = buildTaskAssignments(plan.content, workers);
+    setSpeakerQueue(workers, "queued");
+    await Promise.all(
+      assignments.map((assignment) =>
+        askMember(
+          assignment.member,
+          buildTaskWorkerRule(assignment, admin, round),
+          runId,
+          undefined,
+          admin.name,
+        ),
+      ),
+    );
+
+    if (isRunInterrupted(runId)) {
+      return;
+    }
+
+    setSpeakerQueue([admin], "queued");
+    const review = await askMember(
+      admin,
+      buildTaskReviewRule(round),
+      runId,
+      undefined,
+      ownerName,
+    );
+
+    if (!review || !requestsTaskRedispatch(review.content)) {
+      return;
+    }
+  }
+
+  if (!isRunInterrupted(runId)) {
+    const admin = members.find((member) => member.isAdmin);
+
+    if (admin) {
+      await askMember(admin, buildTaskReviewRule(maxTaskRounds, true), runId, undefined, ownerName);
+    }
+  }
+}
+
 async function sendMessage() {
   const userText = composer.value.trim();
 
@@ -2359,10 +2535,44 @@ async function sendMessage() {
   });
 
   const members = [...orderedActiveMembers.value];
-  setSpeakerQueue(members, "queued");
   const mentionedMembers = parseMentionedMembers(userText, members);
 
   try {
+    if (activeGroup.value?.mode === "task") {
+      if (mentionedMembers.length > 0) {
+        const mentionedIds = new Set(mentionedMembers.map((m) => m.id));
+        const taskMembers = members.filter((m) => m.isAdmin || mentionedIds.has(m.id));
+        setSpeakerQueue(taskMembers, "queued");
+        await runTaskGroup(taskMembers, runId, ownerName);
+      } else {
+        const admin = members.find((m) => m.isAdmin);
+        if (!admin) {
+          return;
+        }
+
+        setSpeakerQueue([admin], "queued");
+        const answer = await askMember(
+          admin,
+          t("chatRuntime.defaultResponderRule"),
+          runId,
+          undefined,
+          ownerName,
+        );
+
+        if (!answer || isRunInterrupted(runId)) {
+          return;
+        }
+
+        const otherMembers = prioritizeMembers(
+          members.filter((m) => m.id !== admin.id),
+        );
+        setSpeakerQueue(otherMembers, "waiting");
+      }
+      return;
+    }
+
+    setSpeakerQueue(members, "queued");
+
     if (mentionedMembers.length > 0) {
       setSpeakerQueue(mentionedMembers, "queued");
       let latestAnswer: MemberAnswer | null = null;
@@ -2532,6 +2742,7 @@ async function sendMessage() {
       v-model:name="newGroupName"
       v-model:description="newGroupDescription"
       v-model:announcement="newGroupAnnouncement"
+      :mode="newGroupMode"
       :members="newGroupMembers"
       :friends="friends"
       :provider-options="providerOptions"
@@ -2540,6 +2751,8 @@ async function sendMessage() {
       @add-draft-member-from-friend="addDraftMemberFromFriend"
       @remove-draft-member="removeDraftMember"
       @update-draft-member-provider="updateDraftMemberProvider"
+      @update:mode="updateDraftGroupMode"
+      @set-draft-admin="setDraftAdmin"
       @create-group="createGroup"
     />
   </div>
