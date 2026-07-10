@@ -1842,6 +1842,39 @@ defineExpose({
   background: #f3f8fd;
 }
 
+.activity-chip.network {
+  border-color: #b7dce0;
+  color: #176873;
+  background: #eefafb;
+}
+
+.activity-chip.network.running .el-icon {
+  position: relative;
+  isolation: isolate;
+  overflow: visible;
+  color: #08747e;
+  filter: drop-shadow(0 0 3px rgb(30 189 195 / 55%));
+  animation: wifi-icon-breathe 1.5s ease-in-out infinite;
+}
+
+.activity-chip.network.running .el-icon::before {
+  position: absolute;
+  z-index: -1;
+  inset: -5px;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    rgb(19 162 174 / 0%) 0deg,
+    rgb(38 196 190 / 70%) 92deg,
+    rgb(88 139 229 / 75%) 178deg,
+    rgb(19 162 174 / 0%) 280deg
+  );
+  content: "";
+  filter: blur(4px);
+  opacity: 0.72;
+  animation: wifi-gradient-orbit 2s linear infinite;
+}
+
 .activity-chip.status.running {
   border-color: #efd7ad;
   color: #9a650c;
@@ -2065,6 +2098,79 @@ defineExpose({
   border-color: #d8e2ee;
   color: #355d80;
   background: #f3f8fd;
+}
+
+.execution-line.network .execution-icon,
+.execution-segment.network .execution-icon {
+  border-color: #b7dce0;
+  color: #176873;
+  background: #eefafb;
+}
+
+.execution-line.network.running .execution-icon,
+.execution-segment.network.running .execution-icon {
+  position: relative;
+  isolation: isolate;
+  overflow: visible;
+  border-color: rgb(61 194 191 / 75%);
+  color: #08747e;
+  background: linear-gradient(145deg, #f4fffd 10%, #e7f7ff 55%, #f4f0ff 100%);
+  box-shadow:
+    0 0 0 1px rgb(44 185 185 / 10%),
+    0 0 10px rgb(38 196 190 / 38%),
+    0 0 18px rgb(88 139 229 / 18%);
+  animation: wifi-icon-breathe 1.5s ease-in-out infinite;
+}
+
+.execution-line.network.running .execution-icon::before,
+.execution-segment.network.running .execution-icon::before {
+  position: absolute;
+  z-index: -1;
+  inset: -5px;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    rgb(19 162 174 / 0%) 0deg,
+    rgb(38 196 190 / 72%) 92deg,
+    rgb(88 139 229 / 78%) 178deg,
+    rgb(19 162 174 / 0%) 280deg
+  );
+  content: "";
+  filter: blur(5px);
+  opacity: 0.78;
+  animation: wifi-gradient-orbit 2s linear infinite;
+}
+
+@keyframes wifi-gradient-orbit {
+  from {
+    transform: rotate(0deg) scale(0.92);
+  }
+
+  to {
+    transform: rotate(360deg) scale(0.92);
+  }
+}
+
+@keyframes wifi-icon-breathe {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 2px rgb(30 189 195 / 35%));
+  }
+
+  50% {
+    filter: drop-shadow(0 0 7px rgb(88 139 229 / 72%));
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .activity-chip.network.running .el-icon,
+  .activity-chip.network.running .el-icon::before,
+  .execution-line.network.running .execution-icon,
+  .execution-line.network.running .execution-icon::before,
+  .execution-segment.network.running .execution-icon,
+  .execution-segment.network.running .execution-icon::before {
+    animation: none;
+  }
 }
 
 .execution-segment.mixed .execution-icon {

@@ -73,11 +73,20 @@ interface ChatCompletionResponse {
 
 interface ChatCompletionStreamEvent {
   streamId: string;
-  eventType: "traceChunk" | "traceStep" | "toolChunk" | "contentChunk" | "usage";
+  eventType:
+    | "traceChunk"
+    | "traceStep"
+    | "toolChunk"
+    | "contentChunk"
+    | "usage"
+    | "retryWaiting"
+    | "retryRecovered";
   traceKind?: ChatTraceStep["kind"];
   text: string;
   detail?: string;
   usage?: ChatCompletionUsage;
+  retryAttempt?: number;
+  retryDelayMs?: number;
 }
 
 interface ApplyPatchResponse {
@@ -181,6 +190,7 @@ const streamingTraceLines = new Map<
   { kind: ChatTraceStep["kind"]; itemId: string; index: number; text: string }
 >();
 const streamingToolOutputs = new Map<string, { itemId: string; detail: string }>();
+const streamingRetries = new Map<string, { itemId: string; attempts: number }>();
 const streamingExecutionSegments = new Map<
   string,
   { executionSegmentId?: string; contentSegmentId?: string; phase: "content" | "execution" }
@@ -1518,6 +1528,63 @@ function flushStreamingToolOutput(messageId: string, status: ChatMessageExecutio
   streamingToolOutputs.delete(messageId);
 }
 
+function applyRetryWaiting(messageId: string, payload: ChatCompletionStreamEvent) {
+  const attempt = Math.max(1, payload.retryAttempt ?? 1);
+  const seconds = Math.max(0, Math.ceil((payload.retryDelayMs ?? 0) / 1000));
+  const text = t("chatRuntime.retryWaiting", { attempt, seconds });
+  let current = streamingRetries.get(messageId);
+
+  flushStreamingTraceLine(messageId);
+  flushStreamingToolOutput(messageId);
+
+  if (!current) {
+    streamingExecutionSegments.set(messageId, {
+      executionSegmentId: createMessageSegmentId(messageId, "execution"),
+      phase: "execution",
+    });
+    current = {
+      itemId: addExecutionItem(messageId, "network", text, "running"),
+      attempts: attempt,
+    };
+    streamingRetries.set(messageId, current);
+  }
+
+  current.attempts = attempt;
+  updateExecutionItem(messageId, current.itemId, { text, status: "running" });
+}
+
+function applyRetryRecovered(messageId: string, payload: ChatCompletionStreamEvent) {
+  const current = streamingRetries.get(messageId);
+
+  if (!current) {
+    return;
+  }
+
+  const attempts = Math.max(1, payload.retryAttempt ?? current.attempts);
+  updateExecutionItem(messageId, current.itemId, {
+    text: t("chatRuntime.retryRecovered", { attempts }),
+    status: "done",
+  });
+  streamingRetries.delete(messageId);
+  streamingExecutionSegments.delete(messageId);
+}
+
+function flushStreamingRetry(
+  messageId: string,
+  status: Extract<ChatMessageExecutionStatus, "error" | "interrupted">,
+) {
+  const current = streamingRetries.get(messageId);
+
+  if (current) {
+    updateExecutionItem(messageId, current.itemId, {
+      text: t(status === "interrupted" ? "chatRuntime.retryInterrupted" : "chatRuntime.retryFailed"),
+      status,
+    });
+  }
+
+  streamingRetries.delete(messageId);
+}
+
 function appendStreamingContentChunk(messageId: string, chunk: string) {
   if (!chunk) {
     return;
@@ -1542,6 +1609,16 @@ function appendStreamingContentChunk(messageId: string, chunk: string) {
 }
 
 function applyCompletionStreamEvent(messageId: string, payload: ChatCompletionStreamEvent) {
+  if (payload.eventType === "retryWaiting") {
+    applyRetryWaiting(messageId, payload);
+    return;
+  }
+
+  if (payload.eventType === "retryRecovered") {
+    applyRetryRecovered(messageId, payload);
+    return;
+  }
+
   if (payload.eventType === "usage") {
     applyCompletionUsage(messageId, payload.usage);
     return;
@@ -1631,6 +1708,9 @@ async function invokeStreamingCompletion(
     });
 
     return { response, sawStreamReasoning, sawStreamTool };
+  } catch (error) {
+    flushStreamingRetry(messageId, "error");
+    throw error;
   } finally {
     unlisten();
     flushStreamingTraceLine(messageId);
@@ -1687,6 +1767,7 @@ function stopGeneration() {
   for (const messageId of pendingMessageIds.value) {
     const message = activeMessages.value.find((item) => item.id === messageId);
     const interruptedContent = getInterruptedContent(messageId, message?.content ?? "");
+    flushStreamingRetry(messageId, "interrupted");
     releasePendingMessage(messageId, message?.startedAt);
     settingsStore.updateMessage(messageId, {
       status: "interrupted",
@@ -1728,6 +1809,7 @@ async function resetCurrentSession() {
   speakingTimers.clear();
   streamingTraceLines.clear();
   streamingToolOutputs.clear();
+  streamingRetries.clear();
   streamingContent.clear();
   streamingExecutionSegments.clear();
 

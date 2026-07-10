@@ -1933,7 +1933,7 @@ async fn send_http_request_with_overload_retry(
     provider_name: &str,
     payload: &Value,
     cancellation: Option<&AtomicBool>,
-    retry_progress: Option<&dyn Fn(OverloadRetryProgress)>,
+    retry_progress: Option<&(dyn Fn(OverloadRetryProgress) + Sync)>,
     initial_retry_delay: Duration,
 ) -> Result<reqwest::Response, String> {
     let mut retry_delay = initial_retry_delay;
@@ -2144,11 +2144,7 @@ fn emit_stream_event(
     );
 }
 
-fn emit_overload_retry_event(
-    app: &AppHandle,
-    stream_id: &str,
-    progress: OverloadRetryProgress,
-) {
+fn emit_overload_retry_event(app: &AppHandle, stream_id: &str, progress: OverloadRetryProgress) {
     let (event_type, retry_attempt, retry_delay_ms) = match progress {
         OverloadRetryProgress::Waiting { attempt, delay } => (
             "retryWaiting",
@@ -2832,8 +2828,13 @@ mod tests {
     #[test]
     fn retries_new_api_resource_overload_until_request_succeeds() {
         let (endpoint, server) = spawn_overload_then_success_server(2);
-        let progress = std::cell::RefCell::new(Vec::new());
-        let record_progress = |event| progress.borrow_mut().push(event);
+        let progress = Mutex::new(Vec::new());
+        let record_progress = |event| {
+            progress
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(event)
+        };
         let response = tauri::async_runtime::block_on(send_http_request_with_overload_retry(
             &reqwest::Client::new(),
             &endpoint,
@@ -2851,7 +2852,9 @@ mod tests {
         assert_eq!(body["output_text"], "recovered");
         assert_eq!(server.join().expect("test server should finish"), 3);
         assert_eq!(
-            progress.into_inner(),
+            progress
+                .into_inner()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
             vec![
                 OverloadRetryProgress::Waiting {
                     attempt: 1,
