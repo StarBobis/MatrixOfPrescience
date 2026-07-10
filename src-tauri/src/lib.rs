@@ -188,8 +188,7 @@ const MAX_EDIT_RECOVERY_TOOL_ROUNDS: usize = 4;
 const MAX_CHAT_TRACE_STEPS: usize = 160;
 const TRACE_STEP_TEXT_LIMIT: usize = 280;
 const CHAT_COMPLETION_STREAM_EVENT: &str = "chat-completion-stream";
-const HTTP_RETRY_INITIAL_DELAY: Duration = Duration::from_secs(1);
-const HTTP_RETRY_MAX_DELAY: Duration = Duration::from_secs(15);
+const HTTP_RETRY_DELAY: Duration = Duration::from_secs(5);
 const RETRY_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const FINAL_ANSWER_INSTRUCTION: &str =
     "Use the tool results already provided and write the final answer now.";
@@ -1931,7 +1930,7 @@ async fn send_http_request_with_retry(
     retry_progress: Option<&(dyn Fn(HttpRetryProgress) + Sync)>,
     initial_retry_delay: Duration,
 ) -> Result<reqwest::Response, String> {
-    let mut retry_delay = initial_retry_delay;
+    let retry_delay = initial_retry_delay;
     let mut retry_attempt = 0;
 
     loop {
@@ -1954,9 +1953,6 @@ async fn send_http_request_with_retry(
                 });
             }
             wait_for_http_retry(retry_delay, cancellation).await?;
-            retry_delay = retry_delay
-                .saturating_mul(2)
-                .min(HTTP_RETRY_MAX_DELAY);
             continue;
         };
         let status = response.status();
@@ -1984,9 +1980,6 @@ async fn send_http_request_with_retry(
                 });
             }
             wait_for_http_retry(retry_delay, cancellation).await?;
-            retry_delay = retry_delay
-                .saturating_mul(2)
-                .min(HTTP_RETRY_MAX_DELAY);
             continue;
         };
 
@@ -2005,9 +1998,6 @@ async fn send_http_request_with_retry(
             });
         }
         wait_for_http_retry(retry_delay, cancellation).await?;
-        retry_delay = retry_delay
-            .saturating_mul(2)
-            .min(HTTP_RETRY_MAX_DELAY);
     }
 }
 
@@ -2027,7 +2017,7 @@ async fn send_chat_completion_request(
         payload,
         cancellation,
         None,
-        HTTP_RETRY_INITIAL_DELAY,
+        HTTP_RETRY_DELAY,
     )
     .await?;
     let body = response
@@ -2090,7 +2080,7 @@ async fn send_responses_request(
         payload,
         cancellation,
         None,
-        HTTP_RETRY_INITIAL_DELAY,
+        HTTP_RETRY_DELAY,
     )
     .await?;
     let body = response
@@ -2391,7 +2381,7 @@ async fn send_chat_completion_stream_request(
         &payload,
         cancellation,
         Some(&report_retry),
-        HTTP_RETRY_INITIAL_DELAY,
+        HTTP_RETRY_DELAY,
     )
     .await?;
 
@@ -2675,7 +2665,7 @@ async fn send_responses_stream_request(
         &payload,
         cancellation,
         Some(&report_retry),
-        HTTP_RETRY_INITIAL_DELAY,
+        HTTP_RETRY_DELAY,
     )
     .await?;
 
@@ -2853,6 +2843,11 @@ mod tests {
     #[test]
     fn chat_completion_turn_guard_allows_multiple_tool_rounds() {
         assert!(MAX_CHAT_COMPLETION_TURNS >= 16);
+    }
+
+    #[test]
+    fn http_retry_delay_is_fixed_at_five_seconds() {
+        assert_eq!(HTTP_RETRY_DELAY, Duration::from_secs(5));
     }
 
     #[test]
