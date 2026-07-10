@@ -1,17 +1,32 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { storeToRefs } from "pinia";
-import { Setting, UserFilled } from "@element-plus/icons-vue";
+import { ElMessage } from "element-plus";
+import { Refresh, Setting, UserFilled } from "@element-plus/icons-vue";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { type ProviderId, useSettingsStore } from "../stores/settings";
+import { useSettingsStore } from "../stores/settings";
 import { chooseLocalAvatar, getAvatarSrc } from "../utils/avatar";
+import { modelPresets } from "../utils/modelCatalog";
 import { useI18n } from "vue-i18n";
 import type { AppLocale } from "../i18n/locales";
+
+interface CcSwitchOpenAIConfig {
+  source: string;
+  providerName?: string;
+  baseUrl: string;
+  apiKey: string;
+  model?: string;
+  wireApi?: string;
+  warning?: string;
+}
 
 const settingsStore = useSettingsStore();
 const { providers, ownerProfile, locale, cacheDirectory, defaultCacheDirectory } =
   storeToRefs(settingsStore);
 const { t } = useI18n();
+const syncingCcSwitch = ref(false);
+const canSyncCcSwitch = isTauri();
 
 const languageOptions = computed<Array<{ label: string; value: AppLocale }>>(() => [
   { label: t("settings.languageOptions.en"), value: "en" },
@@ -28,11 +43,6 @@ const providerOptions = [
     value: "deepseek",
   },
 ];
-
-const modelPresets: Record<ProviderId, string[]> = {
-  openai: ["gpt-4.1", "gpt-4.1-mini", "gpt-4o", "gpt-4o-mini"],
-  deepseek: ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"],
-};
 
 async function chooseOwnerAvatar() {
   const avatar = await chooseLocalAvatar();
@@ -51,6 +61,35 @@ async function chooseCacheDirectory() {
 
   if (typeof selected === "string") {
     await settingsStore.setCacheDirectory(selected);
+  }
+}
+
+async function syncOpenAIFromCcSwitch() {
+  syncingCcSwitch.value = true;
+
+  try {
+    const config = await invoke<CcSwitchOpenAIConfig>("load_ccswitch_openai_config");
+    const provider = providers.value.openai;
+
+    provider.baseUrl = config.baseUrl;
+    provider.apiKey = config.apiKey;
+    provider.wireApi = config.wireApi;
+
+    if (config.model?.trim()) {
+      provider.defaultModel = config.model.trim();
+    }
+
+    ElMessage.success(t("settings.providers.ccswitchSuccess", { source: config.source }));
+
+    if (config.warning) {
+      const warningKey = `settings.providers.ccswitchWarnings.${config.warning}`;
+      const warningText = t(warningKey);
+      ElMessage.warning(warningText === warningKey ? config.warning : warningText);
+    }
+  } catch (error) {
+    ElMessage.error(t("settings.providers.ccswitchFailed", { error: String(error) }));
+  } finally {
+    syncingCcSwitch.value = false;
   }
 }
 </script>
@@ -140,7 +179,20 @@ async function chooseCacheDirectory() {
           <section v-for="provider in providers" :key="provider.id" class="provider-card">
             <div class="provider-card-head">
               <strong>{{ provider.name }}</strong>
-              <el-tag size="small">{{ provider.id }}</el-tag>
+              <div class="provider-card-actions">
+                <el-button
+                  v-if="provider.id === 'openai' && canSyncCcSwitch"
+                  size="small"
+                  type="primary"
+                  plain
+                  :icon="Refresh"
+                  :loading="syncingCcSwitch"
+                  @click="syncOpenAIFromCcSwitch"
+                >
+                  {{ t("settings.providers.ccswitchSync") }}
+                </el-button>
+                <el-tag size="small">{{ provider.id }}</el-tag>
+              </div>
             </div>
 
             <el-form label-position="top">
@@ -334,6 +386,13 @@ h1 {
 
 .provider-card-head {
   min-width: 0;
+}
+
+.provider-card-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
 }
 
 .provider-card-head strong {

@@ -1027,10 +1027,6 @@ defineExpose({
   <main class="chat-workspace">
     <header class="chat-header">
       <div class="chat-header-main">
-        <div class="chat-header-info">
-          <h2 class="chat-group-name">{{ activeGroup?.name }}</h2>
-          <p v-if="activeGroup?.description" class="chat-group-desc">{{ activeGroup?.description }}</p>
-        </div>
         <div class="chat-header-meta">
           <el-tag type="info" size="small">
             {{ t("chat.onlineMembers", { count: activeMemberCount }) }}
@@ -1375,32 +1371,35 @@ defineExpose({
         <el-input
           :model-value="composer"
           type="textarea"
-          :autosize="{ minRows: 3, maxRows: 7 }"
-          resize="none"
+          :rows="4"
+          resize="vertical"
           :placeholder="t('chat.composerPlaceholder')"
           @update:model-value="emit('update:composer', String($event))"
           @keydown.enter.exact.prevent="emit('sendMessage')"
         />
       </div>
 
-      <el-button
-        v-if="sending"
-        type="danger"
-        plain
-        @click="emit('stopGeneration')"
-      >
-        {{ t("chat.stop") }}
-      </el-button>
+      <div class="composer-actions">
+        <el-button
+          v-if="sending"
+          type="danger"
+          plain
+          :icon="CircleClose"
+          @click="emit('stopGeneration')"
+        >
+          {{ t("chat.stop") }}
+        </el-button>
 
-      <el-button
-        type="primary"
-        :loading="sending"
-        :disabled="!canSend"
-        :icon="Promotion"
-        @click="emit('sendMessage')"
-      >
-        {{ t("chat.sendToMembers", { count: activeMemberCount }) }}
-      </el-button>
+        <el-button
+          type="primary"
+          :loading="sending"
+          :disabled="!canSend"
+          :icon="Promotion"
+          @click="emit('sendMessage')"
+        >
+          {{ t("chat.sendToMembers", { count: activeMemberCount }) }}
+        </el-button>
+      </div>
     </footer>
   </main>
 </template>
@@ -2211,8 +2210,7 @@ defineExpose({
 }
 
 .composer {
-  display: flex;
-  align-items: flex-end;
+  display: grid;
   gap: 10px;
   padding: 12px 18px 14px;
   border-top: 1px solid #dfe7e1;
@@ -2224,7 +2222,25 @@ defineExpose({
 .composer-input-wrap {
   position: relative;
   min-width: 0;
-  flex: 1;
+  width: 100%;
+}
+
+.composer-input-wrap :deep(.el-textarea__inner) {
+  min-height: 96px;
+  max-height: 42vh;
+  resize: vertical;
+}
+
+.composer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  min-width: 0;
+}
+
+.composer-actions :deep(.el-button) {
+  margin-left: 0;
 }
 
 .mention-menu {

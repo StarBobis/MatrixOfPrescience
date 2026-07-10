@@ -39,6 +39,13 @@
       "title": "My Profile"
     },
     "providers": {
+      "ccswitchFailed": "Failed to sync CC Switch: {error}",
+      "ccswitchSuccess": "Synced OpenAI settings from {source}",
+      "ccswitchSync": "Sync from CC Switch",
+      "ccswitchWarnings": {
+        "codexOAuth": "The active CC Switch provider is Codex OAuth/ChatGPT. Use CC Switch local proxy or switch the provider to OpenAI Chat format.",
+        "responses": "The active Codex provider is configured for OpenAI Responses. This app sends OpenAI Chat Completions, so use CC Switch local proxy routing or choose OpenAI Chat format."
+      },
       "defaultModel": "Default model",
       "title": "Provider Keys"
     },

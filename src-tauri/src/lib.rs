@@ -1,5 +1,6 @@
 use base64::{engine::general_purpose, Engine as _};
 use futures_util::StreamExt;
+use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
@@ -40,6 +41,7 @@ struct ChatCompletionRequest {
     base_url: String,
     api_key: String,
     model: String,
+    wire_api: Option<String>,
     reasoning_effort: Option<String>,
     temperature: Option<f32>,
     system_prompt: Option<String>,
@@ -118,12 +120,26 @@ struct AvatarCacheResponse {
     path: String,
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct CcSwitchOpenAiConfig {
+    source: String,
+    provider_name: Option<String>,
+    base_url: String,
+    api_key: String,
+    model: Option<String>,
+    wire_api: Option<String>,
+    warning: Option<String>,
+}
+
 const MAX_CODE_TOOL_ROUNDS: usize = 8;
-const MAX_CHAT_COMPLETION_TURNS: usize = MAX_CODE_TOOL_ROUNDS + 2;
+const MAX_CHAT_COMPLETION_TURNS: usize = MAX_CODE_TOOL_ROUNDS + 4;
 const MAX_CHAT_TRACE_STEPS: usize = 160;
 const TRACE_STEP_TEXT_LIMIT: usize = 280;
 const CHAT_COMPLETION_STREAM_EVENT: &str = "chat-completion-stream";
 const FINAL_ANSWER_INSTRUCTION: &str = "The code reading tool budget for this response is exhausted. Use the tool results already provided and write the final answer now. Do not request more tool calls.";
+const VALIDATION_REQUIRED_INSTRUCTION: &str = "You just changed files in the workspace. Before writing the final visible answer, call run_command with the most appropriate build, test, type-check, lint, or compile command for the changed project. Prefer project scripts and manifests already present in the workspace, such as npm run build, cargo test, cargo check, pytest, go test, dotnet test, or equivalent. Do not provide a final answer until validation output is available; if validation fails, explain the failure and what remains.";
+const VALIDATION_UNAVAILABLE_INSTRUCTION: &str = "No default validation command could be detected automatically for this workspace. Write the final answer now and explicitly say that code was changed but automatic validation could not be run because no known project validator was found.";
 const CACHE_LOCATION_FILE: &str = "cache-location.json";
 const SETTINGS_FILE: &str = "settings.json";
 const MEMBER_LIBRARY_FILE: &str = "member-library.json";
@@ -158,6 +174,369 @@ fn write_json_file(path: &Path, value: &Value) -> Result<(), String> {
         .map_err(|error| format!("Failed to serialize {:?}: {}", path, error))?;
 
     fs::write(path, content).map_err(|error| format!("Failed to write {:?}: {}", path, error))
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+fn json_string(value: Option<&Value>, key: &str) -> Option<String> {
+    value
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_str)
+        .and_then(non_empty_string)
+}
+
+fn toml_string(value: Option<&toml::Value>, key: &str) -> Option<String> {
+    value
+        .and_then(|value| value.get(key))
+        .and_then(toml::Value::as_str)
+        .and_then(non_empty_string)
+}
+
+fn user_home_dir() -> Option<PathBuf> {
+    std::env::var("USERPROFILE")
+        .ok()
+        .and_then(|value| non_empty_string(&value))
+        .map(PathBuf::from)
+        .or_else(|| {
+            let drive = std::env::var("HOMEDRIVE").ok()?;
+            let path = std::env::var("HOMEPATH").ok()?;
+            non_empty_string(&format!("{}{}", drive, path)).map(PathBuf::from)
+        })
+        .or_else(|| {
+            std::env::var("HOME")
+                .ok()
+                .and_then(|value| non_empty_string(&value))
+                .map(PathBuf::from)
+        })
+}
+
+fn codex_config_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+
+    if let Ok(codex_home) = std::env::var("CODEX_HOME") {
+        if let Some(path) = non_empty_string(&codex_home).map(PathBuf::from) {
+            dirs.push(path);
+        }
+    }
+
+    if let Some(home) = user_home_dir() {
+        let default_dir = home.join(".codex");
+        if !dirs.iter().any(|path| path == &default_dir) {
+            dirs.push(default_dir);
+        }
+    }
+
+    dirs
+}
+
+fn ccswitch_config_dir() -> Result<PathBuf, String> {
+    let Some(home) = user_home_dir() else {
+        return Err("Unable to resolve user home directory.".to_string());
+    };
+
+    let default_dir = home.join(".cc-switch");
+
+    #[cfg(windows)]
+    {
+        let default_db = default_dir.join("cc-switch.db");
+        if !default_db.exists() {
+            if let Ok(home_env) = std::env::var("HOME") {
+                if let Some(legacy_home) = non_empty_string(&home_env).map(PathBuf::from) {
+                    let legacy_dir = legacy_home.join(".cc-switch");
+                    if legacy_dir.join("cc-switch.db").exists() {
+                        return Ok(legacy_dir);
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(default_dir)
+}
+
+fn active_codex_provider<'a>(doc: &'a toml::Value) -> (Option<String>, Option<&'a toml::Value>) {
+    let active_provider = doc
+        .get("model_provider")
+        .and_then(toml::Value::as_str)
+        .and_then(non_empty_string);
+    let active_provider_config = active_provider.as_deref().and_then(|provider| {
+        doc.get("model_providers")
+            .and_then(|providers| providers.get(provider))
+    });
+
+    (active_provider, active_provider_config)
+}
+
+fn codex_toml_field(doc: Option<&toml::Value>, key: &str) -> Option<String> {
+    let Some(doc) = doc else {
+        return None;
+    };
+    let (_, active_provider_config) = active_codex_provider(doc);
+
+    toml_string(active_provider_config, key).or_else(|| toml_string(Some(doc), key))
+}
+
+fn codex_auth_api_key(auth: Option<&Value>) -> Option<String> {
+    json_string(auth, "OPENAI_API_KEY")
+}
+
+fn is_local_ccswitch_proxy_url(base_url: &str) -> bool {
+    let lower = base_url.trim().trim_end_matches('/').to_ascii_lowercase();
+    let is_local = lower.starts_with("http://127.0.0.1:")
+        || lower.starts_with("http://localhost:")
+        || lower.starts_with("http://[::1]:");
+
+    is_local
+        && (lower.contains("/codex")
+            || lower.starts_with("http://127.0.0.1:15721")
+            || lower.starts_with("http://localhost:15721"))
+}
+
+fn normalize_imported_base_url(base_url: &str) -> String {
+    let trimmed = base_url.trim().trim_end_matches('/').to_string();
+    let lower = trimmed.to_ascii_lowercase();
+
+    if is_local_ccswitch_proxy_url(&trimmed) && lower.ends_with("/codex") {
+        return format!("{}/v1", trimmed);
+    }
+
+    trimmed
+}
+
+fn imported_config_warning(
+    base_url: &str,
+    wire_api: Option<&str>,
+    provider_type: Option<&str>,
+) -> Option<String> {
+    if is_local_ccswitch_proxy_url(base_url) {
+        return None;
+    }
+
+    if provider_type == Some("codex_oauth") {
+        return Some("codexOAuth".to_string());
+    }
+
+    let wire_api = wire_api.map(|value| value.to_ascii_lowercase());
+    if matches!(wire_api.as_deref(), Some("responses" | "openai_responses")) {
+        return Some("responses".to_string());
+    }
+
+    None
+}
+
+fn build_ccswitch_openai_config(
+    source: String,
+    provider_name: Option<String>,
+    config_text: &str,
+    auth: Option<&Value>,
+    settings: Option<&Value>,
+    meta: Option<&Value>,
+) -> Result<CcSwitchOpenAiConfig, String> {
+    let doc = config_text.parse::<toml::Value>().ok();
+    let active_provider_name = doc.as_ref().and_then(|doc| {
+        let (active_provider, active_provider_config) = active_codex_provider(doc);
+        toml_string(active_provider_config, "name").or(active_provider)
+    });
+    let provider_name = provider_name.or(active_provider_name);
+    let base_url = codex_toml_field(doc.as_ref(), "base_url")
+        .or_else(|| json_string(settings, "baseUrl"))
+        .or_else(|| json_string(settings, "base_url"))
+        .ok_or_else(|| "Codex config does not contain a base_url.".to_string())?;
+    let base_url = normalize_imported_base_url(&base_url);
+    let wire_api = codex_toml_field(doc.as_ref(), "wire_api")
+        .or_else(|| json_string(meta, "apiFormat"))
+        .or_else(|| json_string(meta, "api_format"));
+    let provider_type =
+        json_string(meta, "providerType").or_else(|| json_string(meta, "provider_type"));
+    let mut api_key = codex_toml_field(doc.as_ref(), "experimental_bearer_token")
+        .or_else(|| codex_auth_api_key(auth))
+        .or_else(|| json_string(settings, "apiKey"))
+        .or_else(|| json_string(settings, "api_key"));
+
+    if api_key.is_none() && is_local_ccswitch_proxy_url(&base_url) {
+        api_key = Some("cc-switch-local-proxy".to_string());
+    }
+
+    let api_key =
+        api_key.ok_or_else(|| "Codex config does not contain an OpenAI API key.".to_string())?;
+    let model = codex_toml_field(doc.as_ref(), "model").or_else(|| json_string(settings, "model"));
+    let warning = imported_config_warning(&base_url, wire_api.as_deref(), provider_type.as_deref());
+
+    Ok(CcSwitchOpenAiConfig {
+        source,
+        provider_name,
+        base_url,
+        api_key,
+        model,
+        wire_api,
+        warning,
+    })
+}
+
+fn load_ccswitch_openai_config_from_codex_live() -> Result<CcSwitchOpenAiConfig, String> {
+    let mut failures = Vec::new();
+
+    for config_dir in codex_config_dirs() {
+        let config_path = config_dir.join("config.toml");
+        let auth_path = config_dir.join("auth.json");
+
+        if !config_path.exists() && !auth_path.exists() {
+            continue;
+        }
+
+        let config_text = if config_path.exists() {
+            fs::read_to_string(&config_path)
+                .map_err(|error| format!("Failed to read {:?}: {}", config_path, error))?
+        } else {
+            String::new()
+        };
+        let auth = read_json_file(&auth_path).ok().flatten();
+
+        match build_ccswitch_openai_config(
+            "Codex live config".to_string(),
+            None,
+            &config_text,
+            auth.as_ref(),
+            None,
+            None,
+        ) {
+            Ok(config) => return Ok(config),
+            Err(error) => failures.push(format!("{}: {}", config_path.display(), error)),
+        }
+    }
+
+    if failures.is_empty() {
+        Err("No Codex live config was found under CODEX_HOME or ~/.codex.".to_string())
+    } else {
+        Err(failures.join("; "))
+    }
+}
+
+fn load_ccswitch_openai_config_from_database() -> Result<CcSwitchOpenAiConfig, String> {
+    let db_path = ccswitch_config_dir()?.join("cc-switch.db");
+    if !db_path.exists() {
+        return Err(format!(
+            "CC Switch database was not found at {:?}.",
+            db_path
+        ));
+    }
+
+    let conn = Connection::open_with_flags(
+        &db_path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| format!("Failed to open CC Switch database {:?}: {}", db_path, error))?;
+
+    let (provider_name, settings_config, meta): (String, String, String) = conn
+        .query_row(
+            "SELECT name, settings_config, meta FROM providers WHERE app_type = 'codex' AND is_current = 1 LIMIT 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|error| format!("Failed to read current Codex provider from CC Switch database: {}", error))?;
+
+    let settings: Value = serde_json::from_str(&settings_config)
+        .map_err(|error| format!("Failed to parse CC Switch provider settings: {}", error))?;
+    let meta: Value = serde_json::from_str(&meta).unwrap_or_else(|_| json!({}));
+    let config_text = settings
+        .get("config")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    build_ccswitch_openai_config(
+        "CC Switch database".to_string(),
+        Some(provider_name),
+        config_text,
+        settings.get("auth"),
+        Some(&settings),
+        Some(&meta),
+    )
+}
+
+#[tauri::command]
+fn load_ccswitch_openai_config() -> Result<CcSwitchOpenAiConfig, String> {
+    let mut failures = Vec::new();
+
+    match load_ccswitch_openai_config_from_codex_live() {
+        Ok(config) => return Ok(config),
+        Err(error) => failures.push(error),
+    }
+
+    match load_ccswitch_openai_config_from_database() {
+        Ok(config) => return Ok(config),
+        Err(error) => failures.push(error),
+    }
+
+    Err(format!(
+        "No compatible OpenAI Chat configuration was found in local CC Switch/Codex config. {}",
+        failures.join("; ")
+    ))
+}
+
+fn chat_completions_endpoint(base_url: &str) -> String {
+    let normalized = normalize_imported_base_url(base_url);
+    let lower = normalized.to_ascii_lowercase();
+
+    if lower.ends_with("/chat/completions") {
+        return normalized;
+    }
+
+    format!("{}/chat/completions", normalized.trim_end_matches('/'))
+}
+
+fn responses_endpoint(base_url: &str) -> String {
+    let normalized = normalize_imported_base_url(base_url);
+    let trimmed = normalized.trim_end_matches('/');
+    let lower = trimmed.to_ascii_lowercase();
+
+    if lower.ends_with("/responses") {
+        return trimmed.to_string();
+    }
+
+    if lower.ends_with("/chat/completions") {
+        let base = &trimmed[..trimmed.len() - "/chat/completions".len()];
+        return format!("{}/responses", base.trim_end_matches('/'));
+    }
+
+    format!("{}/responses", trimmed)
+}
+
+fn is_openai_reasoning_model(model: &str) -> bool {
+    let model = model.trim().to_ascii_lowercase();
+    model.starts_with("gpt-5")
+        || model.starts_with("o1")
+        || model.starts_with("o3")
+        || model.starts_with("o4")
+}
+
+fn should_use_responses_api(request: &ChatCompletionRequest, is_deepseek: bool) -> bool {
+    if is_deepseek
+        || !reasoning_enabled(request.reasoning_effort.as_deref())
+        || !is_openai_reasoning_model(&request.model)
+    {
+        return false;
+    }
+
+    let wire_api = request
+        .wire_api
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+
+    if wire_api.contains("chat") {
+        return false;
+    }
+
+    wire_api.contains("responses")
+        || is_local_ccswitch_proxy_url(&request.base_url)
+        || request
+            .base_url
+            .to_ascii_lowercase()
+            .contains("api.openai.com")
 }
 
 fn read_cache_directory(app: &AppHandle) -> Result<PathBuf, String> {
@@ -391,16 +770,24 @@ async fn chat_completion(
         }));
     }
 
-    let endpoint = format!(
-        "{}/chat/completions",
-        request.base_url.trim().trim_end_matches('/')
-    );
-    let client = reqwest::Client::new();
     let is_deepseek = is_deepseek_provider(&request.provider_name, &request.base_url);
+
+    if should_use_responses_api(&request, is_deepseek) {
+        return openai_responses_completion(app, request, code_workspace).await;
+    }
+
+    let endpoint = chat_completions_endpoint(&request.base_url);
+    let client = reqwest::Client::new();
+    let deepseek_thinking =
+        deepseek_thinking_enabled(is_deepseek, request.reasoning_effort.as_deref());
     let can_write = request.can_write.unwrap_or(false);
     let mut code_tool_called = false;
     let mut code_tool_rounds = 0usize;
     let mut final_answer_requested = false;
+    let mut validation_required = false;
+    let mut validation_attempted = false;
+    let mut validation_model_prompted = false;
+    let mut auto_validation_attempted = false;
     let mut last_finish_reason: Option<String> = None;
     let mut last_usage: Option<ChatCompletionUsage> = None;
     let mut trace_steps: Vec<ChatTraceStep> = Vec::new();
@@ -412,13 +799,23 @@ async fn chat_completion(
         .map(str::to_string);
 
     for _ in 0..MAX_CHAT_COMPLETION_TURNS {
-        let payload_messages = chat_payload_messages(&messages, final_answer_requested);
+        let validation_tool_required = validation_required && !validation_attempted;
+        if validation_tool_required {
+            validation_model_prompted = true;
+        }
+        let payload_messages = chat_payload_messages(
+            &messages,
+            final_answer_requested && !validation_tool_required,
+            validation_tool_required,
+        );
         let mut payload = json!({
             "model": request.model,
             "messages": payload_messages,
             "temperature": request.temperature.unwrap_or(0.7),
         });
-        let strict_tool_schema = is_deepseek && code_workspace.is_some() && !final_answer_requested;
+        let tools_allowed =
+            code_workspace.is_some() && (!final_answer_requested || validation_tool_required);
+        let strict_tool_schema = is_deepseek && tools_allowed;
 
         apply_reasoning_payload(
             &mut payload,
@@ -426,13 +823,16 @@ async fn chat_completion(
             request.reasoning_effort.as_deref(),
         );
 
-        if code_workspace.is_some() && !final_answer_requested {
+        if tools_allowed {
             payload["tools"] = code_tools_schema(is_deepseek, can_write);
-            payload["tool_choice"] = if is_deepseek && !code_tool_called {
-                json!("required")
-            } else {
-                json!("auto")
-            };
+            if let Some(tool_choice) = chat_tool_choice(
+                is_deepseek,
+                deepseek_thinking,
+                validation_tool_required,
+                code_tool_called,
+            ) {
+                payload["tool_choice"] = tool_choice;
+            }
         }
 
         let parsed = match send_chat_completion_request_maybe_stream(
@@ -449,7 +849,18 @@ async fn chat_completion(
             Ok(parsed) => parsed,
             Err(error) if strict_tool_schema => {
                 payload["tools"] = code_tools_schema(false, can_write);
-                payload["tool_choice"] = json!("auto");
+                if let Some(tool_choice) = chat_tool_choice(
+                    is_deepseek,
+                    deepseek_thinking,
+                    validation_tool_required,
+                    true,
+                ) {
+                    payload["tool_choice"] = tool_choice;
+                } else {
+                    if let Some(object) = payload.as_object_mut() {
+                        object.remove("tool_choice");
+                    }
+                }
                 send_chat_completion_request_maybe_stream(
                     &app,
                     stream_id.as_deref(),
@@ -501,6 +912,17 @@ async fn chat_completion(
                         can_write,
                         Some(&mut stream_tool_output),
                     );
+                    if validation_required && is_validation_tool_call(tool_call) {
+                        validation_attempted = true;
+                    }
+                    if tool_result_succeeded(&tool_result)
+                        && is_successful_edit_tool_call(tool_call)
+                    {
+                        validation_required = true;
+                        validation_attempted = false;
+                        validation_model_prompted = false;
+                        auto_validation_attempted = false;
+                    }
                     let result_step = tool_result_trace_step(tool_call, &tool_result);
                     emit_trace_step(&app, stream_id.as_deref(), &result_step);
                     append_trace_steps(&mut trace_steps, vec![result_step]);
@@ -508,8 +930,40 @@ async fn chat_completion(
                 }
                 code_tool_called = true;
                 code_tool_rounds += 1;
-                if code_tool_rounds >= MAX_CODE_TOOL_ROUNDS {
+                if code_tool_rounds >= MAX_CODE_TOOL_ROUNDS
+                    && !(validation_required && !validation_attempted)
+                {
                     final_answer_requested = true;
+                }
+
+                if validation_required
+                    && !validation_attempted
+                    && validation_model_prompted
+                    && !auto_validation_attempted
+                {
+                    auto_validation_attempted = true;
+                    let validation_ran = code_workspace
+                        .as_ref()
+                        .map(|workspace| {
+                            run_default_validation_commands(
+                                &app,
+                                stream_id.as_deref(),
+                                workspace,
+                                can_write,
+                                &mut messages,
+                                &mut trace_steps,
+                            )
+                        })
+                        .unwrap_or(false);
+
+                    if validation_ran {
+                        validation_attempted = true;
+                        final_answer_requested = true;
+                    } else {
+                        mark_validation_unavailable(&mut messages);
+                        validation_attempted = true;
+                        final_answer_requested = true;
+                    }
                 }
                 continue;
             }
@@ -518,6 +972,36 @@ async fn chat_completion(
         let content = message_content_text(&message);
 
         if !content.is_empty() {
+            if validation_required && !validation_attempted {
+                if !auto_validation_attempted {
+                    auto_validation_attempted = true;
+                    let validation_ran = code_workspace
+                        .as_ref()
+                        .map(|workspace| {
+                            run_default_validation_commands(
+                                &app,
+                                stream_id.as_deref(),
+                                workspace,
+                                can_write,
+                                &mut messages,
+                                &mut trace_steps,
+                            )
+                        })
+                        .unwrap_or(false);
+
+                    if validation_ran {
+                        validation_attempted = true;
+                        final_answer_requested = true;
+                        continue;
+                    }
+                }
+
+                mark_validation_unavailable(&mut messages);
+                validation_attempted = true;
+                final_answer_requested = true;
+                continue;
+            }
+
             return Ok(ChatCompletionResponse {
                 content,
                 trace_steps,
@@ -540,14 +1024,261 @@ async fn chat_completion(
     ))
 }
 
+async fn openai_responses_completion(
+    app: AppHandle,
+    request: ChatCompletionRequest,
+    code_workspace: Option<PathBuf>,
+) -> Result<ChatCompletionResponse, String> {
+    let endpoint = responses_endpoint(&request.base_url);
+    let client = reqwest::Client::new();
+    let can_write = request.can_write.unwrap_or(false);
+    let mut code_tool_called = false;
+    let mut code_tool_rounds = 0usize;
+    let mut final_answer_requested = false;
+    let mut validation_required = false;
+    let mut validation_attempted = false;
+    let mut validation_model_prompted = false;
+    let mut auto_validation_attempted = false;
+    let mut previous_response_id: Option<String> = None;
+    let mut pending_input: Vec<Value> = Vec::new();
+    let mut last_usage: Option<ChatCompletionUsage> = None;
+    let mut trace_steps: Vec<ChatTraceStep> = Vec::new();
+    let stream_id = request
+        .stream_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+
+    for _ in 0..MAX_CHAT_COMPLETION_TURNS {
+        let validation_tool_required = validation_required && !validation_attempted;
+        if validation_tool_required {
+            validation_model_prompted = true;
+        }
+
+        let mut input = if previous_response_id.is_some() {
+            std::mem::take(&mut pending_input)
+        } else {
+            responses_payload_messages(
+                &request.messages,
+                final_answer_requested && !validation_tool_required,
+                validation_tool_required,
+            )
+        };
+
+        if previous_response_id.is_some() {
+            if validation_tool_required {
+                input.push(responses_user_message(VALIDATION_REQUIRED_INSTRUCTION));
+            } else if final_answer_requested {
+                input.push(responses_user_message(FINAL_ANSWER_INSTRUCTION));
+            }
+        }
+
+        let tools_allowed =
+            code_workspace.is_some() && (!final_answer_requested || validation_tool_required);
+        let mut payload = json!({
+            "model": request.model,
+            "input": input,
+        });
+
+        if let Some(system_prompt) = request.system_prompt.as_deref() {
+            let trimmed = system_prompt.trim();
+            if !trimmed.is_empty() {
+                payload["instructions"] = json!(trimmed);
+            }
+        }
+
+        if let Some(previous_response_id) = previous_response_id.as_deref() {
+            payload["previous_response_id"] = json!(previous_response_id);
+        }
+
+        if let Some(reasoning) = responses_reasoning_payload(request.reasoning_effort.as_deref()) {
+            payload["reasoning"] = reasoning;
+        }
+
+        if tools_allowed {
+            payload["tools"] = responses_tools_schema(can_write);
+        }
+
+        let parsed = send_responses_request_maybe_stream(
+            &app,
+            stream_id.as_deref(),
+            &client,
+            &endpoint,
+            &request.api_key,
+            &request.provider_name,
+            &payload,
+        )
+        .await?;
+
+        if let Some(response_id) = responses_id(&parsed) {
+            previous_response_id = Some(response_id);
+        }
+
+        if let Some(usage) = usage_from_response(&parsed) {
+            last_usage = Some(usage);
+        }
+
+        append_trace_steps(&mut trace_steps, responses_reasoning_trace_steps(&parsed));
+        let tool_calls = responses_function_calls(&parsed);
+
+        if let Some(workspace) = code_workspace.as_ref() {
+            if !tool_calls.is_empty() {
+                for response_tool_call in &tool_calls {
+                    let tool_call = response_function_call_to_chat_tool_call(response_tool_call);
+                    let call_step = tool_call_trace_step(&tool_call);
+                    emit_trace_step(&app, stream_id.as_deref(), &call_step);
+                    append_trace_steps(&mut trace_steps, vec![call_step]);
+
+                    let mut stream_tool_output = |step: ChatTraceStep| {
+                        emit_tool_chunk(&app, stream_id.as_deref(), &step);
+                    };
+                    let tool_result = execute_code_tool_call(
+                        workspace,
+                        &tool_call,
+                        can_write,
+                        Some(&mut stream_tool_output),
+                    );
+
+                    if validation_required && is_validation_tool_call(&tool_call) {
+                        validation_attempted = true;
+                    }
+                    if tool_result_succeeded(&tool_result)
+                        && is_successful_edit_tool_call(&tool_call)
+                    {
+                        validation_required = true;
+                        validation_attempted = false;
+                        validation_model_prompted = false;
+                        auto_validation_attempted = false;
+                    }
+
+                    let result_step = tool_result_trace_step(&tool_call, &tool_result);
+                    emit_trace_step(&app, stream_id.as_deref(), &result_step);
+                    append_trace_steps(&mut trace_steps, vec![result_step]);
+                    pending_input.push(response_tool_output(&tool_call, &tool_result));
+                }
+
+                code_tool_called = true;
+                code_tool_rounds += 1;
+                if code_tool_rounds >= MAX_CODE_TOOL_ROUNDS
+                    && !(validation_required && !validation_attempted)
+                {
+                    final_answer_requested = true;
+                }
+
+                if validation_required
+                    && !validation_attempted
+                    && validation_model_prompted
+                    && !auto_validation_attempted
+                {
+                    auto_validation_attempted = true;
+                    let validation_outputs = run_default_validation_commands_for_responses(
+                        &app,
+                        stream_id.as_deref(),
+                        workspace,
+                        can_write,
+                        &mut trace_steps,
+                    );
+
+                    if validation_outputs.is_empty() {
+                        pending_input
+                            .push(responses_user_message(VALIDATION_UNAVAILABLE_INSTRUCTION));
+                    } else {
+                        pending_input.extend(validation_outputs);
+                    }
+                    validation_attempted = true;
+                    final_answer_requested = true;
+                }
+
+                continue;
+            }
+        }
+
+        let content = responses_output_text(&parsed);
+
+        if !content.is_empty() {
+            if validation_required && !validation_attempted {
+                if let Some(workspace) = code_workspace.as_ref() {
+                    if !auto_validation_attempted {
+                        auto_validation_attempted = true;
+                        let validation_outputs = run_default_validation_commands_for_responses(
+                            &app,
+                            stream_id.as_deref(),
+                            workspace,
+                            can_write,
+                            &mut trace_steps,
+                        );
+
+                        if !validation_outputs.is_empty() {
+                            pending_input.extend(validation_outputs);
+                            validation_attempted = true;
+                            final_answer_requested = true;
+                            continue;
+                        }
+                    }
+                }
+
+                pending_input.push(responses_user_message(VALIDATION_UNAVAILABLE_INSTRUCTION));
+                validation_attempted = true;
+                final_answer_requested = true;
+                continue;
+            }
+
+            return Ok(ChatCompletionResponse {
+                content,
+                trace_steps,
+                usage: last_usage,
+            });
+        }
+
+        if code_tool_called && !final_answer_requested {
+            final_answer_requested = true;
+            continue;
+        }
+    }
+
+    Err(format!(
+        "{} returned no displayable content from Responses API.",
+        request.provider_name
+    ))
+}
+
 fn is_deepseek_provider(provider_name: &str, base_url: &str) -> bool {
     provider_name.to_ascii_lowercase().contains("deepseek")
         || base_url.to_ascii_lowercase().contains("deepseek")
 }
 
+fn reasoning_enabled(reasoning_effort: Option<&str>) -> bool {
+    let trimmed = reasoning_effort.unwrap_or("").trim();
+    !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("off")
+}
+
+fn deepseek_thinking_enabled(is_deepseek: bool, reasoning_effort: Option<&str>) -> bool {
+    is_deepseek && reasoning_enabled(reasoning_effort)
+}
+
+fn chat_tool_choice(
+    is_deepseek: bool,
+    deepseek_thinking: bool,
+    validation_tool_required: bool,
+    code_tool_called: bool,
+) -> Option<Value> {
+    if deepseek_thinking {
+        return None;
+    }
+
+    Some(if validation_tool_required {
+        json!("required")
+    } else if is_deepseek && !code_tool_called {
+        json!("required")
+    } else {
+        json!("auto")
+    })
+}
+
 fn apply_reasoning_payload(payload: &mut Value, is_deepseek: bool, reasoning_effort: Option<&str>) {
     let trimmed = reasoning_effort.unwrap_or("").trim();
-    let reasoning_enabled = !trimmed.is_empty() && trimmed != "off";
+    let reasoning_enabled = reasoning_enabled(reasoning_effort);
 
     if is_deepseek {
         payload["thinking"] = if reasoning_enabled {
@@ -562,10 +1293,19 @@ fn apply_reasoning_payload(payload: &mut Value, is_deepseek: bool, reasoning_eff
     }
 }
 
-fn chat_payload_messages(messages: &[Value], final_answer_requested: bool) -> Vec<Value> {
+fn chat_payload_messages(
+    messages: &[Value],
+    final_answer_requested: bool,
+    validation_required: bool,
+) -> Vec<Value> {
     let mut payload_messages = messages.to_vec();
 
-    if final_answer_requested {
+    if validation_required {
+        payload_messages.push(json!({
+            "role": "user",
+            "content": VALIDATION_REQUIRED_INSTRUCTION,
+        }));
+    } else if final_answer_requested {
         payload_messages.push(json!({
             "role": "user",
             "content": FINAL_ANSWER_INSTRUCTION,
@@ -573,6 +1313,501 @@ fn chat_payload_messages(messages: &[Value], final_answer_requested: bool) -> Ve
     }
 
     payload_messages
+}
+
+fn responses_user_message(content: &str) -> Value {
+    json!({
+        "role": "user",
+        "content": content,
+    })
+}
+
+fn responses_payload_messages(
+    messages: &[ChatMessage],
+    final_answer_requested: bool,
+    validation_required: bool,
+) -> Vec<Value> {
+    let mut payload_messages = messages
+        .iter()
+        .map(|message| {
+            json!({
+                "role": message.role,
+                "content": message.content,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    if validation_required {
+        payload_messages.push(responses_user_message(VALIDATION_REQUIRED_INSTRUCTION));
+    } else if final_answer_requested {
+        payload_messages.push(responses_user_message(FINAL_ANSWER_INSTRUCTION));
+    }
+
+    payload_messages
+}
+
+fn responses_reasoning_payload(reasoning_effort: Option<&str>) -> Option<Value> {
+    if !reasoning_enabled(reasoning_effort) {
+        return None;
+    }
+
+    Some(json!({
+        "effort": reasoning_effort.unwrap_or("").trim(),
+        "summary": "auto",
+    }))
+}
+
+fn responses_tools_schema(allow_writes: bool) -> Value {
+    let tools = code_tools_schema(true, allow_writes)
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|tool| {
+            let function = tool.get("function")?.clone();
+            let mut response_tool = function;
+            response_tool["type"] = json!("function");
+            Some(response_tool)
+        })
+        .collect::<Vec<_>>();
+
+    Value::Array(tools)
+}
+
+fn responses_id(response: &Value) -> Option<String> {
+    response
+        .get("id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn responses_output_text(response: &Value) -> String {
+    if let Some(text) = response.get("output_text").and_then(Value::as_str) {
+        if !text.trim().is_empty() {
+            return text.trim().to_string();
+        }
+    }
+
+    response
+        .get("output")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("message"))
+        .flat_map(|item| {
+            item.get("content")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|part| {
+            part.get("text")
+                .or_else(|| part.get("content"))
+                .and_then(Value::as_str)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+fn responses_reasoning_trace_steps(response: &Value) -> Vec<ChatTraceStep> {
+    response
+        .get("output")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("reasoning"))
+        .flat_map(|item| {
+            item.get("summary")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+        })
+        .filter_map(|summary| {
+            summary
+                .get("text")
+                .or_else(|| summary.get("content"))
+                .and_then(Value::as_str)
+        })
+        .flat_map(split_trace_text)
+        .map(|line| trace_step("reasoning", line))
+        .collect()
+}
+
+fn responses_function_calls(response: &Value) -> Vec<Value> {
+    response
+        .get("output")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("function_call"))
+        .cloned()
+        .collect()
+}
+
+fn response_function_call_to_chat_tool_call(function_call: &Value) -> Value {
+    let call_id = function_call
+        .get("call_id")
+        .or_else(|| function_call.get("id"))
+        .and_then(Value::as_str)
+        .unwrap_or("responses-tool-call");
+    let name = function_call
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let arguments = function_call
+        .get("arguments")
+        .and_then(Value::as_str)
+        .unwrap_or("{}");
+
+    json!({
+        "id": call_id,
+        "type": "function",
+        "function": {
+            "name": name,
+            "arguments": arguments,
+        }
+    })
+}
+
+fn chat_tool_call_to_response_function_call(tool_call: &Value) -> Value {
+    let call_id = tool_call
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("responses-tool-call");
+    let function = tool_call.get("function").unwrap_or(&Value::Null);
+    let name = function.get("name").and_then(Value::as_str).unwrap_or("");
+    let arguments = function
+        .get("arguments")
+        .and_then(Value::as_str)
+        .unwrap_or("{}");
+
+    json!({
+        "type": "function_call",
+        "call_id": call_id,
+        "name": name,
+        "arguments": arguments,
+    })
+}
+
+fn response_tool_output(tool_call: &Value, tool_result: &Value) -> Value {
+    let call_id = tool_call
+        .get("id")
+        .and_then(Value::as_str)
+        .unwrap_or("responses-tool-call");
+
+    json!({
+        "type": "function_call_output",
+        "call_id": call_id,
+        "output": message_content_text(tool_result),
+    })
+}
+
+fn run_default_validation_commands_for_responses(
+    app: &AppHandle,
+    stream_id: Option<&str>,
+    workspace: &Path,
+    can_write: bool,
+    trace_steps: &mut Vec<ChatTraceStep>,
+) -> Vec<Value> {
+    default_validation_commands(workspace)
+        .iter()
+        .enumerate()
+        .map(|(index, command)| validation_tool_call(index, command))
+        .flat_map(|tool_call| {
+            let call_step = tool_call_trace_step(&tool_call);
+            emit_trace_step(app, stream_id, &call_step);
+            append_trace_steps(trace_steps, vec![call_step]);
+
+            let mut stream_tool_output = |step: ChatTraceStep| {
+                emit_tool_chunk(app, stream_id, &step);
+            };
+            let tool_result = execute_code_tool_call(
+                workspace,
+                &tool_call,
+                can_write,
+                Some(&mut stream_tool_output),
+            );
+            let result_step = tool_result_trace_step(&tool_call, &tool_result);
+            emit_trace_step(app, stream_id, &result_step);
+            append_trace_steps(trace_steps, vec![result_step]);
+
+            vec![
+                chat_tool_call_to_response_function_call(&tool_call),
+                response_tool_output(&tool_call, &tool_result),
+            ]
+        })
+        .collect()
+}
+
+fn tool_call_name(tool_call: &Value) -> &str {
+    tool_call
+        .get("function")
+        .and_then(|function| function.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+}
+
+fn tool_call_arguments(tool_call: &Value) -> Value {
+    let arguments = tool_call
+        .get("function")
+        .and_then(|function| function.get("arguments"))
+        .cloned()
+        .unwrap_or_else(|| json!("{}"));
+
+    if let Some(text) = arguments.as_str() {
+        serde_json::from_str::<Value>(text).unwrap_or_else(|_| json!({}))
+    } else {
+        arguments
+    }
+}
+
+fn tool_result_succeeded(tool_result: &Value) -> bool {
+    let content = message_content_text(tool_result);
+    !(content.starts_with("Tool ") && content.contains(" failed:"))
+}
+
+fn is_successful_edit_tool_call(tool_call: &Value) -> bool {
+    match tool_call_name(tool_call) {
+        "write_file" | "create_directory" | "delete_path" | "move_path" => true,
+        "apply_patch" => !tool_call_arguments(tool_call)
+            .get("checkOnly")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        "run_command" => run_command_looks_mutating(&tool_call_arguments(tool_call)),
+        _ => false,
+    }
+}
+
+fn run_command_looks_mutating(arguments: &Value) -> bool {
+    let text = run_command_text(arguments);
+
+    [
+        "apply",
+        "install",
+        "set-content",
+        "out-file",
+        "new-item",
+        "remove-item",
+        "move-item",
+        "copy-item",
+        "mkdir",
+        "rmdir",
+        "rm ",
+        "del ",
+        "move ",
+        "copy ",
+        ">",
+        ">>",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+fn is_validation_tool_call(tool_call: &Value) -> bool {
+    tool_call_name(tool_call) == "run_command"
+        && run_command_looks_like_validation(&tool_call_arguments(tool_call))
+}
+
+fn run_command_text(arguments: &Value) -> String {
+    let command = arguments
+        .get("command")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let args = arguments
+        .get("args")
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .unwrap_or_default();
+
+    format!("{} {}", command, args).to_ascii_lowercase()
+}
+
+fn run_command_looks_like_validation(arguments: &Value) -> bool {
+    let text = run_command_text(arguments);
+
+    [
+        " build",
+        " test",
+        " check",
+        " lint",
+        " typecheck",
+        " type-check",
+        " tsc",
+        "vue-tsc",
+        "pytest",
+        "cargo test",
+        "cargo check",
+        "cargo build",
+        "go test",
+        "dotnet test",
+        "mvn test",
+        "gradle test",
+        "ctest",
+        "msbuild",
+        "make",
+        "ninja",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+#[derive(Debug, Clone)]
+struct ValidationCommand {
+    command: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+}
+
+fn package_script_exists(workspace: &Path, script: &str) -> bool {
+    let Ok(content) = fs::read_to_string(workspace.join("package.json")) else {
+        return false;
+    };
+    let Ok(parsed) = serde_json::from_str::<Value>(&content) else {
+        return false;
+    };
+
+    parsed
+        .get("scripts")
+        .and_then(Value::as_object)
+        .and_then(|scripts| scripts.get(script))
+        .and_then(Value::as_str)
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+}
+
+fn default_validation_commands(workspace: &Path) -> Vec<ValidationCommand> {
+    let mut commands = Vec::new();
+
+    for script in ["build", "test", "typecheck", "lint"] {
+        if package_script_exists(workspace, script) {
+            commands.push(ValidationCommand {
+                command: "npm".to_string(),
+                args: if script == "test" {
+                    vec!["test".to_string()]
+                } else {
+                    vec!["run".to_string(), script.to_string()]
+                },
+                cwd: None,
+            });
+            break;
+        }
+    }
+
+    if workspace.join("Cargo.toml").is_file() {
+        commands.push(ValidationCommand {
+            command: "cargo".to_string(),
+            args: vec!["test".to_string()],
+            cwd: None,
+        });
+    } else if workspace.join("src-tauri").join("Cargo.toml").is_file() {
+        commands.push(ValidationCommand {
+            command: "cargo".to_string(),
+            args: vec!["test".to_string()],
+            cwd: Some("src-tauri".to_string()),
+        });
+    }
+
+    if workspace.join("pyproject.toml").is_file() || workspace.join("pytest.ini").is_file() {
+        commands.push(ValidationCommand {
+            command: "python".to_string(),
+            args: vec!["-m".to_string(), "pytest".to_string()],
+            cwd: None,
+        });
+    }
+
+    commands
+}
+
+fn validation_tool_call(index: usize, command: &ValidationCommand) -> Value {
+    let mut arguments = json!({
+        "command": command.command,
+        "args": command.args,
+        "timeoutMs": 120000,
+    });
+
+    if let Some(cwd) = command.cwd.as_deref() {
+        arguments["cwd"] = json!(cwd);
+    }
+
+    json!({
+        "id": format!("auto-validation-{}", index),
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "arguments": serde_json::to_string(&arguments).unwrap_or_else(|_| "{}".to_string()),
+        }
+    })
+}
+
+fn run_default_validation_commands(
+    app: &AppHandle,
+    stream_id: Option<&str>,
+    workspace: &Path,
+    can_write: bool,
+    messages: &mut Vec<Value>,
+    trace_steps: &mut Vec<ChatTraceStep>,
+) -> bool {
+    let tool_calls = default_validation_commands(workspace)
+        .iter()
+        .enumerate()
+        .map(|(index, command)| validation_tool_call(index, command))
+        .collect::<Vec<_>>();
+
+    if tool_calls.is_empty() {
+        return false;
+    }
+
+    messages.push(json!({
+        "role": "assistant",
+        "content": "",
+        "tool_calls": tool_calls,
+    }));
+
+    let Some(tool_calls) = messages
+        .last()
+        .and_then(|message| message.get("tool_calls"))
+        .and_then(Value::as_array)
+        .cloned()
+    else {
+        return false;
+    };
+
+    for tool_call in tool_calls {
+        let call_step = tool_call_trace_step(&tool_call);
+        emit_trace_step(app, stream_id, &call_step);
+        append_trace_steps(trace_steps, vec![call_step]);
+
+        let mut stream_tool_output = |step: ChatTraceStep| {
+            emit_tool_chunk(app, stream_id, &step);
+        };
+        let tool_result = execute_code_tool_call(
+            workspace,
+            &tool_call,
+            can_write,
+            Some(&mut stream_tool_output),
+        );
+        let result_step = tool_result_trace_step(&tool_call, &tool_result);
+        emit_trace_step(app, stream_id, &result_step);
+        append_trace_steps(trace_steps, vec![result_step]);
+        messages.push(tool_result);
+    }
+
+    true
+}
+
+fn mark_validation_unavailable(messages: &mut Vec<Value>) {
+    messages.push(json!({
+        "role": "user",
+        "content": VALIDATION_UNAVAILABLE_INSTRUCTION,
+    }));
 }
 
 fn first_choice_finish_reason(parsed: &Value) -> Option<String> {
@@ -640,15 +1875,42 @@ fn trace_step(kind: &str, text: String) -> ChatTraceStep {
 
 fn usage_from_response(parsed: &Value) -> Option<ChatCompletionUsage> {
     let usage = parsed.get("usage")?;
+    let input_tokens = usage.get("input_tokens").and_then(Value::as_u64);
+    let output_tokens = usage.get("output_tokens").and_then(Value::as_u64);
+    let cached_tokens = usage
+        .get("input_tokens_details")
+        .and_then(|details| details.get("cached_tokens"))
+        .and_then(Value::as_u64);
 
     Some(ChatCompletionUsage {
-        prompt_tokens: usage.get("prompt_tokens").and_then(Value::as_u64),
-        completion_tokens: usage.get("completion_tokens").and_then(Value::as_u64),
-        total_tokens: usage.get("total_tokens").and_then(Value::as_u64),
-        prompt_cache_hit_tokens: usage.get("prompt_cache_hit_tokens").and_then(Value::as_u64),
+        prompt_tokens: usage
+            .get("prompt_tokens")
+            .and_then(Value::as_u64)
+            .or(input_tokens),
+        completion_tokens: usage
+            .get("completion_tokens")
+            .and_then(Value::as_u64)
+            .or(output_tokens),
+        total_tokens: usage
+            .get("total_tokens")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                input_tokens
+                    .zip(output_tokens)
+                    .map(|(input, output)| input + output)
+            }),
+        prompt_cache_hit_tokens: usage
+            .get("prompt_cache_hit_tokens")
+            .and_then(Value::as_u64)
+            .or(cached_tokens),
         prompt_cache_miss_tokens: usage
             .get("prompt_cache_miss_tokens")
-            .and_then(Value::as_u64),
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                input_tokens
+                    .zip(cached_tokens)
+                    .map(|(input, cached)| input - cached)
+            }),
     })
     .filter(|usage| {
         usage.prompt_tokens.is_some()
@@ -760,6 +2022,63 @@ async fn send_chat_completion_request_maybe_stream(
         .await
     } else {
         send_chat_completion_request(client, endpoint, api_key, provider_name, payload).await
+    }
+}
+
+async fn send_responses_request(
+    client: &reqwest::Client,
+    endpoint: &str,
+    api_key: &str,
+    provider_name: &str,
+    payload: &Value,
+) -> Result<Value, String> {
+    let response = client
+        .post(endpoint)
+        .bearer_auth(api_key.trim())
+        .json(payload)
+        .send()
+        .await
+        .map_err(|error| format!("Request to {} failed: {}", provider_name, error))?;
+
+    let status = response.status();
+    let body = response
+        .text()
+        .await
+        .map_err(|error| format!("Failed to read {} response: {}", provider_name, error))?;
+
+    if !status.is_success() {
+        return Err(format!(
+            "{} returned HTTP {}: {}",
+            provider_name, status, body
+        ));
+    }
+
+    serde_json::from_str(&body)
+        .map_err(|error| format!("Failed to parse {} response: {}", provider_name, error))
+}
+
+async fn send_responses_request_maybe_stream(
+    app: &AppHandle,
+    stream_id: Option<&str>,
+    client: &reqwest::Client,
+    endpoint: &str,
+    api_key: &str,
+    provider_name: &str,
+    payload: &Value,
+) -> Result<Value, String> {
+    if let Some(stream_id) = stream_id {
+        send_responses_stream_request(
+            app,
+            stream_id,
+            client,
+            endpoint,
+            api_key,
+            provider_name,
+            payload,
+        )
+        .await
+    } else {
+        send_responses_request(client, endpoint, api_key, provider_name, payload).await
     }
 }
 
@@ -1092,6 +2411,308 @@ async fn send_chat_completion_stream_request(
     }))
 }
 
+fn response_stream_error_text(parsed: &Value) -> Option<String> {
+    let error = parsed
+        .get("response")
+        .and_then(|response| response.get("error"))
+        .or_else(|| parsed.get("error"))?;
+
+    error
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| error.as_str())
+        .map(str::to_string)
+}
+
+fn collect_response_reasoning_summary(item: &Value) -> String {
+    item.get("summary")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|summary| {
+            summary
+                .get("text")
+                .or_else(|| summary.get("content"))
+                .and_then(Value::as_str)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+fn response_stream_text(parsed: &Value) -> Option<&str> {
+    parsed
+        .get("delta")
+        .and_then(Value::as_str)
+        .or_else(|| parsed.get("text").and_then(Value::as_str))
+        .or_else(|| {
+            parsed.get("part").and_then(|part| {
+                part.get("text")
+                    .or_else(|| part.get("content"))
+                    .and_then(Value::as_str)
+            })
+        })
+}
+
+fn append_response_reasoning(
+    reasoning: &mut String,
+    next_text: &str,
+    separate_complete_fragment: bool,
+) -> Option<String> {
+    if next_text.is_empty() || reasoning.ends_with(next_text) {
+        return None;
+    }
+
+    if !reasoning.is_empty() && next_text.starts_with(reasoning.as_str()) {
+        let delta = next_text[reasoning.len()..].to_string();
+
+        if delta.is_empty() {
+            return None;
+        }
+
+        reasoning.push_str(&delta);
+        return Some(delta);
+    }
+
+    let mut emitted = String::new();
+
+    if separate_complete_fragment
+        && !reasoning.is_empty()
+        && !reasoning.ends_with('\n')
+        && !next_text.starts_with('\n')
+    {
+        reasoning.push('\n');
+        emitted.push('\n');
+    }
+
+    reasoning.push_str(next_text);
+    emitted.push_str(next_text);
+    Some(emitted)
+}
+
+fn apply_responses_stream_event(
+    app: &AppHandle,
+    stream_id: &str,
+    parsed: &Value,
+    content: &mut String,
+    reasoning: &mut String,
+    function_calls: &mut Vec<Value>,
+    response_id: &mut Option<String>,
+    usage: &mut Option<ChatCompletionUsage>,
+    completed_response: &mut Option<Value>,
+) -> Option<String> {
+    if let Some(id) = parsed
+        .get("response")
+        .and_then(|response| response.get("id"))
+        .and_then(Value::as_str)
+        .or_else(|| parsed.get("id").and_then(Value::as_str))
+    {
+        *response_id = Some(id.to_string());
+    }
+
+    if let Some(response) = parsed.get("response") {
+        if let Some(next_usage) = usage_from_response(response) {
+            emit_usage_event(app, stream_id, next_usage.clone());
+            *usage = Some(next_usage);
+        }
+    }
+
+    let event_type = parsed.get("type").and_then(Value::as_str).unwrap_or("");
+
+    match event_type {
+        "response.output_text.delta" => {
+            if let Some(delta) = parsed.get("delta").and_then(Value::as_str) {
+                if !delta.is_empty() {
+                    content.push_str(delta);
+                    emit_content_chunk(app, stream_id, delta);
+                }
+            }
+        }
+        "response.reasoning_summary_text.delta" | "response.reasoning_text.delta" => {
+            if let Some(delta) = response_stream_text(parsed) {
+                if let Some(emitted) = append_response_reasoning(reasoning, delta, false) {
+                    emit_trace_chunk(app, stream_id, "reasoning", &emitted);
+                }
+            }
+        }
+        "response.reasoning_summary_part.added"
+        | "response.reasoning_summary_part.done"
+        | "response.reasoning_summary_text.done"
+        | "response.reasoning_text.done" => {
+            if let Some(text) = response_stream_text(parsed) {
+                if let Some(emitted) = append_response_reasoning(reasoning, text, true) {
+                    emit_trace_chunk(app, stream_id, "reasoning", &emitted);
+                }
+            }
+        }
+        "response.output_item.done" => {
+            if let Some(item) = parsed.get("item") {
+                if item.get("type").and_then(Value::as_str) == Some("function_call") {
+                    function_calls.push(item.clone());
+                } else if item.get("type").and_then(Value::as_str) == Some("reasoning") {
+                    let summary = collect_response_reasoning_summary(item);
+                    if !summary.is_empty() {
+                        if let Some(emitted) = append_response_reasoning(reasoning, &summary, true)
+                        {
+                            emit_trace_chunk(app, stream_id, "reasoning", &emitted);
+                        }
+                    }
+                }
+            }
+        }
+        "response.completed" => {
+            if let Some(response) = parsed.get("response") {
+                if let Some(next_usage) = usage_from_response(response) {
+                    emit_usage_event(app, stream_id, next_usage.clone());
+                    *usage = Some(next_usage);
+                }
+                *completed_response = Some(response.clone());
+            }
+        }
+        "response.failed" | "response.incomplete" => {
+            return response_stream_error_text(parsed);
+        }
+        _ => {}
+    }
+
+    None
+}
+
+async fn send_responses_stream_request(
+    app: &AppHandle,
+    stream_id: &str,
+    client: &reqwest::Client,
+    endpoint: &str,
+    api_key: &str,
+    provider_name: &str,
+    payload: &Value,
+) -> Result<Value, String> {
+    let mut payload = payload.clone();
+    payload["stream"] = json!(true);
+
+    let response = client
+        .post(endpoint)
+        .bearer_auth(api_key.trim())
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| format!("Request to {} failed: {}", provider_name, error))?;
+
+    let status = response.status();
+
+    if !status.is_success() {
+        let body = response
+            .text()
+            .await
+            .map_err(|error| format!("Failed to read {} response: {}", provider_name, error))?;
+
+        return Err(format!(
+            "{} returned HTTP {}: {}",
+            provider_name, status, body
+        ));
+    }
+
+    let mut content = String::new();
+    let mut reasoning = String::new();
+    let mut function_calls = Vec::new();
+    let mut response_id: Option<String> = None;
+    let mut usage: Option<ChatCompletionUsage> = None;
+    let mut completed_response: Option<Value> = None;
+    let mut buffer = String::new();
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk) = stream.next().await {
+        let bytes =
+            chunk.map_err(|error| format!("Failed to read {} stream: {}", provider_name, error))?;
+        buffer.push_str(&String::from_utf8_lossy(&bytes));
+
+        while let Some((separator_index, separator_len)) = sse_event_separator(&buffer) {
+            let event_block = buffer[..separator_index].to_string();
+            buffer = buffer[(separator_index + separator_len)..].to_string();
+
+            for data in sse_data_lines(&event_block) {
+                if data == "[DONE]" {
+                    break;
+                }
+
+                let parsed: Value = serde_json::from_str(&data).map_err(|error| {
+                    format!("Failed to parse {} stream event: {}", provider_name, error)
+                })?;
+
+                if let Some(error) = apply_responses_stream_event(
+                    app,
+                    stream_id,
+                    &parsed,
+                    &mut content,
+                    &mut reasoning,
+                    &mut function_calls,
+                    &mut response_id,
+                    &mut usage,
+                    &mut completed_response,
+                ) {
+                    return Err(format!("{} response failed: {}", provider_name, error));
+                }
+            }
+        }
+    }
+
+    if !buffer.trim().is_empty() {
+        for data in sse_data_lines(&buffer) {
+            if data == "[DONE]" {
+                continue;
+            }
+
+            let parsed: Value = serde_json::from_str(&data).map_err(|error| {
+                format!(
+                    "Failed to parse {} final stream event: {}",
+                    provider_name, error
+                )
+            })?;
+
+            if let Some(error) = apply_responses_stream_event(
+                app,
+                stream_id,
+                &parsed,
+                &mut content,
+                &mut reasoning,
+                &mut function_calls,
+                &mut response_id,
+                &mut usage,
+                &mut completed_response,
+            ) {
+                return Err(format!("{} response failed: {}", provider_name, error));
+            }
+        }
+    }
+
+    if let Some(response) = completed_response {
+        return Ok(response);
+    }
+
+    let mut output = Vec::new();
+    if !reasoning.trim().is_empty() {
+        output.push(json!({
+            "type": "reasoning",
+            "summary": [{ "type": "summary_text", "text": reasoning }],
+        }));
+    }
+    if !content.trim().is_empty() {
+        output.push(json!({
+            "type": "message",
+            "content": [{ "type": "output_text", "text": content }],
+        }));
+    }
+    output.extend(function_calls);
+
+    Ok(json!({
+        "id": response_id,
+        "output": output,
+        "output_text": content,
+        "usage": usage,
+    }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1166,9 +2787,190 @@ mod tests {
     }
 
     #[test]
+    fn deepseek_thinking_omits_tool_choice() {
+        assert_eq!(chat_tool_choice(true, true, false, false), None);
+        assert_eq!(chat_tool_choice(true, true, true, false), None);
+    }
+
+    #[test]
+    fn deepseek_without_thinking_can_still_force_first_tool_call() {
+        assert_eq!(
+            chat_tool_choice(true, false, false, false),
+            Some(json!("required"))
+        );
+        assert_eq!(
+            chat_tool_choice(true, false, false, true),
+            Some(json!("auto"))
+        );
+    }
+
+    #[test]
+    fn validation_tool_choice_takes_priority_when_supported() {
+        assert_eq!(
+            chat_tool_choice(true, false, true, true),
+            Some(json!("required"))
+        );
+        assert_eq!(
+            chat_tool_choice(false, false, true, true),
+            Some(json!("required"))
+        );
+    }
+
+    #[test]
+    fn openai_reasoning_models_use_responses_api() {
+        let request = ChatCompletionRequest {
+            provider_name: "ChatGPT".to_string(),
+            base_url: "http://127.0.0.1:15721/codex/v1".to_string(),
+            api_key: "test".to_string(),
+            model: "gpt-5.5".to_string(),
+            wire_api: None,
+            reasoning_effort: Some("high".to_string()),
+            temperature: Some(0.7),
+            system_prompt: None,
+            workspace_path: None,
+            code_tools_enabled: None,
+            can_write: None,
+            stream_id: None,
+            messages: vec![],
+        };
+
+        assert!(should_use_responses_api(&request, false));
+        assert!(!should_use_responses_api(&request, true));
+
+        let mut chat_wire_request = request;
+        chat_wire_request.base_url = "https://relay.example.com/v1".to_string();
+        chat_wire_request.wire_api = Some("chat".to_string());
+        assert!(!should_use_responses_api(&chat_wire_request, false));
+
+        let mut unknown_proxy_request = chat_wire_request;
+        unknown_proxy_request.wire_api = None;
+        assert!(!should_use_responses_api(&unknown_proxy_request, false));
+    }
+
+    #[test]
+    fn responses_reasoning_payload_requests_summary_when_enabled() {
+        assert_eq!(
+            responses_reasoning_payload(Some("medium")),
+            Some(json!({ "effort": "medium", "summary": "auto" }))
+        );
+        assert_eq!(responses_reasoning_payload(Some("off")), None);
+    }
+
+    #[test]
+    fn responses_endpoint_accepts_base_chat_or_full_endpoint() {
+        assert_eq!(
+            responses_endpoint("https://api.example.com/v1"),
+            "https://api.example.com/v1/responses"
+        );
+        assert_eq!(
+            responses_endpoint("https://api.example.com/v1/chat/completions"),
+            "https://api.example.com/v1/responses"
+        );
+        assert_eq!(
+            responses_endpoint("https://api.example.com/v1/responses"),
+            "https://api.example.com/v1/responses"
+        );
+    }
+
+    #[test]
+    fn parses_responses_text_reasoning_and_usage() {
+        let response = json!({
+            "id": "resp_123",
+            "output_text": "final answer",
+            "output": [
+                {
+                    "type": "reasoning",
+                    "summary": [
+                        { "type": "summary_text", "text": "checked the workspace" }
+                    ]
+                }
+            ],
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 25,
+                "total_tokens": 125,
+                "input_tokens_details": { "cached_tokens": 40 }
+            }
+        });
+
+        assert_eq!(responses_id(&response).as_deref(), Some("resp_123"));
+        assert_eq!(responses_output_text(&response), "final answer");
+        assert_eq!(
+            responses_reasoning_trace_steps(&response)[0].text,
+            "checked the workspace"
+        );
+
+        let usage = usage_from_response(&response).unwrap();
+        assert_eq!(usage.prompt_tokens, Some(100));
+        assert_eq!(usage.completion_tokens, Some(25));
+        assert_eq!(usage.prompt_cache_hit_tokens, Some(40));
+        assert_eq!(usage.prompt_cache_miss_tokens, Some(60));
+    }
+
+    #[test]
+    fn appends_responses_reasoning_stream_without_done_duplicates() {
+        let mut reasoning = String::new();
+
+        assert_eq!(
+            append_response_reasoning(&mut reasoning, "checked", false).as_deref(),
+            Some("checked")
+        );
+        assert_eq!(
+            append_response_reasoning(&mut reasoning, "checked", true),
+            None
+        );
+        assert_eq!(
+            append_response_reasoning(&mut reasoning, "checked workspace", true).as_deref(),
+            Some(" workspace")
+        );
+        assert_eq!(
+            append_response_reasoning(&mut reasoning, "opened files", true).as_deref(),
+            Some("\nopened files")
+        );
+        assert_eq!(reasoning, "checked workspace\nopened files");
+    }
+
+    #[test]
+    fn extracts_responses_reasoning_stream_text_shapes() {
+        assert_eq!(response_stream_text(&json!({ "delta": "a" })), Some("a"));
+        assert_eq!(response_stream_text(&json!({ "text": "b" })), Some("b"));
+        assert_eq!(
+            response_stream_text(&json!({ "part": { "type": "summary_text", "text": "c" } })),
+            Some("c")
+        );
+    }
+
+    #[test]
+    fn converts_responses_function_calls_to_chat_tools_and_outputs() {
+        let response_call = json!({
+            "type": "function_call",
+            "call_id": "call_123",
+            "name": "read_file",
+            "arguments": "{\"file\":\"src/lib.rs\"}"
+        });
+        let tool_call = response_function_call_to_chat_tool_call(&response_call);
+
+        assert_eq!(tool_call["id"], json!("call_123"));
+        assert_eq!(tool_call["function"]["name"], json!("read_file"));
+
+        let tool_output = response_tool_output(
+            &tool_call,
+            &json!({
+                "role": "tool",
+                "tool_call_id": "call_123",
+                "content": "file contents"
+            }),
+        );
+
+        assert_eq!(tool_output["type"], json!("function_call_output"));
+        assert_eq!(tool_output["call_id"], json!("call_123"));
+        assert_eq!(tool_output["output"], json!("file contents"));
+    }
+
+    #[test]
     fn final_answer_request_appends_internal_instruction() {
         let messages = vec![json!({ "role": "user", "content": "question" })];
-        let payload_messages = chat_payload_messages(&messages, true);
+        let payload_messages = chat_payload_messages(&messages, true, false);
 
         assert_eq!(payload_messages.len(), 2);
         assert_eq!(payload_messages[0]["content"], json!("question"));
@@ -1177,6 +2979,81 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("final answer"));
+    }
+
+    #[test]
+    fn validation_request_takes_priority_over_final_answer_instruction() {
+        let messages = vec![json!({ "role": "user", "content": "question" })];
+        let payload_messages = chat_payload_messages(&messages, true, true);
+
+        assert_eq!(payload_messages.len(), 2);
+        assert!(payload_messages[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("call run_command"));
+        assert!(!payload_messages[1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("Do not request more tool calls"));
+    }
+
+    #[test]
+    fn detects_validation_and_edit_tool_calls() {
+        assert!(is_successful_edit_tool_call(&json!({
+            "function": {
+                "name": "write_file",
+                "arguments": "{\"file\":\"src/lib.rs\",\"content\":\"x\"}"
+            }
+        })));
+        assert!(!is_successful_edit_tool_call(&json!({
+            "function": {
+                "name": "apply_patch",
+                "arguments": "{\"patchText\":\"diff --git a/a b/a\",\"checkOnly\":true}"
+            }
+        })));
+        assert!(is_validation_tool_call(&json!({
+            "function": {
+                "name": "run_command",
+                "arguments": "{\"command\":\"npm\",\"args\":[\"run\",\"build\"]}"
+            }
+        })));
+        assert!(!is_validation_tool_call(&json!({
+            "function": {
+                "name": "run_command",
+                "arguments": "{\"command\":\"git\",\"args\":[\"status\"]}"
+            }
+        })));
+    }
+
+    #[test]
+    fn default_validation_commands_detect_package_and_tauri_cargo() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("matrix-validation-test-{}", stamp));
+        fs::create_dir_all(workspace.join("src-tauri")).unwrap();
+        fs::write(
+            workspace.join("package.json"),
+            r#"{"scripts":{"build":"vite build"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            workspace.join("src-tauri").join("Cargo.toml"),
+            "[package]\n",
+        )
+        .unwrap();
+
+        let commands = default_validation_commands(&workspace);
+
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0].command, "npm");
+        assert_eq!(commands[0].args, vec!["run", "build"]);
+        assert_eq!(commands[1].command, "cargo");
+        assert_eq!(commands[1].args, vec!["test"]);
+        assert_eq!(commands[1].cwd.as_deref(), Some("src-tauri"));
+
+        let _ = fs::remove_dir_all(workspace);
     }
 
     #[test]
@@ -1453,6 +3330,54 @@ mod tests {
     }
 
     #[test]
+    fn chat_endpoint_accepts_base_or_full_endpoint() {
+        assert_eq!(
+            chat_completions_endpoint("https://api.example.com/v1"),
+            "https://api.example.com/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_completions_endpoint("https://api.example.com/v1/chat/completions"),
+            "https://api.example.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn chat_endpoint_normalizes_ccswitch_codex_proxy_base() {
+        assert_eq!(
+            chat_completions_endpoint("http://127.0.0.1:15721/codex"),
+            "http://127.0.0.1:15721/codex/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn builds_openai_config_from_codex_toml_and_auth() {
+        let config = build_ccswitch_openai_config(
+            "test".to_string(),
+            None,
+            r#"
+model_provider = "custom"
+model = "gpt-5.5"
+
+[model_providers.custom]
+name = "Relay"
+base_url = "https://relay.example.com/v1"
+wire_api = "chat"
+"#,
+            Some(&json!({ "OPENAI_API_KEY": "sk-test" })),
+            None,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(config.provider_name.as_deref(), Some("Relay"));
+        assert_eq!(config.base_url, "https://relay.example.com/v1");
+        assert_eq!(config.api_key, "sk-test");
+        assert_eq!(config.model.as_deref(), Some("gpt-5.5"));
+        assert_eq!(config.wire_api.as_deref(), Some("chat"));
+        assert!(config.warning.is_none());
+    }
+
+    #[test]
     fn reads_first_choice_finish_reason() {
         let parsed = json!({
             "choices": [
@@ -1480,6 +3405,7 @@ pub fn run() {
             load_app_cache,
             save_app_cache,
             copy_avatar_to_cache,
+            load_ccswitch_openai_config,
             chat_completion,
             tools::inspect_code_workspace,
             tools::apply_patch_proposal

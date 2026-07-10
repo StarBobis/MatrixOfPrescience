@@ -25,6 +25,7 @@ export interface ProviderConfig {
   baseUrl: string;
   apiKey: string;
   defaultModel: string;
+  wireApi?: string;
 }
 
 export interface AgentModel {

@@ -11,6 +11,7 @@ import {
   useSettingsStore,
 } from "../stores/settings";
 import { chooseLocalAvatar, getAvatarSrc } from "../utils/avatar";
+import { modelPresets } from "../utils/modelCatalog";
 
 const settingsStore = useSettingsStore();
 const { friends, groups, providers } = storeToRefs(settingsStore);
@@ -22,11 +23,6 @@ const providerOptions = computed<Array<{ label: string; value: ProviderId }>>(()
     value: provider.id,
   })),
 );
-
-const modelPresets: Record<ProviderId, string[]> = {
-  openai: ["gpt-4.1", "gpt-4.1-mini", "gpt-4o", "gpt-4o-mini"],
-  deepseek: ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"],
-};
 
 const reasoningEffortOptions = computed<Array<{ label: string; value: AgentReasoningEffort }>>(
   () => [

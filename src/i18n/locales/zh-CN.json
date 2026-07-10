@@ -39,6 +39,13 @@
       "title": "我的资料"
     },
     "providers": {
+      "ccswitchFailed": "同步 CC Switch 失败：{error}",
+      "ccswitchSuccess": "已从 {source} 同步 OpenAI 设置",
+      "ccswitchSync": "从 CC Switch 同步",
+      "ccswitchWarnings": {
+        "codexOAuth": "当前 CC Switch provider 是 Codex OAuth/ChatGPT。请走 CC Switch 本地代理，或把 provider 切到 OpenAI Chat 格式。",
+        "responses": "当前 Codex provider 是 OpenAI Responses 格式。本应用发送 OpenAI Chat Completions，请启用 CC Switch 本地代理或选择 OpenAI Chat 格式。"
+      },
       "defaultModel": "默认模型",
       "title": "Provider Key"
     },

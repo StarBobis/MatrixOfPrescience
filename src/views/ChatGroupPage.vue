@@ -34,6 +34,11 @@ import ResizableGroupLayout from "../components/ResizableGroupLayout.vue";
 import { buildSystemPrompt } from "../utils/agentPrompt";
 import { makeMemberNameUnique } from "../utils/memberNames";
 import { parseMentionedMembers } from "../utils/mentions";
+import {
+  DEFAULT_CONTEXT_LIMIT,
+  getProviderModelContextLimit,
+  modelPresets,
+} from "../utils/modelCatalog";
 import { evaluatePatchSafety } from "../utils/patchSafety";
 
 type ChatRole = "user" | "assistant";
@@ -99,6 +104,7 @@ interface ChatCompletionInvokeRequest {
   baseUrl: string;
   apiKey: string;
   model: string;
+  wireApi?: string;
   reasoningEffort: AgentModel["reasoningEffort"];
   temperature: number;
   workspacePath?: string;
@@ -129,14 +135,6 @@ const providerOptions: Array<{ label: string; value: ProviderId }> = [
   },
 ];
 
-const modelPresets: Record<ProviderId, string[]> = {
-  openai: ["gpt-4.1", "gpt-4.1-mini", "gpt-4o", "gpt-4o-mini"],
-  deepseek: ["deepseek-v4-flash", "deepseek-v4-pro", "deepseek-chat"],
-};
-
-const DEEPSEEK_LONG_CONTEXT_LIMIT = 1_000_000;
-const DEEPSEEK_STANDARD_CONTEXT_LIMIT = 128_000;
-const DEFAULT_CONTEXT_LIMIT = 128_000;
 const CACHE_PREFIX_MESSAGE_COUNT = 4;
 const RECENT_CONVERSATION_MESSAGE_COUNT = 14;
 const MAX_MESSAGE_EXECUTION_ITEMS = 80;
@@ -251,19 +249,9 @@ function estimateConversationTokens(messages: ApiChatMessage[], systemPrompt = "
 }
 
 function getModelContextLimit(member: AgentModel) {
-  if (member.provider === "deepseek") {
-    return member.deepSeekLongContext ?? true
-      ? DEEPSEEK_LONG_CONTEXT_LIMIT
-      : DEEPSEEK_STANDARD_CONTEXT_LIMIT;
-  }
-
-  const model = member.model.toLowerCase();
-
-  if (model.includes("gpt-4.1")) {
-    return 1_000_000;
-  }
-
-  return DEFAULT_CONTEXT_LIMIT;
+  return getProviderModelContextLimit(member.provider, member.model, {
+    deepSeekLongContext: member.deepSeekLongContext,
+  });
 }
 
 function buildContextUsageSnapshot(
@@ -1098,11 +1086,26 @@ function appendRuntimeText(current: string, next: string, maxLength: number) {
   return limitRuntimeText(`${current}${next}`, maxLength);
 }
 
-function addResponseTraceSteps(messageId: string, response: ChatCompletionResponse) {
+function addResponseTraceSteps(
+  messageId: string,
+  response: ChatCompletionResponse,
+  options: { includeReasoning?: boolean; includeTool?: boolean } = {},
+) {
+  const includeReasoning = options.includeReasoning ?? true;
+  const includeTool = options.includeTool ?? true;
+
   for (const step of response.traceSteps ?? []) {
     if (step.kind === "tool") {
+      if (!includeTool) {
+        continue;
+      }
+
       addActivityItem(messageId, "tool", step.text, inferToolActivityStatus(step.text), step.detail);
     } else {
+      if (!includeReasoning) {
+        continue;
+      }
+
       const text = formatReasoningStep(step);
 
       if (text) {
@@ -1465,7 +1468,8 @@ async function invokeStreamingCompletion(
   request: ChatCompletionInvokeRequest,
   options: { showContent?: boolean } = {},
 ) {
-  let sawStreamTrace = false;
+  let sawStreamReasoning = false;
+  let sawStreamTool = false;
   const showContent = options.showContent ?? true;
   const unlisten = await listen<ChatCompletionStreamEvent>(
     "chat-completion-stream",
@@ -1477,7 +1481,15 @@ async function invokeStreamingCompletion(
       }
 
       if (payload.eventType === "traceChunk" || payload.eventType === "traceStep") {
-        sawStreamTrace = true;
+        if ((payload.traceKind ?? "reasoning") === "tool") {
+          sawStreamTool = true;
+        } else if (payload.text.trim()) {
+          sawStreamReasoning = true;
+        }
+      }
+
+      if (payload.eventType === "toolChunk") {
+        sawStreamTool = true;
       }
 
       if (!showContent && payload.eventType === "contentChunk") {
@@ -1496,7 +1508,7 @@ async function invokeStreamingCompletion(
       },
     });
 
-    return { response, sawStreamTrace };
+    return { response, sawStreamReasoning, sawStreamTool };
   } finally {
     unlisten();
     flushStreamingTraceLine(messageId);
@@ -1652,7 +1664,7 @@ async function decideMemberResponse(
     );
     addActivityItem(pendingId, "status", t("chatRuntime.stepWaitingModel"), "running");
 
-    const { response, sawStreamTrace } = await invokeStreamingCompletion(
+    const { response, sawStreamReasoning, sawStreamTool } = await invokeStreamingCompletion(
       pendingId,
       runId,
       {
@@ -1660,6 +1672,7 @@ async function decideMemberResponse(
         baseUrl: provider.baseUrl,
         apiKey: provider.apiKey,
         model: member.model,
+        wireApi: provider.wireApi,
         reasoningEffort: member.reasoningEffort,
         temperature: 0,
         workspacePath: activeGroup.value?.workspacePath ?? "",
@@ -1676,9 +1689,10 @@ async function decideMemberResponse(
       return { decision: "wait" };
     }
 
-    if (!sawStreamTrace) {
-      addResponseTraceSteps(pendingId, response);
-    }
+    addResponseTraceSteps(pendingId, response, {
+      includeReasoning: !sawStreamReasoning,
+      includeTool: !sawStreamTool,
+    });
 
     const decision = parseMemberDecision(response.content);
 
@@ -1789,7 +1803,7 @@ async function askMember(
       codeToolsEnabled ? "running" : "info",
     );
     addActivityItem(pendingId, "status", t("chatRuntime.stepWaitingModel"), "running");
-    const { response, sawStreamTrace } = await invokeStreamingCompletion(
+    const { response, sawStreamReasoning, sawStreamTool } = await invokeStreamingCompletion(
       pendingId,
       runId,
       {
@@ -1820,9 +1834,10 @@ async function askMember(
     });
     applyCompletionUsage(pendingId, response.usage);
     releasePendingMessage(pendingId, startedAt);
-    if (!sawStreamTrace) {
-      addResponseTraceSteps(pendingId, response);
-    }
+    addResponseTraceSteps(pendingId, response, {
+      includeReasoning: !sawStreamReasoning,
+      includeTool: !sawStreamTool,
+    });
     addActivityItem(pendingId, "status", t("chatRuntime.stepDone"), "done");
     await maybeCreatePatchProposal(member, finalContent);
     return {
@@ -1874,6 +1889,7 @@ async function voteOnAnswer(
         baseUrl: provider.baseUrl,
         apiKey: provider.apiKey,
         model: voter.model,
+        wireApi: provider.wireApi,
         reasoningEffort: voter.reasoningEffort,
         temperature: 0,
         systemPrompt: buildSystemPrompt(
@@ -2222,5 +2238,3 @@ async function sendMessage() {
     />
   </div>
 </template>
-
-
