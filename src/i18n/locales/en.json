@@ -351,6 +351,7 @@
     "retryInterrupted": "Connection retry stopped.",
     "retryRecovered": "Connection restored after {attempts} retries.",
     "retryWaiting": "HTTP request failed. Retry {attempt} starts in {seconds}s...",
+    "retryWaitingWithReason": "HTTP request failed ({reason}). Retry {attempt} starts in {seconds}s...",
     "consensusLimit": "This discussion reached the consensus round limit and still has disagreements. Please narrow the question manually or adjust member roles before continuing.",
     "decisionPendingContent": "Deciding whether to speak...",
     "decisionWaitContent": "Observing this round.",

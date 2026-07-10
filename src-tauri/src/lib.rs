@@ -102,11 +102,16 @@ struct ChatCompletionStreamEvent {
     usage: Option<ChatCompletionUsage>,
     retry_attempt: Option<usize>,
     retry_delay_ms: Option<u64>,
+    retry_reason: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum HttpRetryProgress {
-    Waiting { attempt: usize, delay: Duration },
+    Waiting {
+        attempt: usize,
+        delay: Duration,
+        reason: String,
+    },
     Recovered { attempts: usize },
 }
 
@@ -1938,22 +1943,26 @@ async fn send_http_request_with_retry(
             return Err("Chat completion was cancelled.".to_string());
         }
 
-        let response = client
+        let response = match client
             .post(endpoint)
             .bearer_auth(api_key.trim())
             .json(payload)
             .send()
-            .await;
-        let Ok(response) = response else {
-            retry_attempt += 1;
-            if let Some(notify) = retry_progress {
-                notify(HttpRetryProgress::Waiting {
-                    attempt: retry_attempt,
-                    delay: retry_delay,
-                });
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                retry_attempt += 1;
+                if let Some(notify) = retry_progress {
+                    notify(HttpRetryProgress::Waiting {
+                        attempt: retry_attempt,
+                        delay: retry_delay,
+                        reason: format!("Request to {} failed: {}", provider_name, error),
+                    });
+                }
+                wait_for_http_retry(retry_delay, cancellation).await?;
+                continue;
             }
-            wait_for_http_retry(retry_delay, cancellation).await?;
-            continue;
         };
         let status = response.status();
 
@@ -1968,19 +1977,20 @@ async fn send_http_request_with_retry(
             return Ok(response);
         }
 
-        let body = response
-            .text()
-            .await;
-        let Ok(body) = body else {
-            retry_attempt += 1;
-            if let Some(notify) = retry_progress {
-                notify(HttpRetryProgress::Waiting {
-                    attempt: retry_attempt,
-                    delay: retry_delay,
-                });
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(error) => {
+                retry_attempt += 1;
+                if let Some(notify) = retry_progress {
+                    notify(HttpRetryProgress::Waiting {
+                        attempt: retry_attempt,
+                        delay: retry_delay,
+                        reason: format!("Failed to read {} response: {}", provider_name, error),
+                    });
+                }
+                wait_for_http_retry(retry_delay, cancellation).await?;
+                continue;
             }
-            wait_for_http_retry(retry_delay, cancellation).await?;
-            continue;
         };
 
         if !should_retry_http_failure(status, &body) {
@@ -1995,6 +2005,7 @@ async fn send_http_request_with_retry(
             notify(HttpRetryProgress::Waiting {
                 attempt: retry_attempt,
                 delay: retry_delay,
+                reason: format!("{} returned HTTP {}: {}", provider_name, status, body),
             });
         }
         wait_for_http_retry(retry_delay, cancellation).await?;
@@ -2151,18 +2162,24 @@ fn emit_stream_event(
             usage,
             retry_attempt: None,
             retry_delay_ms: None,
+            retry_reason: None,
         },
     );
 }
 
 fn emit_overload_retry_event(app: &AppHandle, stream_id: &str, progress: HttpRetryProgress) {
-    let (event_type, retry_attempt, retry_delay_ms) = match progress {
-        HttpRetryProgress::Waiting { attempt, delay } => (
+    let (event_type, retry_attempt, retry_delay_ms, retry_reason) = match progress {
+        HttpRetryProgress::Waiting {
+            attempt,
+            delay,
+            reason,
+        } => (
             "retryWaiting",
             attempt,
             Some(delay.as_millis().min(u64::MAX as u128) as u64),
+            Some(reason),
         ),
-        HttpRetryProgress::Recovered { attempts } => ("retryRecovered", attempts, None),
+        HttpRetryProgress::Recovered { attempts } => ("retryRecovered", attempts, None, None),
     };
 
     let _ = app.emit(
@@ -2176,6 +2193,7 @@ fn emit_overload_retry_event(app: &AppHandle, stream_id: &str, progress: HttpRet
             usage: None,
             retry_attempt: Some(retry_attempt),
             retry_delay_ms,
+            retry_reason,
         },
     );
 }
@@ -2884,10 +2902,12 @@ mod tests {
                 HttpRetryProgress::Waiting {
                     attempt: 1,
                     delay: Duration::ZERO,
+                    reason: r#"ChatGPT returned HTTP 503 Service Unavailable: {"error":{"message":"system cpu overloaded (current: 93.1%, threshold: 85%)","type":"new_api_error","param":"","code":"system_cpu_overloaded"}}"#.to_string(),
                 },
                 HttpRetryProgress::Waiting {
                     attempt: 2,
                     delay: Duration::ZERO,
+                    reason: r#"ChatGPT returned HTTP 503 Service Unavailable: {"error":{"message":"system cpu overloaded (current: 93.1%, threshold: 85%)","type":"new_api_error","param":"","code":"system_cpu_overloaded"}}"#.to_string(),
                 },
                 HttpRetryProgress::Recovered { attempts: 2 },
             ]
@@ -2929,6 +2949,7 @@ mod tests {
                 HttpRetryProgress::Waiting {
                     attempt: 1,
                     delay: Duration::ZERO,
+                    reason: "ChatGPT returned HTTP 502 Bad Gateway: error code: 502".to_string(),
                 },
                 HttpRetryProgress::Recovered { attempts: 1 },
             ]

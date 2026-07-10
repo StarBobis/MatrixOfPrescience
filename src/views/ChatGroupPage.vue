@@ -87,6 +87,7 @@ interface ChatCompletionStreamEvent {
   usage?: ChatCompletionUsage;
   retryAttempt?: number;
   retryDelayMs?: number;
+  retryReason?: string;
 }
 
 interface ApplyPatchResponse {
@@ -1531,7 +1532,10 @@ function flushStreamingToolOutput(messageId: string, status: ChatMessageExecutio
 function applyRetryWaiting(messageId: string, payload: ChatCompletionStreamEvent) {
   const attempt = Math.max(1, payload.retryAttempt ?? 1);
   const seconds = Math.max(0, Math.ceil((payload.retryDelayMs ?? 0) / 1000));
-  const text = t("chatRuntime.retryWaiting", { attempt, seconds });
+  const reason = payload.retryReason?.trim();
+  const text = reason
+    ? t("chatRuntime.retryWaitingWithReason", { attempt, seconds, reason })
+    : t("chatRuntime.retryWaiting", { attempt, seconds });
   let current = streamingRetries.get(messageId);
 
   flushStreamingTraceLine(messageId);

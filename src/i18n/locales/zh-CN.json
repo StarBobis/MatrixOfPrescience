@@ -351,6 +351,7 @@
     "retryInterrupted": "已停止连接重试。",
     "retryRecovered": "连接已恢复，共重试 {attempts} 次。",
     "retryWaiting": "HTTP 请求失败，第 {attempt} 次重试将在 {seconds} 秒后进行...",
+    "retryWaitingWithReason": "HTTP 请求失败（{reason}），第 {attempt} 次重试将在 {seconds} 秒后进行...",
     "consensusLimit": "本轮讨论达到共识轮次上限，仍存在分歧。请人工收束问题或调整群友角色后继续。",
     "decisionPendingContent": "正在判断是否需要发言...",
     "decisionWaitContent": "本轮先观望。",
