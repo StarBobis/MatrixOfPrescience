@@ -33,6 +33,7 @@ import GroupSidebar from "../components/GroupSidebar.vue";
 import GroupRightPanel from "../components/GroupRightPanel.vue";
 import ResizableGroupLayout from "../components/ResizableGroupLayout.vue";
 import { buildSystemPrompt } from "../utils/agentPrompt";
+import { describeError } from "../utils/errorPresentation";
 import { makeMemberNameUnique } from "../utils/memberNames";
 import { parseMentionedMembers } from "../utils/mentions";
 import {
@@ -142,6 +143,7 @@ const MAX_MESSAGE_EXECUTION_ITEMS = 80;
 const MAX_MESSAGE_THOUGHT_STEPS = 80;
 const MAX_TRACE_TEXT_CHARS = 1200;
 const MAX_TRACE_DETAIL_CHARS = 6000;
+const MAX_APPLY_PATCH_TRACE_DETAIL_CHARS = 128 * 1024;
 const MAX_STREAMING_TRACE_CHUNK_CHARS = 8000;
 const MAX_CONTEXT_EXECUTION_ITEMS = 24;
 const MAX_CONTEXT_EXECUTION_TEXT_CHARS = 700;
@@ -1072,6 +1074,12 @@ function limitRuntimeText(value: string, maxLength: number) {
   return `${value.slice(0, maxLength)}${TRACE_TRUNCATED_MARKER}`;
 }
 
+function traceDetailLimit(text: string) {
+  return text.trimStart().startsWith("apply_patch ")
+    ? MAX_APPLY_PATCH_TRACE_DETAIL_CHARS
+    : MAX_TRACE_DETAIL_CHARS;
+}
+
 function appendRuntimeText(current: string, next: string, maxLength: number) {
   if (current.includes(TRACE_TRUNCATED_MARKER.trim())) {
     return current;
@@ -1121,7 +1129,7 @@ function createActivityItem(
     kind,
     status,
     text: limitRuntimeText(text, MAX_TRACE_TEXT_CHARS),
-    detail: detail.trim() ? limitRuntimeText(detail.trim(), MAX_TRACE_DETAIL_CHARS) : undefined,
+    detail: detail.trim() ? limitRuntimeText(detail.trim(), traceDetailLimit(text)) : undefined,
   };
 }
 
@@ -1138,7 +1146,7 @@ function createExecutionItem(
     kind,
     status,
     text: limitRuntimeText(text, MAX_TRACE_TEXT_CHARS),
-    detail: detail.trim() ? limitRuntimeText(detail.trim(), MAX_TRACE_DETAIL_CHARS) : undefined,
+    detail: detail.trim() ? limitRuntimeText(detail.trim(), traceDetailLimit(text)) : undefined,
     createdAt: Date.now(),
   };
 }
@@ -1838,18 +1846,25 @@ async function decideMemberResponse(
     addActivityItem(pendingId, "status", t("chatRuntime.stepDecisionSpeak"), "done");
     upsertSpeakerQueueMember(member, "queued");
     return { decision, pendingMessage: { id: pendingId, startedAt } };
-  } catch {
+  } catch (error) {
     if (isRunInterrupted(runId)) {
       releasePendingMessage(pendingId, startedAt);
       return { decision: "wait" };
     }
 
+    const errorPresentation = describeError(error, t("chatRuntime.unknownError"));
     streamingContent.delete(pendingId);
     settingsStore.updateMessage(pendingId, {
       status: "thinking",
       content: t("chatRuntime.pendingContent"),
     });
-    addActivityItem(pendingId, "status", t("chatRuntime.stepDecisionFallbackSpeak"), "error");
+    addActivityItem(
+      pendingId,
+      "status",
+      t("chatRuntime.stepDecisionFallbackSpeak", { error: errorPresentation.summary }),
+      "error",
+      errorPresentation.detail,
+    );
     upsertSpeakerQueueMember(member, "queued");
     return { decision: "speak", pendingMessage: { id: pendingId, startedAt } };
   }
@@ -1988,12 +2003,16 @@ async function askMember(
       return null;
     }
 
+    const errorPresentation = describeError(error, t("chatRuntime.unknownError"));
+    const failureContent = t("chatRuntime.callFailedContent", {
+      error: errorPresentation.summary,
+    });
     releasePendingMessage(pendingId, startedAt);
     settingsStore.updateMessage(pendingId, {
       status: "error",
-      content: t("chatRuntime.callFailedContent", { error: String(error) }),
+      content: failureContent,
     });
-    addActivityItem(pendingId, "status", t("chatRuntime.stepFailed"), "error");
+    addActivityItem(pendingId, "status", failureContent, "error", errorPresentation.detail);
     return null;
   } finally {
     removeSpeakerQueueMember(member.id);
@@ -2041,7 +2060,18 @@ async function voteOnAnswer(
     }
 
     return parseMemberVote(response.content);
-  } catch {
+  } catch (error) {
+    const errorPresentation = describeError(error, t("chatRuntime.unknownError"));
+    addActivityItem(
+      answer.messageId,
+      "status",
+      t("chatRuntime.voteFailed", {
+        name: voter.name,
+        error: errorPresentation.summary,
+      }),
+      "error",
+      errorPresentation.detail,
+    );
     return "agree";
   }
 }

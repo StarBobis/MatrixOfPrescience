@@ -132,12 +132,14 @@ struct CcSwitchOpenAiConfig {
     warning: Option<String>,
 }
 
-const MAX_CODE_TOOL_ROUNDS: usize = 8;
-const MAX_CHAT_COMPLETION_TURNS: usize = MAX_CODE_TOOL_ROUNDS + 4;
+const MAX_CHAT_COMPLETION_TURNS: usize = 32;
+const MAX_EDIT_RECOVERY_TOOL_ROUNDS: usize = 4;
 const MAX_CHAT_TRACE_STEPS: usize = 160;
 const TRACE_STEP_TEXT_LIMIT: usize = 280;
 const CHAT_COMPLETION_STREAM_EVENT: &str = "chat-completion-stream";
-const FINAL_ANSWER_INSTRUCTION: &str = "The code reading tool budget for this response is exhausted. Use the tool results already provided and write the final answer now. Do not request more tool calls.";
+const FINAL_ANSWER_INSTRUCTION: &str =
+    "Use the tool results already provided and write the final answer now.";
+const EDIT_FAILURE_RECOVERY_INSTRUCTION: &str = "The previous edit tool call failed. Do not stop or provide a final answer solely because an edit did not apply. Recover using the error and the current workspace state: re-read the target when the context may be stale, then retry with a corrected smaller patch or a different available edit tool. Do not repeat the identical failing call. Continue until the requested change is complete or no available tool can resolve a genuine blocker.";
 const VALIDATION_REQUIRED_INSTRUCTION: &str = "You just changed files in the workspace. Before writing the final visible answer, call run_command with the most appropriate build, test, type-check, lint, or compile command for the changed project. Prefer project scripts and manifests already present in the workspace, such as npm run build, cargo test, cargo check, pytest, go test, dotnet test, or equivalent. Do not provide a final answer until validation output is available; if validation fails, explain the failure and what remains.";
 const VALIDATION_UNAVAILABLE_INSTRUCTION: &str = "No default validation command could be detected automatically for this workspace. Write the final answer now and explicitly say that code was changed but automatic validation could not be run because no known project validator was found.";
 const CACHE_LOCATION_FILE: &str = "cache-location.json";
@@ -782,7 +784,8 @@ async fn chat_completion(
         deepseek_thinking_enabled(is_deepseek, request.reasoning_effort.as_deref());
     let can_write = request.can_write.unwrap_or(false);
     let mut code_tool_called = false;
-    let mut code_tool_rounds = 0usize;
+    let mut edit_recovery_required = false;
+    let mut edit_recovery_rounds = 0usize;
     let mut final_answer_requested = false;
     let mut validation_required = false;
     let mut validation_attempted = false;
@@ -799,13 +802,17 @@ async fn chat_completion(
         .map(str::to_string);
 
     for _ in 0..MAX_CHAT_COMPLETION_TURNS {
-        let validation_tool_required = validation_required && !validation_attempted;
+        let validation_tool_required = should_require_validation(
+            validation_required,
+            validation_attempted,
+            edit_recovery_required,
+        );
         if validation_tool_required {
             validation_model_prompted = true;
         }
         let payload_messages = chat_payload_messages(
             &messages,
-            final_answer_requested && !validation_tool_required,
+            final_answer_requested && !validation_tool_required && !edit_recovery_required,
             validation_tool_required,
         );
         let mut payload = json!({
@@ -813,8 +820,8 @@ async fn chat_completion(
             "messages": payload_messages,
             "temperature": request.temperature.unwrap_or(0.7),
         });
-        let tools_allowed =
-            code_workspace.is_some() && (!final_answer_requested || validation_tool_required);
+        let tools_allowed = code_workspace.is_some()
+            && (!final_answer_requested || validation_tool_required || edit_recovery_required);
         let strict_tool_schema = is_deepseek && tools_allowed;
 
         apply_reasoning_payload(
@@ -829,6 +836,7 @@ async fn chat_completion(
                 is_deepseek,
                 deepseek_thinking,
                 validation_tool_required,
+                edit_recovery_required,
                 code_tool_called,
             ) {
                 payload["tool_choice"] = tool_choice;
@@ -853,6 +861,7 @@ async fn chat_completion(
                     is_deepseek,
                     deepseek_thinking,
                     validation_tool_required,
+                    edit_recovery_required,
                     true,
                 ) {
                     payload["tool_choice"] = tool_choice;
@@ -899,6 +908,8 @@ async fn chat_completion(
         ) {
             if !tool_calls.is_empty() {
                 messages.push(message.clone());
+                let mut failed_edit = false;
+                let mut successful_edit = false;
                 for tool_call in tool_calls {
                     let call_step = tool_call_trace_step(tool_call);
                     emit_trace_step(&app, stream_id.as_deref(), &call_step);
@@ -918,28 +929,42 @@ async fn chat_completion(
                     if tool_result_succeeded(&tool_result)
                         && is_successful_edit_tool_call(tool_call)
                     {
+                        successful_edit = true;
                         validation_required = true;
                         validation_attempted = false;
                         validation_model_prompted = false;
                         auto_validation_attempted = false;
+                    }
+                    if failed_edit_requires_recovery(tool_call, &tool_result) {
+                        failed_edit = true;
                     }
                     let result_step = tool_result_trace_step(tool_call, &tool_result);
                     emit_trace_step(&app, stream_id.as_deref(), &result_step);
                     append_trace_steps(&mut trace_steps, vec![result_step]);
                     messages.push(tool_result);
                 }
-                code_tool_called = true;
-                code_tool_rounds += 1;
-                if code_tool_rounds >= MAX_CODE_TOOL_ROUNDS
-                    && !(validation_required && !validation_attempted)
-                {
-                    final_answer_requested = true;
+                (edit_recovery_required, edit_recovery_rounds) = next_edit_recovery_state(
+                    edit_recovery_required,
+                    edit_recovery_rounds,
+                    failed_edit,
+                    successful_edit,
+                );
+                if failed_edit && edit_recovery_required {
+                    messages.push(json!({
+                        "role": "user",
+                        "content": EDIT_FAILURE_RECOVERY_INSTRUCTION,
+                    }));
                 }
+                if edit_recovery_required {
+                    final_answer_requested = false;
+                }
+                code_tool_called = true;
 
                 if validation_required
                     && !validation_attempted
                     && validation_model_prompted
                     && !auto_validation_attempted
+                    && !edit_recovery_required
                 {
                     auto_validation_attempted = true;
                     let validation_ran = code_workspace
@@ -1033,7 +1058,8 @@ async fn openai_responses_completion(
     let client = reqwest::Client::new();
     let can_write = request.can_write.unwrap_or(false);
     let mut code_tool_called = false;
-    let mut code_tool_rounds = 0usize;
+    let mut edit_recovery_required = false;
+    let mut edit_recovery_rounds = 0usize;
     let mut final_answer_requested = false;
     let mut validation_required = false;
     let mut validation_attempted = false;
@@ -1051,7 +1077,11 @@ async fn openai_responses_completion(
         .map(str::to_string);
 
     for _ in 0..MAX_CHAT_COMPLETION_TURNS {
-        let validation_tool_required = validation_required && !validation_attempted;
+        let validation_tool_required = should_require_validation(
+            validation_required,
+            validation_attempted,
+            edit_recovery_required,
+        );
         if validation_tool_required {
             validation_model_prompted = true;
         }
@@ -1061,7 +1091,7 @@ async fn openai_responses_completion(
         } else {
             responses_payload_messages(
                 &request.messages,
-                final_answer_requested && !validation_tool_required,
+                final_answer_requested && !validation_tool_required && !edit_recovery_required,
                 validation_tool_required,
             )
         };
@@ -1069,13 +1099,13 @@ async fn openai_responses_completion(
         if previous_response_id.is_some() {
             if validation_tool_required {
                 input.push(responses_user_message(VALIDATION_REQUIRED_INSTRUCTION));
-            } else if final_answer_requested {
+            } else if final_answer_requested && !edit_recovery_required {
                 input.push(responses_user_message(FINAL_ANSWER_INSTRUCTION));
             }
         }
 
-        let tools_allowed =
-            code_workspace.is_some() && (!final_answer_requested || validation_tool_required);
+        let tools_allowed = code_workspace.is_some()
+            && (!final_answer_requested || validation_tool_required || edit_recovery_required);
         let mut payload = json!({
             "model": request.model,
             "input": input,
@@ -1098,6 +1128,9 @@ async fn openai_responses_completion(
 
         if tools_allowed {
             payload["tools"] = responses_tools_schema(can_write);
+            if edit_recovery_required {
+                payload["tool_choice"] = json!("required");
+            }
         }
 
         let parsed = send_responses_request_maybe_stream(
@@ -1124,6 +1157,8 @@ async fn openai_responses_completion(
 
         if let Some(workspace) = code_workspace.as_ref() {
             if !tool_calls.is_empty() {
+                let mut failed_edit = false;
+                let mut successful_edit = false;
                 for response_tool_call in &tool_calls {
                     let tool_call = response_function_call_to_chat_tool_call(response_tool_call);
                     let call_step = tool_call_trace_step(&tool_call);
@@ -1146,10 +1181,14 @@ async fn openai_responses_completion(
                     if tool_result_succeeded(&tool_result)
                         && is_successful_edit_tool_call(&tool_call)
                     {
+                        successful_edit = true;
                         validation_required = true;
                         validation_attempted = false;
                         validation_model_prompted = false;
                         auto_validation_attempted = false;
+                    }
+                    if failed_edit_requires_recovery(&tool_call, &tool_result) {
+                        failed_edit = true;
                     }
 
                     let result_step = tool_result_trace_step(&tool_call, &tool_result);
@@ -1158,18 +1197,26 @@ async fn openai_responses_completion(
                     pending_input.push(response_tool_output(&tool_call, &tool_result));
                 }
 
-                code_tool_called = true;
-                code_tool_rounds += 1;
-                if code_tool_rounds >= MAX_CODE_TOOL_ROUNDS
-                    && !(validation_required && !validation_attempted)
-                {
-                    final_answer_requested = true;
+                (edit_recovery_required, edit_recovery_rounds) = next_edit_recovery_state(
+                    edit_recovery_required,
+                    edit_recovery_rounds,
+                    failed_edit,
+                    successful_edit,
+                );
+                if failed_edit && edit_recovery_required {
+                    pending_input.push(responses_user_message(EDIT_FAILURE_RECOVERY_INSTRUCTION));
                 }
+                if edit_recovery_required {
+                    final_answer_requested = false;
+                }
+
+                code_tool_called = true;
 
                 if validation_required
                     && !validation_attempted
                     && validation_model_prompted
                     && !auto_validation_attempted
+                    && !edit_recovery_required
                 {
                     auto_validation_attempted = true;
                     let validation_outputs = run_default_validation_commands_for_responses(
@@ -1261,13 +1308,14 @@ fn chat_tool_choice(
     is_deepseek: bool,
     deepseek_thinking: bool,
     validation_tool_required: bool,
+    edit_recovery_required: bool,
     code_tool_called: bool,
 ) -> Option<Value> {
     if deepseek_thinking {
         return None;
     }
 
-    Some(if validation_tool_required {
+    Some(if validation_tool_required || edit_recovery_required {
         json!("required")
     } else if is_deepseek && !code_tool_called {
         json!("required")
@@ -1578,6 +1626,45 @@ fn is_successful_edit_tool_call(tool_call: &Value) -> bool {
         "run_command" => run_command_looks_mutating(&tool_call_arguments(tool_call)),
         _ => false,
     }
+}
+
+fn failed_edit_requires_recovery(tool_call: &Value, tool_result: &Value) -> bool {
+    is_successful_edit_tool_call(tool_call) && !tool_result_succeeded(tool_result)
+}
+
+fn next_edit_recovery_state(
+    currently_required: bool,
+    current_rounds: usize,
+    failed_edit: bool,
+    successful_edit: bool,
+) -> (bool, usize) {
+    if failed_edit {
+        let rounds = if currently_required {
+            current_rounds.saturating_add(1)
+        } else {
+            0
+        };
+        return (rounds < MAX_EDIT_RECOVERY_TOOL_ROUNDS, rounds);
+    }
+
+    if successful_edit {
+        return (false, 0);
+    }
+
+    if currently_required {
+        let rounds = current_rounds.saturating_add(1);
+        return (rounds < MAX_EDIT_RECOVERY_TOOL_ROUNDS, rounds);
+    }
+
+    (false, 0)
+}
+
+fn should_require_validation(
+    validation_required: bool,
+    validation_attempted: bool,
+    edit_recovery_required: bool,
+) -> bool {
+    validation_required && !validation_attempted && !edit_recovery_required
 }
 
 fn run_command_looks_mutating(arguments: &Value) -> bool {
@@ -2732,8 +2819,8 @@ mod tests {
     }
 
     #[test]
-    fn chat_turn_budget_leaves_room_for_final_answer_after_tools() {
-        assert!(MAX_CHAT_COMPLETION_TURNS > MAX_CODE_TOOL_ROUNDS);
+    fn chat_completion_turn_guard_allows_multiple_tool_rounds() {
+        assert!(MAX_CHAT_COMPLETION_TURNS >= 16);
     }
 
     #[test]
@@ -2788,18 +2875,18 @@ mod tests {
 
     #[test]
     fn deepseek_thinking_omits_tool_choice() {
-        assert_eq!(chat_tool_choice(true, true, false, false), None);
-        assert_eq!(chat_tool_choice(true, true, true, false), None);
+        assert_eq!(chat_tool_choice(true, true, false, false, false), None);
+        assert_eq!(chat_tool_choice(true, true, true, false, false), None);
     }
 
     #[test]
     fn deepseek_without_thinking_can_still_force_first_tool_call() {
         assert_eq!(
-            chat_tool_choice(true, false, false, false),
+            chat_tool_choice(true, false, false, false, false),
             Some(json!("required"))
         );
         assert_eq!(
-            chat_tool_choice(true, false, false, true),
+            chat_tool_choice(true, false, false, false, true),
             Some(json!("auto"))
         );
     }
@@ -2807,13 +2894,62 @@ mod tests {
     #[test]
     fn validation_tool_choice_takes_priority_when_supported() {
         assert_eq!(
-            chat_tool_choice(true, false, true, true),
+            chat_tool_choice(true, false, true, false, true),
             Some(json!("required"))
         );
         assert_eq!(
-            chat_tool_choice(false, false, true, true),
+            chat_tool_choice(false, false, true, false, true),
             Some(json!("required"))
         );
+    }
+
+    #[test]
+    fn failed_edit_tool_result_requests_recovery() {
+        let tool_call = json!({
+            "function": {
+                "name": "apply_patch",
+                "arguments": "{\"patchText\":\"diff --git a/a b/a\"}"
+            }
+        });
+        let failed_result = json!({
+            "role": "tool",
+            "content": "Tool apply_patch failed: git apply failed: patch does not apply"
+        });
+        let successful_result = json!({
+            "role": "tool",
+            "content": "Patch applied to files:\na"
+        });
+
+        assert!(failed_edit_requires_recovery(&tool_call, &failed_result));
+        assert!(!failed_edit_requires_recovery(
+            &tool_call,
+            &successful_result
+        ));
+    }
+
+    #[test]
+    fn edit_recovery_forces_the_next_supported_tool_call() {
+        assert_eq!(
+            chat_tool_choice(false, false, false, true, true),
+            Some(json!("required"))
+        );
+    }
+
+    #[test]
+    fn edit_recovery_persists_through_reads_and_clears_after_a_successful_edit() {
+        assert_eq!(next_edit_recovery_state(false, 0, true, false), (true, 0));
+        assert_eq!(next_edit_recovery_state(true, 0, false, false), (true, 1));
+        assert_eq!(next_edit_recovery_state(true, 1, false, true), (false, 0));
+        assert_eq!(
+            next_edit_recovery_state(true, MAX_EDIT_RECOVERY_TOOL_ROUNDS - 1, false, false,),
+            (false, MAX_EDIT_RECOVERY_TOOL_ROUNDS)
+        );
+    }
+
+    #[test]
+    fn edit_recovery_takes_priority_over_validation() {
+        assert!(!should_require_validation(true, false, true));
+        assert!(should_require_validation(true, false, false));
     }
 
     #[test]
@@ -2994,7 +3130,7 @@ mod tests {
         assert!(!payload_messages[1]["content"]
             .as_str()
             .unwrap()
-            .contains("Do not request more tool calls"));
+            .contains(FINAL_ANSWER_INSTRUCTION));
     }
 
     #[test]

@@ -14,6 +14,7 @@ use crate::{message_content_text, ChatTraceStep};
 
 const TRACE_STEP_TEXT_LIMIT: usize = 280;
 const TOOL_TRACE_DETAIL_LIMIT: usize = 6000;
+const APPLY_PATCH_TRACE_DETAIL_LIMIT: usize = 128 * 1024;
 const COMMAND_STREAM_CHUNK_SIZE: usize = 4096;
 
 pub(crate) type ToolStreamSink<'a> = dyn FnMut(ChatTraceStep) + 'a;
@@ -71,10 +72,19 @@ pub(crate) struct InspectCodeWorkspaceResponse {
 }
 
 fn trace_step_with_detail(kind: &str, text: String, detail: String) -> ChatTraceStep {
+    trace_step_with_detail_limit(kind, text, detail, TOOL_TRACE_DETAIL_LIMIT)
+}
+
+fn trace_step_with_detail_limit(
+    kind: &str,
+    text: String,
+    detail: String,
+    detail_limit: usize,
+) -> ChatTraceStep {
     ChatTraceStep {
         kind: kind.to_string(),
         text,
-        detail: Some(truncate_text(detail, TOOL_TRACE_DETAIL_LIMIT)),
+        detail: Some(truncate_text(detail, detail_limit)),
     }
 }
 
@@ -86,10 +96,45 @@ fn parsed_tool_arguments(function: &Value) -> Value {
 
     if let Some(arguments_text) = arguments.as_str() {
         serde_json::from_str::<Value>(arguments_text)
+            .or_else(|_| {
+                serde_json::from_str::<Value>(&normalize_json_smart_quotes(arguments_text))
+            })
             .unwrap_or_else(|_| Value::String(arguments_text.to_string()))
     } else {
         arguments
     }
+}
+
+fn normalize_json_smart_quotes(text: &str) -> String {
+    let mut normalized = String::with_capacity(text.len());
+    let mut in_ascii_string = false;
+    let mut escaped = false;
+
+    for ch in text.chars() {
+        if in_ascii_string {
+            normalized.push(ch);
+
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_ascii_string = false;
+            }
+            continue;
+        }
+
+        match ch {
+            '"' => {
+                in_ascii_string = true;
+                normalized.push(ch);
+            }
+            '\u{201c}' | '\u{201d}' => normalized.push('"'),
+            _ => normalized.push(ch),
+        }
+    }
+
+    normalized
 }
 
 fn compact_trace_json(value: &Value) -> String {
@@ -137,7 +182,13 @@ pub(crate) fn tool_call_trace_step(tool_call: &Value) -> ChatTraceStep {
         pretty_trace_json(&arguments)
     );
 
-    trace_step_with_detail("tool", text, detail)
+    let detail_limit = if name == "apply_patch" {
+        APPLY_PATCH_TRACE_DETAIL_LIMIT
+    } else {
+        TOOL_TRACE_DETAIL_LIMIT
+    };
+
+    trace_step_with_detail_limit("tool", text, detail, detail_limit)
 }
 
 pub(crate) fn tool_result_trace_step(tool_call: &Value, tool_message: &Value) -> ChatTraceStep {
@@ -444,13 +495,13 @@ pub(crate) fn code_tools_schema(strict: bool, allow_writes: bool) -> Value {
         finalize_tool_function(
             json!({
                 "name": "apply_patch",
-                "description": "Apply a unified diff patch inside the workspace. Use checkOnly=true to validate without changing files.",
+                "description": "Apply a unified diff patch inside the workspace. Keep each call focused on one file and one coherent change; split large edits across multiple calls instead of rewriting a whole file. Every hunk body line must start with ' ', '+', '-', or '\\'. Hunk line counts must match the body. Use checkOnly=true to validate without changing files.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "patchText": {
                             "type": "string",
-                            "description": "Unified diff text accepted by git apply."
+                            "description": "Unified diff text accepted by git apply. Context lines require a leading marker space before their source indentation."
                         },
                         "checkOnly": {
                             "type": "boolean",
@@ -1131,11 +1182,10 @@ fn apply_patch_tool(workspace: &Path, arguments: &Value) -> Result<String, Strin
     let patch_text = arguments
         .get("patchText")
         .and_then(Value::as_str)
-        .unwrap_or("")
-        .trim();
+        .unwrap_or("");
     let check_only = tool_arg_bool(arguments, "checkOnly", false);
 
-    if patch_text.is_empty() {
+    if patch_text.trim().is_empty() {
         return Err("apply_patch requires patchText.".to_string());
     }
 
@@ -1145,13 +1195,7 @@ fn apply_patch_tool(workspace: &Path, arguments: &Value) -> Result<String, Strin
         files: Vec::new(),
     };
     let applied_files = collect_patch_files(&request)?;
-    let patch_file = write_temp_patch(patch_text)?;
-    let check_result = run_git_apply(workspace, &patch_file, true);
-
-    if let Err(error) = check_result {
-        let _ = fs::remove_file(&patch_file);
-        return Err(error);
-    }
+    let (patch_file, normalized) = prepare_checked_patch(workspace, patch_text)?;
 
     if check_only {
         let _ = fs::remove_file(&patch_file);
@@ -1161,8 +1205,9 @@ fn apply_patch_tool(workspace: &Path, arguments: &Value) -> Result<String, Strin
         ));
     }
 
-    let (stdout, stderr) = run_git_apply(workspace, &patch_file, false)?;
+    let apply_result = run_git_apply(workspace, &patch_file, false);
     let _ = fs::remove_file(&patch_file);
+    let (stdout, stderr) = apply_result?;
     let output = [stdout.trim(), stderr.trim()]
         .into_iter()
         .filter(|part| !part.is_empty())
@@ -1170,8 +1215,13 @@ fn apply_patch_tool(workspace: &Path, arguments: &Value) -> Result<String, Strin
         .join("\n");
 
     Ok(format!(
-        "Patch applied to files:\n{}\n{}",
+        "Patch applied to files:\n{}\n{}{}",
         applied_files.join("\n"),
+        if normalized {
+            "Patch format was normalized before applying (missing context markers and/or incorrect hunk counts were repaired).\n"
+        } else {
+            ""
+        },
         if output.is_empty() {
             "git apply produced no output.".to_string()
         } else {
@@ -1898,15 +1948,200 @@ fn write_temp_patch(patch_text: &str) -> Result<PathBuf, String> {
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| format!("Failed to create temporary patch name: {}", error))?
-        .as_millis();
-    let path = std::env::temp_dir().join(format!("matrixofprescience-{}.patch", stamp));
-    let mut file = fs::File::create(&path)
-        .map_err(|error| format!("Failed to create temporary patch: {}", error))?;
+        .as_nanos();
+    let process_id = std::process::id();
 
-    file.write_all(patch_text.as_bytes())
-        .map_err(|error| format!("Failed to write temporary patch: {}", error))?;
+    for attempt in 0..100_u8 {
+        let path = std::env::temp_dir().join(format!(
+            "matrixofprescience-{}-{}-{}.patch",
+            process_id, stamp, attempt
+        ));
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path);
 
-    Ok(path)
+        match file {
+            Ok(mut file) => {
+                file.write_all(patch_text.as_bytes())
+                    .map_err(|error| format!("Failed to write temporary patch: {}", error))?;
+                return Ok(path);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => return Err(format!("Failed to create temporary patch: {}", error)),
+        }
+    }
+
+    Err("Failed to create a unique temporary patch after 100 attempts.".to_string())
+}
+
+fn parse_hunk_header(line: &str) -> Result<(&str, &str, &str), String> {
+    let rest = line
+        .strip_prefix("@@ -")
+        .ok_or_else(|| format!("Invalid unified diff hunk header: {}", line))?;
+    let (old_range, rest) = rest
+        .split_once(" +")
+        .ok_or_else(|| format!("Invalid unified diff hunk header: {}", line))?;
+    let (new_range, suffix) = rest
+        .split_once(" @@")
+        .ok_or_else(|| format!("Invalid unified diff hunk header: {}", line))?;
+    let old_start = old_range.split(',').next().unwrap_or_default();
+    let new_start = new_range.split(',').next().unwrap_or_default();
+
+    if old_start.parse::<u64>().is_err() || new_start.parse::<u64>().is_err() {
+        return Err(format!("Invalid unified diff hunk header: {}", line));
+    }
+
+    Ok((old_start, new_start, suffix))
+}
+
+fn is_hunk_boundary(line: &str) -> bool {
+    line.starts_with("@@ -") || line.starts_with("diff --git ")
+}
+
+fn normalize_patch_metadata_line(line: &str) -> Option<String> {
+    for dash in ["\u{2013}", "\u{2014}", "\u{2015}", "\u{2212}"] {
+        if let Some(path) = line.strip_prefix(&format!("{} ", dash)) {
+            if path.starts_with("a/") || path == "/dev/null" {
+                return Some(format!("--- {}", path));
+            }
+        }
+    }
+
+    None
+}
+
+fn normalize_relaxed_unified_diff(patch_text: &str) -> Result<String, String> {
+    let normalized_line_endings = patch_text.replace("\r\n", "\n").replace('\r', "\n");
+    let lines: Vec<&str> = normalized_line_endings.lines().collect();
+    let mut output = String::with_capacity(normalized_line_endings.len() + lines.len());
+    let mut index = 0;
+    let mut hunk_count = 0;
+
+    while index < lines.len() {
+        let line = lines[index];
+        if !line.starts_with("@@ -") {
+            if let Some(normalized_line) = normalize_patch_metadata_line(line) {
+                output.push_str(&normalized_line);
+            } else {
+                output.push_str(line);
+            }
+            output.push('\n');
+            index += 1;
+            continue;
+        }
+
+        let (old_start, new_start, suffix) = parse_hunk_header(line)?;
+        let body_start = index + 1;
+        let mut body_end = body_start;
+        let mut old_count = 0_u64;
+        let mut new_count = 0_u64;
+
+        while body_end < lines.len() && !is_hunk_boundary(lines[body_end]) {
+            match lines[body_end].as_bytes().first().copied() {
+                Some(b' ') => {
+                    old_count += 1;
+                    new_count += 1;
+                }
+                Some(b'-') => old_count += 1,
+                Some(b'+') => new_count += 1,
+                Some(b'\\') => {}
+                _ => {
+                    old_count += 1;
+                    new_count += 1;
+                }
+            }
+            body_end += 1;
+        }
+
+        if body_start == body_end {
+            return Err(format!("Unified diff hunk has no body: {}", line));
+        }
+
+        output.push_str(&format!(
+            "@@ -{},{} +{},{} @@{}\n",
+            old_start, old_count, new_start, new_count, suffix
+        ));
+        for body_line in &lines[body_start..body_end] {
+            match body_line.as_bytes().first().copied() {
+                Some(b' ') | Some(b'-') | Some(b'+') | Some(b'\\') => {}
+                _ => output.push(' '),
+            }
+            output.push_str(body_line);
+            output.push('\n');
+        }
+
+        hunk_count += 1;
+        index = body_end;
+    }
+
+    if hunk_count == 0 {
+        return Err("No unified diff hunks were found to normalize.".to_string());
+    }
+
+    Ok(output)
+}
+
+fn git_apply_error_allows_normalization(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    [
+        "corrupt patch",
+        "patch fragment without header",
+        "patch with only garbage",
+        "unrecognized input",
+    ]
+    .iter()
+    .any(|message| lower.contains(message))
+}
+
+fn prepare_checked_patch(workspace: &Path, patch_text: &str) -> Result<(PathBuf, bool), String> {
+    let patch_file = write_temp_patch(patch_text)?;
+    let original_error = match run_git_apply(workspace, &patch_file, true) {
+        Ok(_) => return Ok((patch_file, false)),
+        Err(error) => error,
+    };
+
+    if !git_apply_error_allows_normalization(&original_error) {
+        let _ = fs::remove_file(&patch_file);
+        return Err(original_error);
+    }
+
+    let normalized = match normalize_relaxed_unified_diff(patch_text) {
+        Ok(normalized) if normalized != patch_text => normalized,
+        Ok(_) => {
+            let _ = fs::remove_file(&patch_file);
+            return Err(format!(
+                "{}\nThe patch is structurally corrupt and no safe normalization was available.",
+                original_error
+            ));
+        }
+        Err(normalize_error) => {
+            let _ = fs::remove_file(&patch_file);
+            return Err(format!(
+                "{}\nAutomatic patch normalization failed: {}",
+                original_error, normalize_error
+            ));
+        }
+    };
+
+    if let Err(error) = fs::write(&patch_file, normalized.as_bytes()) {
+        let _ = fs::remove_file(&patch_file);
+        return Err(format!(
+            "Failed to write normalized temporary patch: {}",
+            error
+        ));
+    }
+
+    match run_git_apply(workspace, &patch_file, true) {
+        Ok(_) => Ok((patch_file, true)),
+        Err(normalized_error) => {
+            let _ = fs::remove_file(&patch_file);
+            Err(format!(
+                "{}\nThe patch format was normalized, but git still rejected it: {}",
+                original_error, normalized_error
+            ))
+        }
+    }
 }
 
 fn run_git_apply(
@@ -1947,17 +2182,16 @@ pub(crate) async fn apply_patch_proposal(
     request: ApplyPatchRequest,
 ) -> Result<ApplyPatchResponse, String> {
     let workspace = validate_workspace(&request.workspace_path)?;
-    let patch_text = request.patch_text.trim();
+    let patch_text = request.patch_text.as_str();
 
-    if patch_text.is_empty() {
+    if patch_text.trim().is_empty() {
         return Err("Patch content cannot be empty.".to_string());
     }
 
     let applied_files = collect_patch_files(&request)?;
-    let patch_file = write_temp_patch(patch_text)?;
+    let (patch_file, _) = prepare_checked_patch(&workspace, patch_text)?;
 
     let result = (|| {
-        run_git_apply(&workspace, &patch_file, true)?;
         let (stdout, stderr) = run_git_apply(&workspace, &patch_file, false)?;
 
         Ok(ApplyPatchResponse {
@@ -1974,6 +2208,247 @@ pub(crate) async fn apply_patch_proposal(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn apply_patch_trace_keeps_details_beyond_the_default_tool_limit() {
+        let patch_text = format!(
+            "diff --git a/src/example.cpp b/src/example.cpp\n--- a/src/example.cpp\n+++ b/src/example.cpp\n@@ -1 +1 @@\n-{}\n+{}\n",
+            "a".repeat(TOOL_TRACE_DETAIL_LIMIT),
+            "b".repeat(TOOL_TRACE_DETAIL_LIMIT)
+        );
+        let tool_call = json!({
+            "function": {
+                "name": "apply_patch",
+                "arguments": serde_json::to_string(&json!({ "patchText": patch_text })).unwrap()
+            }
+        });
+
+        let step = tool_call_trace_step(&tool_call);
+        let detail = step.detail.unwrap();
+
+        assert!(detail.contains(&"b".repeat(TOOL_TRACE_DETAIL_LIMIT)));
+        assert!(!detail.contains("[Content truncated]"));
+    }
+
+    #[test]
+    fn parses_smart_quoted_tool_argument_keys_without_changing_patch_content() {
+        let function = json!({
+            "arguments": "{\u{201c}patchText\u{201d}:\"const label = \u{201c}保留正文引号\u{201d};\"}"
+        });
+
+        let arguments = parsed_tool_arguments(&function);
+
+        assert_eq!(
+            arguments["patchText"],
+            json!("const label = \u{201c}保留正文引号\u{201d};")
+        );
+    }
+
+    #[test]
+    fn normalizes_relaxed_unified_diff_context_and_hunk_counts() {
+        let malformed = concat!(
+            "diff --git a/src/example.cpp b/src/example.cpp\n",
+            "\u{2014} a/src/example.cpp\n",
+            "+++ b/src/example.cpp\n",
+            "@@ -20,7 +20,9 @@ public:\n",
+            "\tfirst_context();\n",
+            "-\told_call();\n",
+            "+\tnew_call();\n",
+            "\tlast_context();\n",
+        );
+
+        let normalized = normalize_relaxed_unified_diff(malformed).unwrap();
+
+        assert_eq!(
+            normalized,
+            concat!(
+                "diff --git a/src/example.cpp b/src/example.cpp\n",
+                "--- a/src/example.cpp\n",
+                "+++ b/src/example.cpp\n",
+                "@@ -20,3 +20,3 @@ public:\n",
+                " \tfirst_context();\n",
+                "-\told_call();\n",
+                "+\tnew_call();\n",
+                " \tlast_context();\n",
+            )
+        );
+    }
+
+    #[test]
+    fn normalizes_unicode_dash_in_the_old_file_header() {
+        let malformed = concat!(
+            "diff --git a/src/example.cpp b/src/example.cpp\n",
+            "\u{2014} a/src/example.cpp\n",
+            "+++ b/src/example.cpp\n",
+            "@@ -1 +1 @@\n",
+            "-old_call();\n",
+            "+new_call();\n",
+        );
+
+        let normalized = normalize_relaxed_unified_diff(malformed).unwrap();
+
+        assert_eq!(
+            normalized,
+            concat!(
+                "diff --git a/src/example.cpp b/src/example.cpp\n",
+                "--- a/src/example.cpp\n",
+                "+++ b/src/example.cpp\n",
+                "@@ -1,1 +1,1 @@\n",
+                "-old_call();\n",
+                "+new_call();\n",
+            )
+        );
+    }
+
+    #[test]
+    fn leaves_valid_unified_diff_unchanged() {
+        let valid = concat!(
+            "diff --git a/src/example.cpp b/src/example.cpp\n",
+            "--- a/src/example.cpp\n",
+            "+++ b/src/example.cpp\n",
+            "@@ -20,3 +20,3 @@ public:\n",
+            " \tfirst_context();\n",
+            "-\told_call();\n",
+            "+\tnew_call();\n",
+            " \tlast_context();\n",
+        );
+
+        assert_eq!(normalize_relaxed_unified_diff(valid).unwrap(), valid);
+    }
+
+    #[test]
+    fn apply_patch_repairs_model_generated_diff_before_applying() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("matrix-patch-repair-test-{}", stamp));
+        let source_dir = workspace.join("src");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("example.cpp"),
+            "\tfirst_context();\n\told_call();\n\tlast_context();\n",
+        )
+        .unwrap();
+        let workspace = fs::canonicalize(&workspace).unwrap();
+        let malformed = concat!(
+            "diff --git a/src/example.cpp b/src/example.cpp\n",
+            "\u{2014} a/src/example.cpp\n",
+            "+++ b/src/example.cpp\n",
+            "@@ -1,7 +1,9 @@\n",
+            "\tfirst_context();\n",
+            "-\told_call();\n",
+            "+\tnew_call();\n",
+            "\tlast_context();\n",
+        );
+
+        let result = apply_patch_tool(
+            &workspace,
+            &json!({
+                "patchText": malformed
+            }),
+        )
+        .unwrap();
+
+        assert!(result.contains("Patch format was normalized"));
+        assert_eq!(
+            fs::read_to_string(source_dir.join("example.cpp"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "\tfirst_context();\n\tnew_call();\n\tlast_context();\n"
+        );
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn apply_patch_preserves_a_valid_trailing_newline() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("matrix-patch-newline-test-{}", stamp));
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::write(workspace.join("src/example.cpp"), "old_call();\n").unwrap();
+        let workspace = fs::canonicalize(&workspace).unwrap();
+        let valid = concat!(
+            "diff --git a/src/example.cpp b/src/example.cpp\n",
+            "--- a/src/example.cpp\n",
+            "+++ b/src/example.cpp\n",
+            "@@ -1 +1 @@\n",
+            "-old_call();\n",
+            "+new_call();\n",
+        );
+
+        let result = apply_patch_tool(
+            &workspace,
+            &json!({
+                "patchText": valid
+            }),
+        )
+        .unwrap();
+
+        assert!(!result.contains("Patch format was normalized"));
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/example.cpp"))
+                .unwrap()
+                .replace("\r\n", "\n"),
+            "new_call();\n"
+        );
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
+
+    #[test]
+    fn temporary_patch_files_are_unique_and_preserve_bytes() {
+        let patch = "diff --git a/a b/a\n";
+        let first = write_temp_patch(patch).unwrap();
+        let second = write_temp_patch(patch).unwrap();
+
+        assert_ne!(first, second);
+        assert_eq!(fs::read(&first).unwrap(), patch.as_bytes());
+        assert_eq!(fs::read(&second).unwrap(), patch.as_bytes());
+
+        let _ = fs::remove_file(first);
+        let _ = fs::remove_file(second);
+    }
+
+    #[test]
+    fn apply_patch_does_not_normalize_content_conflicts() {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let workspace = std::env::temp_dir().join(format!("matrix-patch-conflict-test-{}", stamp));
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::write(workspace.join("src/example.cpp"), "actual();\n").unwrap();
+        let workspace = fs::canonicalize(&workspace).unwrap();
+        let valid_but_conflicting = concat!(
+            "diff --git a/src/example.cpp b/src/example.cpp\n",
+            "--- a/src/example.cpp\n",
+            "+++ b/src/example.cpp\n",
+            "@@ -1 +1 @@\n",
+            "-expected();\n",
+            "+changed();\n",
+        );
+
+        let error = apply_patch_tool(
+            &workspace,
+            &json!({
+                "patchText": valid_but_conflicting
+            }),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("patch does not apply"));
+        assert!(!error.contains("normalized"));
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/example.cpp")).unwrap(),
+            "actual();\n"
+        );
+
+        let _ = fs::remove_dir_all(&workspace);
+    }
 
     #[test]
     fn run_command_streams_output_before_process_exit() {

@@ -771,45 +771,8 @@ function getMessageTimeline(message: ChatMessage): MessageTimelineEntry[] {
   });
 }
 
-function hasExecutionItems(message: ChatMessage) {
-  return getExecutionItems(message).length > 0;
-}
-
-function shouldShowExecutionToggle(message: ChatMessage) {
-  return message.role === "assistant" && (message.status === "thinking" || hasExecutionItems(message));
-}
-
-function getExecutionCount(message: ChatMessage) {
-  return getExecutionSegments(message).length;
-}
-
-function isExecutionOpen(message: ChatMessage) {
-  return getExecutionSegments(message).some((segment) => isExecutionSegmentOpen(message, segment));
-}
-
 function isExecutionSegmentOpen(message: ChatMessage, segment: ExecutionRenderSegment) {
   return executionSegmentOpen.value[segment.id] ?? message.status === "thinking";
-}
-
-function setExecutionSegmentsOpen(message: ChatMessage, open: boolean) {
-  const nextOpenState = { ...executionSegmentOpen.value };
-  let changed = false;
-
-  for (const segment of getExecutionSegments(message)) {
-    if (nextOpenState[segment.id] !== open) {
-      nextOpenState[segment.id] = open;
-      changed = true;
-    }
-  }
-
-  if (changed) {
-    executionSegmentOpen.value = nextOpenState;
-    scheduleFollowScroll();
-  }
-}
-
-function toggleExecutionPanel(message: ChatMessage) {
-  setExecutionSegmentsOpen(message, !isExecutionOpen(message));
 }
 
 function collapseExecutionPanel(messageId: string) {
@@ -837,10 +800,6 @@ function collapseExecutionPanel(messageId: string) {
     executionSegmentOpen.value = nextOpenState;
     scheduleFollowScroll(true);
   }
-}
-
-function getExecutionToggleLabel(message: ChatMessage) {
-  return isExecutionOpen(message) ? t("chat.execution.collapse") : t("chat.execution.expand");
 }
 
 function toggleExecutionSegment(message: ChatMessage, segment: ExecutionRenderSegment) {
@@ -1359,23 +1318,6 @@ defineExpose({
               </div>
             </div>
             <div class="message-meta-actions">
-              <el-button
-                v-if="shouldShowExecutionToggle(message)"
-                class="execution-toggle"
-                :class="{ open: isExecutionOpen(message) }"
-                :icon="Tools"
-                size="small"
-                type="success"
-                :plain="!isExecutionOpen(message)"
-                :data-count="getExecutionCount(message)"
-                :data-label="`${getExecutionToggleLabel(message)} · ${getExecutionCount(message)}`"
-                :title="getExecutionToggleLabel(message)"
-                :aria-label="`${getExecutionToggleLabel(message)} · ${getExecutionCount(message)}`"
-                :aria-expanded="isExecutionOpen(message)"
-                @click="toggleExecutionPanel(message)"
-              >
-                {{ t("chat.execution.title") }} · {{ getExecutionCount(message) }}
-              </el-button>
               <span class="status-pill" :class="message.status">
                 {{ statusText[message.status] }}
               </span>
@@ -1737,34 +1679,6 @@ defineExpose({
   align-items: center;
   gap: 8px;
   margin-left: auto;
-}
-
-.execution-toggle {
-  height: 28px;
-  border-color: #b9d8c7;
-  border-radius: 999px;
-  padding: 5px 9px;
-  color: #256b50;
-  background: #eef8f2;
-  font-weight: 800;
-  box-shadow: 0 4px 10px rgba(47, 122, 97, 0.1);
-}
-
-.execution-toggle.open {
-  color: #ffffff;
-  background: #2f7a61;
-}
-
-.execution-toggle::after {
-  content: attr(title) " (" attr(data-count) ")";
-}
-
-.execution-toggle :deep(.el-icon) {
-  font-size: 13px;
-}
-
-.execution-toggle :deep(> span) {
-  display: none;
 }
 
 .message-status-bar {

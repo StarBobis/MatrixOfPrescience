@@ -179,6 +179,7 @@ const ACTIVITY_ITEM_DETAIL_LIMIT = 6000;
 const EXECUTION_ITEM_LIMIT = 160;
 const EXECUTION_ITEM_TEXT_LIMIT = 1200;
 const EXECUTION_ITEM_DETAIL_LIMIT = 6000;
+const APPLY_PATCH_EXECUTION_DETAIL_LIMIT = 128 * 1024;
 const PERSIST_DEBOUNCE_MS = 800;
 let pendingPersistTimer: number | undefined;
 
@@ -464,6 +465,10 @@ function isCommandOutputExecutionItem(item: ChatMessageExecutionItem) {
   return item.kind === "tool" && (detail.includes("[stdout]") || detail.includes("[stderr]"));
 }
 
+function isApplyPatchExecutionItem(item: ChatMessageExecutionItem) {
+  return item.kind === "tool" && item.text.trimStart().startsWith("apply_patch ");
+}
+
 function toPersistedMessage(message: ChatMessage, mode: Exclude<PersistenceMode, "minimal">) {
   const contentLimit =
     mode === "normal" ? NORMAL_MESSAGE_CONTENT_LIMIT : COMPACT_MESSAGE_CONTENT_LIMIT;
@@ -489,6 +494,8 @@ function toPersistedMessage(message: ChatMessage, mode: Exclude<PersistenceMode,
       detail: item.detail
         ? mode === "normal" && isCommandOutputExecutionItem(item)
           ? item.detail
+          : mode === "normal" && isApplyPatchExecutionItem(item)
+            ? truncateText(item.detail, APPLY_PATCH_EXECUTION_DETAIL_LIMIT)
           : truncateText(item.detail, EXECUTION_ITEM_DETAIL_LIMIT)
         : undefined,
     })),
