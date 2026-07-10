@@ -6,12 +6,20 @@ export function buildSystemPrompt(
   group: ChatGroup | undefined,
   extraRules = "",
   codeContext = "",
+  durableContext = "",
 ) {
   const config = group?.agentConfig;
   const workspacePath = group?.workspacePath?.trim();
 
   return [
     group?.announcement.trim(),
+    durableContext
+      ? [
+          "Durable conversation context:",
+          "The following user-provided operating rules remain active even if older chat messages are omitted from the model context.",
+          durableContext,
+        ].join("\n")
+      : "",
     t("agentPrompt.collaborationRule"),
     workspacePath
       ? t("agentPrompt.workspaceSet", { path: workspacePath })

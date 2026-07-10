@@ -159,6 +159,7 @@ const MAX_STREAMING_TRACE_CHUNK_CHARS = 8000;
 const MAX_CONTEXT_EXECUTION_ITEMS = 24;
 const MAX_CONTEXT_EXECUTION_TEXT_CHARS = 700;
 const MAX_CONTEXT_EXECUTION_DETAIL_CHARS = 1400;
+const MAX_DURABLE_CONTEXT_CHARS = 12000;
 const TRACE_TRUNCATED_MARKER = "\n[trace truncated]";
 
 const { t } = useI18n();
@@ -339,9 +340,15 @@ function applyCompletionUsage(messageId: string, usage?: ChatCompletionUsage) {
 function buildUserContextUsageSnapshot(userText: string) {
   const nextConversation = [...buildConversation(), { role: "user" as const, content: userText }];
   const activeLimits = orderedActiveMembers.value.map(getModelContextLimit);
+  const currentDurableContext = isDurableConventionText(userText)
+    ? `User durable rule block pending:\n${limitContextText(userText, MAX_DURABLE_CONTEXT_CHARS)}`
+    : "";
+  const durableContext = [buildDurableConversationContext(), currentDurableContext]
+    .filter(Boolean)
+    .join("\n\n");
 
   return {
-    contextUsedTokens: estimateConversationTokens(nextConversation),
+    contextUsedTokens: estimateConversationTokens(nextConversation, durableContext),
     contextLimitTokens: Math.max(DEFAULT_CONTEXT_LIMIT, ...activeLimits),
   };
 }
@@ -590,6 +597,34 @@ function formatMessageForModel(message: ChatMessage) {
   }
 
   return sections.join("\n\n");
+}
+
+function isDurableConventionMessage(message: ChatMessage) {
+  if (message.role !== "user") {
+    return false;
+  }
+
+  return isDurableConventionText(message.content);
+}
+
+function isDurableConventionText(content: string) {
+  return /接下来的对话|后续对话|遵循如下约定|长期约定|conversation.*conventions?|following.*conventions?|persistent.*instructions?/i.test(
+    content.trim(),
+  );
+}
+
+function buildDurableConversationContext() {
+  const durableMessages = activeMessages.value
+    .filter(isDurableConventionMessage)
+    .map((message) => limitContextText(message.content, MAX_DURABLE_CONTEXT_CHARS));
+
+  if (durableMessages.length === 0) {
+    return "";
+  }
+
+  return durableMessages
+    .map((content, index) => `User durable rule block ${index + 1}:\n${content}`)
+    .join("\n\n");
 }
 
 function buildConversation(excludeMessageIds: string[] = []): ApiChatMessage[] {
@@ -1844,7 +1879,13 @@ async function decideMemberResponse(
       : t("chatRuntime.phaseAfterPeers");
   const conversation = buildConversation();
   const codeToolsEnabled = shouldInspectWorkspace(phaseRule);
-  const systemPrompt = buildSystemPrompt(member, activeGroup.value, phaseRule);
+  const systemPrompt = buildSystemPrompt(
+    member,
+    activeGroup.value,
+    phaseRule,
+    "",
+    buildDurableConversationContext(),
+  );
   const contextUsage = buildContextUsageSnapshot(member, conversation, systemPrompt);
 
   settingsStore.appendPendingMessage({
@@ -1984,7 +2025,13 @@ async function askMember(
     extraRule || t("chatRuntime.responseRule"),
     replyTargetName,
   );
-  const systemPrompt = buildSystemPrompt(member, activeGroup.value, responseRule);
+  const systemPrompt = buildSystemPrompt(
+    member,
+    activeGroup.value,
+    responseRule,
+    "",
+    buildDurableConversationContext(),
+  );
   const contextUsage = buildContextUsageSnapshot(member, conversation, systemPrompt);
 
   upsertSpeakerQueueMember(member, "speaking");
@@ -2146,6 +2193,8 @@ async function voteOnAnswer(
             t("chatRuntime.voteSupplementRule"),
             t("chatRuntime.voteDisagreeRule"),
           ].join("\n"),
+          "",
+          buildDurableConversationContext(),
         ),
         messages: buildConversation(),
       },
