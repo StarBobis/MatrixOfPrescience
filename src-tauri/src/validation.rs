@@ -7,9 +7,9 @@ use crate::{
     ChatTraceStep,
 };
 
-pub(crate) const VALIDATION_REQUIRED_INSTRUCTION: &str = "You changed files in the workspace, so validation must pass before the final visible answer. Call run_command with the most appropriate build, test, type-check, lint, or compile command. Prefer project scripts and manifests already present in the workspace. If validation fails, immediately diagnose the first actionable error, fix its root cause, and rerun validation until it passes. Do not stop at reporting the failure and do not provide a final answer while validation is failing.";
-pub(crate) const VALIDATION_FAILURE_RECOVERY_INSTRUCTION: &str = "The previous build, test, type-check, lint, or compile command failed. Do not stop or summarize the failure as the final answer. Inspect the first actionable error and relevant source, fix the root cause with the available workspace tools, then rerun the appropriate validation command. Continue the repair-and-validate loop until validation passes. Preserve unrelated user changes and do not hide errors by weakening or skipping validation.";
-pub(crate) const VALIDATION_UNAVAILABLE_INSTRUCTION: &str = "No default validation command was detected automatically. Do not provide the final answer yet. Inspect the workspace manifests, build scripts, CI configuration, and documentation to identify the intended build or validation command, then run it. If it fails, fix the root cause and rerun it until it passes. Only stop for a genuine blocker after exhausting the available workspace tools.";
+pub(crate) const VALIDATION_REQUIRED_INSTRUCTION: &str = "You changed files in the workspace, so validation must pass before the final visible answer. Call run_command with the most appropriate build, test, type-check, lint, or compile command. Prefer project scripts and manifests already present in the workspace. If validation fails, immediately diagnose the first actionable error, fix its root cause, and rerun validation until it passes. Once a validation command passes, do not rerun the same command merely to be safe; continue any remaining requested work, or answer if the task is done.";
+pub(crate) const VALIDATION_FAILURE_RECOVERY_INSTRUCTION: &str = "The previous build, test, type-check, lint, or compile command failed. Do not stop or summarize the failure as the final answer. Inspect the first actionable error and relevant source, fix the root cause with the available workspace tools, then rerun the appropriate validation command. Continue the repair-and-validate loop until validation passes. Once it passes, do not repeat the same validation command merely to be safe; continue remaining work or answer if done. Preserve unrelated user changes and do not hide errors by weakening or skipping validation.";
+pub(crate) const VALIDATION_UNAVAILABLE_INSTRUCTION: &str = "No default validation command was detected automatically. Do not provide the final answer yet. Inspect the workspace manifests, build scripts, CI configuration, and documentation to identify the intended build or validation command, then run it. If it fails, fix the root cause and rerun it until it passes. Once validation passes, do not rerun the same command merely to be safe. Only stop for a genuine blocker after exhausting the available workspace tools.";
 
 fn tool_call_name(tool_call: &Value) -> &str {
     tool_call
@@ -33,16 +33,23 @@ fn tool_call_arguments(tool_call: &Value) -> Value {
     }
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct ValidationRun {
     ran: bool,
     succeeded: bool,
+    successful_command_fingerprints: Vec<String>,
 }
 
 impl ValidationRun {
     pub(crate) fn observe_tool_result(&mut self, tool_call: &Value, tool_result: &Value) {
         if is_validation_tool_call(tool_call) {
-            self.record_result(tool_result_succeeded(tool_result));
+            let succeeded = tool_result_succeeded(tool_result);
+            self.record_result(succeeded);
+            if succeeded {
+                if let Some(fingerprint) = validation_tool_fingerprint(tool_call) {
+                    self.successful_command_fingerprints.push(fingerprint);
+                }
+            }
         }
     }
 
@@ -54,12 +61,16 @@ impl ValidationRun {
         self.succeeded &= succeeded;
     }
 
-    pub(crate) fn ran(self) -> bool {
+    pub(crate) fn ran(&self) -> bool {
         self.ran
     }
 
-    pub(crate) fn succeeded(self) -> bool {
+    pub(crate) fn succeeded(&self) -> bool {
         self.ran && self.succeeded
+    }
+
+    fn successful_command_fingerprints(&self) -> &[String] {
+        &self.successful_command_fingerprints
     }
 }
 
@@ -70,6 +81,7 @@ pub(crate) struct ValidationState {
     model_prompted: bool,
     auto_attempted: bool,
     repair_required: bool,
+    successful_command_fingerprints: Vec<String>,
 }
 
 impl ValidationState {
@@ -95,6 +107,7 @@ impl ValidationState {
         self.model_prompted = false;
         self.auto_attempted = false;
         self.repair_required = false;
+        self.successful_command_fingerprints.clear();
     }
 
     pub(crate) fn should_auto_validate(&self, edit_recovery_required: bool) -> bool {
@@ -122,6 +135,12 @@ impl ValidationState {
             if self.required {
                 self.succeeded = true;
             }
+            for fingerprint in run.successful_command_fingerprints() {
+                if !self.successful_command_fingerprints.contains(fingerprint) {
+                    self.successful_command_fingerprints
+                        .push(fingerprint.to_string());
+                }
+            }
             self.repair_required = false;
             return false;
         }
@@ -130,6 +149,25 @@ impl ValidationState {
         self.succeeded = false;
         self.repair_required = true;
         true
+    }
+
+    pub(crate) fn is_redundant_successful_validation(&self, tool_call: &Value) -> bool {
+        self.succeeded
+            && validation_tool_fingerprint(tool_call).is_some_and(|fingerprint| {
+                self.successful_command_fingerprints.contains(&fingerprint)
+            })
+    }
+
+    pub(crate) fn redundant_validation_tool_result(&self, tool_call: &Value) -> Option<Value> {
+        if !self.is_redundant_successful_validation(tool_call) {
+            return None;
+        }
+
+        Some(json!({
+            "role": "tool",
+            "tool_call_id": tool_call.get("id").and_then(Value::as_str).unwrap_or("validation-tool-call"),
+            "content": "Validation already passed for this exact command. Do not rerun the same validation just to be safe; continue any remaining requested work, or provide the final answer if the task is complete.",
+        }))
     }
 
     pub(crate) fn mark_validator_discovery_required(&mut self) {
@@ -186,6 +224,15 @@ pub(crate) fn is_validation_tool_call(tool_call: &Value) -> bool {
         && run_command_looks_like_validation(&tool_call_arguments(tool_call))
 }
 
+fn validation_tool_fingerprint(tool_call: &Value) -> Option<String> {
+    if !is_validation_tool_call(tool_call) {
+        return None;
+    }
+
+    let arguments = tool_call_arguments(tool_call);
+    Some(run_command_fingerprint(&arguments))
+}
+
 fn run_command_text(arguments: &Value) -> String {
     let command = arguments
         .get("command")
@@ -204,6 +251,15 @@ fn run_command_text(arguments: &Value) -> String {
         .unwrap_or_default();
 
     format!("{} {}", command, args).to_ascii_lowercase()
+}
+
+fn run_command_fingerprint(arguments: &Value) -> String {
+    let cwd = arguments
+        .get("cwd")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+
+    format!("{} cwd={}", run_command_text(arguments), cwd).to_ascii_lowercase()
 }
 
 fn run_command_looks_like_validation(arguments: &Value) -> bool {
@@ -466,6 +522,46 @@ mod tests {
         assert!(!state.record_run(successful_run));
         assert!(!state.is_pending());
         assert!(!state.requires_repair());
+    }
+
+    #[test]
+    fn repeated_successful_validation_command_is_redundant_until_next_edit() {
+        let validation_call = json!({
+            "id": "validation-1",
+            "function": {
+                "name": "run_command",
+                "arguments": "{\"command\":\"powershell\",\"args\":[\"-File\",\"scripts/build-cmake.ps1\",\"-Configuration\",\"Debug\"]}"
+            }
+        });
+        let different_validation_call = json!({
+            "id": "validation-2",
+            "function": {
+                "name": "run_command",
+                "arguments": "{\"command\":\"powershell\",\"args\":[\"-File\",\"scripts/build-cmake.ps1\",\"-Configuration\",\"Release\"]}"
+            }
+        });
+        let successful_result = json!({
+            "role": "tool",
+            "content": "exit_code=0\nstdout:\nBuild succeeded"
+        });
+        let mut state = ValidationState::default();
+        state.mark_successful_edit();
+
+        let mut successful_run = ValidationRun::default();
+        successful_run.observe_tool_result(&validation_call, &successful_result);
+        assert!(!state.record_run(successful_run));
+
+        assert!(state.is_redundant_successful_validation(&validation_call));
+        assert!(state
+            .redundant_validation_tool_result(&validation_call)
+            .unwrap()["content"]
+            .as_str()
+            .unwrap()
+            .contains("Validation already passed"));
+        assert!(!state.is_redundant_successful_validation(&different_validation_call));
+
+        state.mark_successful_edit();
+        assert!(!state.is_redundant_successful_validation(&validation_call));
     }
 
     #[test]

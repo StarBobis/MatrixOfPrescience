@@ -969,15 +969,21 @@ async fn chat_completion(
                     let call_step = tool_call_trace_step(tool_call);
                     emit_trace_step(&app, stream_id.as_deref(), &call_step);
                     append_trace_steps(&mut trace_steps, vec![call_step]);
-                    let mut stream_tool_output = |step: ChatTraceStep| {
-                        emit_tool_chunk(&app, stream_id.as_deref(), &step);
+                    let tool_result = if let Some(tool_result) =
+                        validation.redundant_validation_tool_result(tool_call)
+                    {
+                        tool_result
+                    } else {
+                        let mut stream_tool_output = |step: ChatTraceStep| {
+                            emit_tool_chunk(&app, stream_id.as_deref(), &step);
+                        };
+                        execute_code_tool_call(
+                            workspace,
+                            tool_call,
+                            can_write,
+                            Some(&mut stream_tool_output),
+                        )
                     };
-                    let tool_result = execute_code_tool_call(
-                        workspace,
-                        tool_call,
-                        can_write,
-                        Some(&mut stream_tool_output),
-                    );
                     validation_run.observe_tool_result(tool_call, &tool_result);
                     if tool_result_succeeded(&tool_result)
                         && is_successful_edit_tool_call(tool_call)
@@ -1048,7 +1054,7 @@ async fn chat_completion(
                         }));
                         final_answer_requested = false;
                     } else {
-                        final_answer_requested = true;
+                        final_answer_requested = false;
                     }
                 }
                 continue;
@@ -1083,7 +1089,7 @@ async fn chat_completion(
                             }));
                             final_answer_requested = false;
                         } else {
-                            final_answer_requested = true;
+                            final_answer_requested = false;
                         }
                         continue;
                     } else {
@@ -1248,15 +1254,21 @@ async fn openai_responses_completion(
                     emit_trace_step(&app, stream_id.as_deref(), &call_step);
                     append_trace_steps(&mut trace_steps, vec![call_step]);
 
-                    let mut stream_tool_output = |step: ChatTraceStep| {
-                        emit_tool_chunk(&app, stream_id.as_deref(), &step);
+                    let tool_result = if let Some(tool_result) =
+                        validation.redundant_validation_tool_result(&tool_call)
+                    {
+                        tool_result
+                    } else {
+                        let mut stream_tool_output = |step: ChatTraceStep| {
+                            emit_tool_chunk(&app, stream_id.as_deref(), &step);
+                        };
+                        execute_code_tool_call(
+                            workspace,
+                            &tool_call,
+                            can_write,
+                            Some(&mut stream_tool_output),
+                        )
                     };
-                    let tool_result = execute_code_tool_call(
-                        workspace,
-                        &tool_call,
-                        can_write,
-                        Some(&mut stream_tool_output),
-                    );
 
                     validation_run.observe_tool_result(&tool_call, &tool_result);
                     if tool_result_succeeded(&tool_result)
@@ -1323,7 +1335,7 @@ async fn openai_responses_completion(
                             ));
                             final_answer_requested = false;
                         } else {
-                            final_answer_requested = true;
+                            final_answer_requested = false;
                         }
                     }
                 }
@@ -1356,7 +1368,7 @@ async fn openai_responses_completion(
                                 ));
                                 final_answer_requested = false;
                             } else {
-                                final_answer_requested = true;
+                                final_answer_requested = false;
                             }
                             continue;
                         }
