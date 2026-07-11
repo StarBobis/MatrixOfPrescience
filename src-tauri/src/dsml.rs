@@ -117,8 +117,7 @@ fn dsml_attr_bool(attrs: &[(String, String)], key: &str) -> bool {
 
 /// Try to find a DSML tag starting at `from` in `content`.
 ///
-/// Recognises both `<DSML | ` (ASCII pipe) and `<DSML \u{FF5C} ` (fullwidth pipe)
-/// opening/closing tag prefixes, with optional whitespace around the delimiter.
+/// Recognises legacy `<DSML | ...>` tags and native `<｜｜DSML｜｜...>` tags.
 fn next_dsml_tag(content: &str, from: usize) -> Option<DsmlTag> {
     let mut search_from = from;
 
@@ -127,52 +126,50 @@ fn next_dsml_tag(content: &str, from: usize) -> Option<DsmlTag> {
         let start = search_from + relative_start;
         let remaining = &content[start..];
 
-        // Detect opening or closing tag: "<DSML" or "</DSML"
-        let closing = remaining.starts_with("</DSML");
-        if !closing && !remaining.starts_with("<DSML") {
+        let prefix = if remaining.starts_with("</｜｜DSML｜｜") {
+            Some((true, "</｜｜DSML｜｜".len(), false))
+        } else if remaining.starts_with("<｜｜DSML｜｜") {
+            Some((false, "<｜｜DSML｜｜".len(), false))
+        } else if remaining.starts_with("</DSML") {
+            Some((true, "</DSML".len(), true))
+        } else if remaining.starts_with("<DSML") {
+            Some((false, "<DSML".len(), true))
+        } else {
+            None
+        };
+
+        let Some((closing, prefix_len, requires_pipe_delimiter)) = prefix else {
             search_from = start + '<'.len_utf8();
             continue;
-        }
-
-        let prefix_len = if closing {
-            "</DSML".len()
-        } else {
-            "<DSML".len()
         };
         let after_prefix = &content[start + prefix_len..];
-
-        // Consume optional whitespace, then the pipe delimiter (ASCII | or fullwidth \u{FF5C}),
-        // then optional whitespace again.  Compute the byte offset past the delimiter.
-        let mut chars = after_prefix.chars();
         let mut skip = 0usize;
 
-        // optional whitespace before delimiter
-        for ch in chars.by_ref() {
-            if !ch.is_whitespace() {
-                // put-back: this is the delimiter (or something else)
-                let is_pipe = ch == '|' || ch == '\u{FF5C}';
-                if !is_pipe {
-                    // not a valid DSML tag — advance past '<' and keep searching
-                    search_from = start + '<'.len_utf8();
+        if requires_pipe_delimiter {
+            let mut chars = after_prefix.chars();
+
+            for ch in chars.by_ref() {
+                if !ch.is_whitespace() {
+                    if ch != '|' && ch != '\u{FF5C}' {
+                        search_from = start + '<'.len_utf8();
+                        break;
+                    }
+                    skip += ch.len_utf8();
                     break;
                 }
-                skip += ch.len_utf8(); // count the pipe char
-                break;
+                skip += ch.len_utf8();
             }
-            skip += ch.len_utf8();
-        }
 
-        // If we broke out of the loop early (not a pipe), continue outer while
-        if search_from > start {
-            continue;
-        }
-
-        // optional whitespace after delimiter
-        for ch in chars {
-            if !ch.is_whitespace() {
-                break;
+            if search_from > start {
+                continue;
             }
-            skip += ch.len_utf8();
+
+            for ch in chars {
+                if !ch.is_whitespace() {
+                    break;
+                }
+                skip += ch.len_utf8();
+            }
         }
 
         let body_start = start + prefix_len + skip;
@@ -205,27 +202,71 @@ fn collect_dsml_tags(content: &str) -> Vec<DsmlTag> {
     tags
 }
 
-/// Strip DSML tags from content while preserving surrounding text.
-/// Only removes `<DSML | ...>` and `</DSML | ...>` tag markers;
-/// text outside these markers is kept.
-fn strip_dsml_tags(content: &str) -> String {
+/// Remove DSML tool payloads while preserving prose before and after each payload.
+fn strip_dsml_payloads(content: &str) -> String {
     let tags = collect_dsml_tags(content);
     if tags.is_empty() {
+        return content.to_string();
+    }
+
+    let mut ranges = Vec::new();
+    let mut wrapper_start = None;
+
+    for tag in &tags {
+        if tag.name != "tool_calls" {
+            continue;
+        }
+
+        if tag.closing {
+            if let Some(start) = wrapper_start.take() {
+                ranges.push((start, tag.end));
+            }
+        } else if wrapper_start.is_none() {
+            wrapper_start = Some(tag.start);
+        }
+    }
+
+    if let Some(start) = wrapper_start {
+        ranges.push((start, content.len()));
+    }
+
+    if ranges.is_empty() {
+        let mut invoke_start = None;
+        for tag in &tags {
+            if tag.name != "invoke" {
+                continue;
+            }
+
+            if tag.closing {
+                if let Some(start) = invoke_start.take() {
+                    ranges.push((start, tag.end));
+                }
+            } else {
+                if let Some(start) = invoke_start.replace(tag.start) {
+                    ranges.push((start, tag.start));
+                }
+            }
+        }
+
+        if let Some(start) = invoke_start {
+            ranges.push((start, content.len()));
+        }
+    }
+
+    if ranges.is_empty() {
         return content.to_string();
     }
 
     let mut result = String::with_capacity(content.len());
     let mut last_end = 0usize;
 
-    for tag in &tags {
-        // Copy text from last_end to this tag's start
-        if tag.start > last_end {
-            result.push_str(&content[last_end..tag.start]);
+    for (start, end) in ranges {
+        if start > last_end {
+            result.push_str(&content[last_end..start]);
         }
-        last_end = tag.end;
+        last_end = end;
     }
 
-    // Copy any remaining text after the last tag
     if last_end < content.len() {
         result.push_str(&content[last_end..]);
     }
@@ -375,9 +416,7 @@ pub(crate) fn normalize_dsml_tool_calls_in_message(mut message: Value) -> Value 
     let tool_calls = extract_dsml_tool_calls_from_content(&content);
 
     if !tool_calls.is_empty() {
-        // Strip DSML tags but preserve surrounding text content,
-        // so the model's final answer text is not lost
-        let cleaned = strip_dsml_tags(&content);
+        let cleaned = strip_dsml_payloads(&content);
         message["content"] = json!(cleaned);
         message["tool_calls"] = Value::Array(tool_calls);
     }
@@ -470,6 +509,67 @@ mod tests {
             serde_json::from_str(tool_calls[2]["function"]["arguments"].as_str().unwrap()).unwrap();
         assert_eq!(args2["command"], json!("cargo"));
         assert_eq!(args2["args"], json!(["build"]));
+    }
+
+    #[test]
+    fn parses_native_deepseek_dsml_with_multiple_tool_calls() {
+        let content = "HookedIASetIndexBuffer (915-933) — need to re-check\n\
+HookedClearUnorderedAccessViewUint (1036-1052) — still broken per previous read\n\
+Re-read these four to determine which still need patching.\n\n\
+<｜｜DSML｜｜tool_calls>\n\
+<｜｜DSML｜｜invoke name=“read_file”>\n\
+<｜｜DSML｜｜parameter name=“file” string=“true”>src/DirectX12/command/DX12CommandListHooks.cpp</｜｜DSML｜｜parameter>\n\
+<｜｜DSML｜｜parameter name=“maxLines” string=“false”>30</｜｜DSML｜｜parameter>\n\
+<｜｜DSML｜｜parameter name=“startLine” string=“false”>749</｜｜DSML｜｜parameter>\n\
+</｜｜DSML｜｜invoke>\n\
+<｜｜DSML｜｜invoke name=“read_file”>\n\
+<｜｜DSML｜｜parameter name=“file” string=“true”>src/DirectX12/command/DX12CommandListHooks.cpp</｜｜DSML｜｜parameter>\n\
+<｜｜DSML｜｜parameter name=“maxLines” string=“false”>15</｜｜DSML｜｜parameter>\n\
+<｜｜DSML｜｜parameter name=“startLine” string=“false”>547</｜｜DSML｜｜parameter>\n\
+</｜｜DSML｜｜invoke>\n\
+<｜｜DSML｜｜invoke name=“read_file”>\n\
+<｜｜DSML｜｜parameter name=“file” string=“true”>src/DirectX12/command/DX12CommandListHooks.cpp</｜｜DSML｜｜parameter>\n\
+<｜｜DSML｜｜parameter name=“maxLines” string=“false”>50</｜｜DSML｜｜parameter>\n\
+<｜｜DSML｜｜parameter name=“startLine” string=“false”>1032</｜｜DSML｜｜parameter>\n\
+</｜｜DSML｜｜invoke>\n\
+<｜｜DSML｜｜invoke name=“read_file”>\n\
+<｜｜DSML｜｜parameter name=“file” string=“true”>src/DirectX12/command/DX12CommandListHooks.cpp</｜｜DSML｜｜parameter>\n\
+<｜｜DSML｜｜parameter name=“maxLines” string=“false”>50</｜｜DSML｜｜parameter>\n\
+<｜｜DSML｜｜parameter name=“startLine” string=“false”>1054</｜｜DSML｜｜parameter>\n\
+</｜｜DSML｜｜invoke>\n\
+</｜｜DSML｜｜tool_calls>";
+
+        let message = normalize_dsml_tool_calls_in_message(json!({
+            "role": "assistant",
+            "content": content,
+        }));
+        let tool_calls = message["tool_calls"]
+            .as_array()
+            .expect("native DeepSeek DSML should become tool calls");
+
+        assert_eq!(tool_calls.len(), 4);
+        for tool_call in tool_calls {
+            assert_eq!(tool_call["function"]["name"], json!("read_file"));
+        }
+
+        let arguments = tool_calls
+            .iter()
+            .map(|tool_call| {
+                serde_json::from_str::<Value>(tool_call["function"]["arguments"].as_str().unwrap())
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(arguments[0]["maxLines"], json!(30));
+        assert_eq!(arguments[0]["startLine"], json!(749));
+        assert_eq!(arguments[1]["maxLines"], json!(15));
+        assert_eq!(arguments[1]["startLine"], json!(547));
+        assert_eq!(arguments[2]["startLine"], json!(1032));
+        assert_eq!(arguments[3]["startLine"], json!(1054));
+
+        let cleaned = message["content"].as_str().unwrap();
+        assert!(cleaned.contains("Re-read these four"));
+        assert!(!cleaned.contains("DSML"));
+        assert!(!cleaned.contains("DX12CommandListHooks.cpp"));
     }
 
     #[test]
