@@ -14,6 +14,7 @@ import { Wifi } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import PatchApprovalPanel from "./PatchApprovalPanel.vue";
 import { getAvatarSrc } from "../utils/avatar";
+import { sanitizeAssistantMessageContent } from "../utils/messageTransport";
 import type {
   AgentModel,
   ChatGroup,
@@ -728,14 +729,24 @@ function getContentSegments(message: ChatMessage): ChatMessageContentSegment[] {
   const segments = (message.contentSegments ?? []).filter((segment) => segment.text.trim().length > 0);
 
   if (segments.length > 0) {
-    return segments;
+    if (message.role !== "assistant") {
+      return segments;
+    }
+
+    return segments.map((segment) => ({
+      ...segment,
+      text: sanitizeAssistantMessageContent(segment.text),
+    }));
   }
 
-  return message.content.trim()
+  const visibleContent =
+    message.role === "assistant" ? sanitizeAssistantMessageContent(message.content) : message.content.trim();
+
+  return visibleContent
     ? [
         {
           id: `${message.id}-content`,
-          text: message.content,
+          text: visibleContent,
         },
       ]
     : [];
@@ -1102,6 +1113,8 @@ function formatExecutionItemForCopy(item: ChatMessageExecutionItem, index: numbe
 
 function getMessageCopyText(message: ChatMessage) {
   const sections = [`# ${message.modelName}`];
+  const visibleContent =
+    message.role === "assistant" ? sanitizeAssistantMessageContent(message.content) : message.content.trim();
   const meta = [
     props.statusText[message.status],
     getMessageApiModel(message),
@@ -1112,8 +1125,8 @@ function getMessageCopyText(message: ChatMessage) {
     sections.push(meta.join(" · "));
   }
 
-  if (message.content.trim()) {
-    sections.push(`## ${t("chat.copy.generatedText")}\n${message.content.trim()}`);
+  if (visibleContent) {
+    sections.push(`## ${t("chat.copy.generatedText")}\n${visibleContent}`);
   }
 
   const executionItems = getExecutionItems(message);

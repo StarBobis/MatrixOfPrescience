@@ -35,6 +35,7 @@ import GroupRightPanel from "../components/GroupRightPanel.vue";
 import ResizableGroupLayout from "../components/ResizableGroupLayout.vue";
 import { buildSystemPrompt } from "../utils/agentPrompt";
 import { describeError } from "../utils/errorPresentation";
+import { sanitizeAssistantMessageContent } from "../utils/messageTransport";
 import { makeMemberNameUnique } from "../utils/memberNames";
 import { parseMentionedMembers } from "../utils/mentions";
 import {
@@ -637,7 +638,11 @@ function formatExecutionHistoryForModel(message: ChatMessage) {
 
 function formatMessageForModel(message: ChatMessage) {
   const speaker = message.role === "assistant" ? message.modelName : getOwnerDisplayName();
-  const content = message.content.trim() || "(empty message)";
+  const content = (
+    message.role === "assistant"
+      ? sanitizeAssistantMessageContent(message.content)
+      : message.content.trim()
+  ) || "(empty message)";
   const sections = [`${speaker} [status=${message.status}]: ${content}`];
 
   if (message.role === "assistant") {
@@ -864,6 +869,7 @@ function ensureAddressedReply(content: string, targetName: string) {
 function getInterruptedContent(messageId: string, fallbackContent = "") {
   const streamedContent = streamingContent.get(messageId)?.trim();
   const visibleContent = streamedContent || fallbackContent.trim();
+  const sanitizedContent = sanitizeAssistantMessageContent(visibleContent);
   const ignoredPlaceholders = new Set([
     t("chatRuntime.pendingContent"),
     t("chatRuntime.decisionPendingContent"),
@@ -871,15 +877,15 @@ function getInterruptedContent(messageId: string, fallbackContent = "") {
     t("chatRuntime.interruptedContent"),
   ]);
 
-  if (!visibleContent || ignoredPlaceholders.has(visibleContent)) {
+  if (!sanitizedContent || ignoredPlaceholders.has(sanitizedContent)) {
     return t("chatRuntime.interruptedContent");
   }
 
-  if (visibleContent.endsWith(t("chatRuntime.interruptedContent"))) {
-    return visibleContent;
+  if (sanitizedContent.endsWith(t("chatRuntime.interruptedContent"))) {
+    return sanitizedContent;
   }
 
-  return `${annotateMarkdownCodeFences(visibleContent).trimEnd()}\n\n${t("chatRuntime.interruptedContent")}`;
+  return `${annotateMarkdownCodeFences(sanitizedContent).trimEnd()}\n\n${t("chatRuntime.interruptedContent")}`;
 }
 
 function buildAddressedResponseRule(baseRule: string, targetName: string) {
@@ -1376,9 +1382,18 @@ function appendContentSegment(
 function getFinalContentSegments(messageId: string, content: string) {
   const message = activeMessages.value.find((item) => item.id === messageId);
   const segments = message?.contentSegments ?? [];
+  const normalizedContent = content.trim();
 
-  if (segments.length > 0 || !content.trim()) {
+  if (!normalizedContent) {
     return segments;
+  }
+
+  if (segments.length > 0) {
+    const joinedContent = segments.map((segment) => segment.text).join("").trim();
+
+    if (joinedContent === normalizedContent) {
+      return segments;
+    }
   }
 
   const timestamp = Date.now();
@@ -1911,6 +1926,7 @@ function stopGeneration() {
     settingsStore.updateMessage(messageId, {
       status: "interrupted",
       content: interruptedContent,
+      contentSegments: getFinalContentSegments(messageId, interruptedContent),
     });
     addActivityItem(messageId, "status", t("chatRuntime.interruptedStep"), "interrupted");
   }
@@ -2221,9 +2237,10 @@ async function askMember(
     }
 
     chatPanel.value?.collapseExecutionPanel(pendingId);
+    const cleanedResponseContent = sanitizeAssistantMessageContent(response.content);
     const finalContent = addressReply
-      ? ensureAddressedReply(response.content, replyTargetName)
-      : annotateMarkdownCodeFences(response.content).trim();
+      ? ensureAddressedReply(cleanedResponseContent, replyTargetName)
+      : annotateMarkdownCodeFences(cleanedResponseContent).trim();
     const savedReasoning = streamingReasoning.get(pendingId)?.trim();
     settingsStore.updateMessage(pendingId, {
       status: "done",
@@ -2253,6 +2270,7 @@ async function askMember(
       settingsStore.updateMessage(pendingId, {
         status: "interrupted",
         content: interruptedContent,
+        contentSegments: getFinalContentSegments(pendingId, interruptedContent),
       });
       addActivityItem(pendingId, "status", t("chatRuntime.interruptedStep"), "interrupted");
       return null;
@@ -2266,6 +2284,7 @@ async function askMember(
     settingsStore.updateMessage(pendingId, {
       status: "error",
       content: failureContent,
+      contentSegments: getFinalContentSegments(pendingId, failureContent),
     });
     addActivityItem(pendingId, "status", failureContent, "error", errorPresentation.detail);
     return null;

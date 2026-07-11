@@ -29,6 +29,8 @@ impl ToolCallUtils {
         requested_count: usize,
         tool_calls_since_checkpoint: usize,
         checkpoint_interval: usize,
+        max_tool_calls_per_turn: usize,
+        remaining_total_budget: usize,
     ) -> ToolCallExecutionPlan {
         if requested_count == 0 {
             return ToolCallExecutionPlan {
@@ -37,10 +39,13 @@ impl ToolCallUtils {
             };
         }
 
-        let executable_count = requested_count.min(Self::checkpoint_budget_remaining(
-            tool_calls_since_checkpoint,
-            checkpoint_interval,
-        ));
+        let executable_count = requested_count
+            .min(Self::checkpoint_budget_remaining(
+                tool_calls_since_checkpoint,
+                checkpoint_interval,
+            ))
+            .min(max_tool_calls_per_turn)
+            .min(remaining_total_budget);
 
         ToolCallExecutionPlan {
             executable_count,
@@ -96,9 +101,25 @@ mod tests {
 
     #[test]
     fn plans_hard_tool_call_cap_before_checkpoint() {
-        let plan = ToolCallUtils::plan_execution(12, 3, 8);
+        let plan = ToolCallUtils::plan_execution(12, 3, 8, 8, 99);
 
         assert_eq!(plan.executable_count, 5);
+        assert!(plan.truncated);
+    }
+
+    #[test]
+    fn plans_single_tool_turn_when_strict_pacing_is_enabled() {
+        let plan = ToolCallUtils::plan_execution(6, 0, 8, 1, 99);
+
+        assert_eq!(plan.executable_count, 1);
+        assert!(plan.truncated);
+    }
+
+    #[test]
+    fn plans_zero_tool_execution_when_total_budget_is_exhausted() {
+        let plan = ToolCallUtils::plan_execution(3, 0, 8, 1, 0);
+
+        assert_eq!(plan.executable_count, 0);
         assert!(plan.truncated);
     }
 

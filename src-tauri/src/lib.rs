@@ -190,6 +190,9 @@ const RETRY_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const FINAL_ANSWER_INSTRUCTION: &str =
     "Use the tool results already provided and write the final answer now.";
 const EDIT_FAILURE_RECOVERY_INSTRUCTION: &str = "The previous edit tool call failed. Do not stop or provide a final answer solely because an edit did not apply. Recover using the error and the current workspace state: re-read the target when the context may be stale, then retry with a corrected smaller patch or a different available edit tool. Do not repeat the identical failing call. Continue until the requested change is complete or no available tool can resolve a genuine blocker.";
+const MAX_TOOL_ONLY_ROUNDS: usize = 6;
+const MAX_TOTAL_TOOL_CALLS_PER_COMPLETION: usize = 24;
+const MAX_DEEPSEEK_TOOL_CALLS_PER_TURN: usize = 1;
 const TOOL_CALL_CHECKPOINT_INTERVAL: usize = 8;
 const TOOL_CALL_CHECKPOINT_REASONING_EFFORT: &str = "high";
 const TOOL_CALL_CHECKPOINT_INSTRUCTION: &str = "Checkpoint: the tool-call budget for this step has been reached. On this turn, do not call any tools. Briefly summarize what you have learned, what remains uncertain, and the single best next step. Keep it concise. After this checkpoint, continue the task on the following turn if more work is needed.";
@@ -827,12 +830,18 @@ async fn chat_completion(
     let deepseek_thinking =
         deepseek_thinking_enabled(is_deepseek, request.reasoning_effort.as_deref());
     let can_write = request.can_write.unwrap_or(false);
+    let max_tool_calls_per_turn = if is_deepseek {
+        MAX_DEEPSEEK_TOOL_CALLS_PER_TURN
+    } else {
+        TOOL_CALL_CHECKPOINT_INTERVAL
+    };
     let mut code_tool_called = false;
     let mut edit_recovery_required = false;
     let mut edit_recovery_rounds = 0usize;
     let mut final_answer_requested = false;
     let mut tool_only_rounds: usize = 0;
     let mut tool_calls_since_checkpoint = 0usize;
+    let mut total_tool_calls_executed = 0usize;
     let mut tool_checkpoint_pending = false;
     let mut validation = ValidationState::default();
     let mut last_finish_reason: Option<String> = None;
@@ -867,8 +876,9 @@ async fn chat_completion(
         let code_tools_allowed = !checkpoint_required
             && code_workspace.is_some()
             && (!final_answer_requested || validation_tool_required || repair_required);
-        let orchestration_tools_allowed =
-            !checkpoint_required && request.orchestration_tools_enabled.unwrap_or(false);
+        let orchestration_tools_allowed = !checkpoint_required
+            && !final_answer_requested
+            && request.orchestration_tools_enabled.unwrap_or(false);
         let orchestration_required = request.orchestration_required.unwrap_or(false);
         let orchestration_tools_suppressed = deepseek_thinking && orchestration_required;
         let effective_orchestration_tools =
@@ -989,12 +999,21 @@ async fn chat_completion(
                 message.get("tool_calls").and_then(Value::as_array),
             ) {
                 if !tool_calls.is_empty() {
+                    let remaining_total_tool_budget = MAX_TOTAL_TOOL_CALLS_PER_COMPLETION
+                        .saturating_sub(total_tool_calls_executed);
                     // Hard-cap a single assistant tool batch so one response cannot skip the checkpoint.
                     let tool_execution_plan = ToolCallUtils::plan_execution(
                         tool_calls.len(),
                         tool_calls_since_checkpoint,
                         TOOL_CALL_CHECKPOINT_INTERVAL,
+                        max_tool_calls_per_turn,
+                        remaining_total_tool_budget,
                     );
+                    if tool_execution_plan.executable_count == 0 {
+                        tool_checkpoint_pending = false;
+                        final_answer_requested = true;
+                        continue;
+                    }
                     let executable_tool_calls = &tool_calls[..tool_execution_plan.executable_count];
                     messages.push(ToolCallUtils::trim_chat_tool_calls(
                         &message,
@@ -1065,18 +1084,27 @@ async fn chat_completion(
                         final_answer_requested = false;
                     }
                     code_tool_called = true;
+                    total_tool_calls_executed += tool_execution_plan.executable_count;
                     ToolCallUtils::schedule_checkpoint(
                         &mut tool_calls_since_checkpoint,
                         &mut tool_checkpoint_pending,
                         tool_execution_plan.executable_count,
                         TOOL_CALL_CHECKPOINT_INTERVAL,
                     );
+                    if is_deepseek && tool_execution_plan.truncated {
+                        tool_checkpoint_pending = true;
+                    }
+                    if total_tool_calls_executed >= MAX_TOTAL_TOOL_CALLS_PER_COMPLETION
+                        && !validation_tool_required
+                        && !repair_required
+                    {
+                        tool_checkpoint_pending = false;
+                        final_answer_requested = true;
+                    }
 
                     if !validation_tool_required && !repair_required {
                         tool_only_rounds += 1;
-                        if !tool_checkpoint_pending
-                            && tool_only_rounds >= MAX_CHAT_COMPLETION_TURNS.saturating_sub(2)
-                        {
+                        if !tool_checkpoint_pending && tool_only_rounds >= MAX_TOOL_ONLY_ROUNDS {
                             messages.push(json!({
                                 "role": "user",
                                 "content": FINAL_ANSWER_INSTRUCTION,
@@ -1221,12 +1249,19 @@ async fn openai_responses_completion(
     let endpoint = responses_endpoint(&request.base_url);
     let client = reqwest::Client::new();
     let can_write = request.can_write.unwrap_or(false);
+    let is_deepseek = is_deepseek_provider(&request.provider_name, &request.base_url);
+    let max_tool_calls_per_turn = if is_deepseek {
+        MAX_DEEPSEEK_TOOL_CALLS_PER_TURN
+    } else {
+        TOOL_CALL_CHECKPOINT_INTERVAL
+    };
     let mut code_tool_called = false;
     let mut edit_recovery_required = false;
     let mut edit_recovery_rounds = 0usize;
     let mut final_answer_requested = false;
     let mut tool_only_rounds: usize = 0;
     let mut tool_calls_since_checkpoint = 0usize;
+    let mut total_tool_calls_executed = 0usize;
     let mut tool_checkpoint_pending = false;
     let mut validation = ValidationState::default();
     let mut previous_response_id: Option<String> = None;
@@ -1273,8 +1308,9 @@ async fn openai_responses_completion(
         let code_tools_allowed = !checkpoint_required
             && code_workspace.is_some()
             && (!final_answer_requested || validation_tool_required || repair_required);
-        let orchestration_tools_allowed =
-            !checkpoint_required && request.orchestration_tools_enabled.unwrap_or(false);
+        let orchestration_tools_allowed = !checkpoint_required
+            && !final_answer_requested
+            && request.orchestration_tools_enabled.unwrap_or(false);
         let orchestration_required = request.orchestration_required.unwrap_or(false);
         let any_tools_allowed = code_tools_allowed || orchestration_tools_allowed;
         let mut payload = json!({
@@ -1347,12 +1383,21 @@ async fn openai_responses_completion(
         if !checkpoint_required {
             if let Some(workspace) = code_workspace.as_ref() {
                 if !tool_calls.is_empty() {
+                    let remaining_total_tool_budget = MAX_TOTAL_TOOL_CALLS_PER_COMPLETION
+                        .saturating_sub(total_tool_calls_executed);
                     // Apply the same hard batch cap for Responses API function calls.
                     let tool_execution_plan = ToolCallUtils::plan_execution(
                         tool_calls.len(),
                         tool_calls_since_checkpoint,
                         TOOL_CALL_CHECKPOINT_INTERVAL,
+                        max_tool_calls_per_turn,
+                        remaining_total_tool_budget,
                     );
+                    if tool_execution_plan.executable_count == 0 {
+                        tool_checkpoint_pending = false;
+                        final_answer_requested = true;
+                        continue;
+                    }
                     let executable_tool_calls = ToolCallUtils::truncate_tool_calls(
                         &tool_calls,
                         tool_execution_plan.executable_count,
@@ -1426,18 +1471,27 @@ async fn openai_responses_completion(
                     }
 
                     code_tool_called = true;
+                    total_tool_calls_executed += executable_tool_calls.len();
                     ToolCallUtils::schedule_checkpoint(
                         &mut tool_calls_since_checkpoint,
                         &mut tool_checkpoint_pending,
                         executable_tool_calls.len(),
                         TOOL_CALL_CHECKPOINT_INTERVAL,
                     );
+                    if is_deepseek && tool_execution_plan.truncated {
+                        tool_checkpoint_pending = true;
+                    }
+                    if total_tool_calls_executed >= MAX_TOTAL_TOOL_CALLS_PER_COMPLETION
+                        && !validation_tool_required
+                        && !repair_required
+                    {
+                        tool_checkpoint_pending = false;
+                        final_answer_requested = true;
+                    }
 
                     if !validation_tool_required && !repair_required {
                         tool_only_rounds += 1;
-                        if !tool_checkpoint_pending
-                            && tool_only_rounds >= MAX_CHAT_COMPLETION_TURNS.saturating_sub(2)
-                        {
+                        if !tool_checkpoint_pending && tool_only_rounds >= MAX_TOOL_ONLY_ROUNDS {
                             pending_input.push(responses_user_message(FINAL_ANSWER_INSTRUCTION));
                             final_answer_requested = true;
                         }
