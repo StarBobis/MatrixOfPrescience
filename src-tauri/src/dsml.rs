@@ -1,6 +1,6 @@
 use serde_json::{json, Map, Value};
 
-use crate::message_content_text;
+use crate::StrUtils;
 
 #[derive(Debug)]
 struct DsmlTag {
@@ -331,7 +331,7 @@ pub(crate) fn normalize_dsml_tool_calls_in_message(mut message: Value) -> Value 
         return message;
     }
 
-    let content = message_content_text(&message);
+    let content = StrUtils::message_content_text(&message);
 
     if content.is_empty() || !content.contains("DSML") {
         return message;

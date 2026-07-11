@@ -17,6 +17,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 
 mod dsml;
 mod tools;
+mod utils;
 mod validation;
 
 use dsml::normalize_dsml_tool_calls_in_message;
@@ -24,18 +25,18 @@ use tools::{
     code_tools_schema, execute_code_tool_call, orchestration_tools_schema, tool_call_trace_step,
     tool_result_trace_step, validate_workspace,
 };
-use validation::{
-    is_successful_edit_tool_call, mark_validation_unavailable, run_default_validation_commands,
-    tool_result_succeeded, validation_tool_calls, ValidationRun, ValidationState,
-    VALIDATION_FAILURE_RECOVERY_INSTRUCTION, VALIDATION_REQUIRED_INSTRUCTION,
-    VALIDATION_UNAVAILABLE_INSTRUCTION,
-};
+use validation::{ValidationOps, ValidationRun, ValidationState, VALIDATION_FAILURE_RECOVERY_INSTRUCTION, VALIDATION_REQUIRED_INSTRUCTION, VALIDATION_UNAVAILABLE_INSTRUCTION};
+
+// Re-export shared struct types for use by other modules
+pub(crate) use utils::string_utils::StrUtils;
+pub(crate) use utils::trace_utils::{ChatCompletionUsage, ChatTraceStep, TraceCtx};
+pub(crate) use utils::fs_utils::FileUtils;
 
 #[cfg(test)]
 use tools::{
     delete_workspace_path_tool, format_codegraph_explore_output, is_codegraph_status_query,
     move_workspace_path_tool, normalize_codegraph_max_files,
-    read_workspace_file_tool, resolve_workspace_relative_path, strip_ansi_escape_sequences,
+    read_workspace_file_tool, resolve_workspace_relative_path,
     write_workspace_file_tool, DEFAULT_CODEGRAPH_MAX_FILES, MAX_CODEGRAPH_MAX_FILES,
 };
 
@@ -77,23 +78,7 @@ struct ChatCompletionResponse {
     usage: Option<ChatCompletionUsage>,
 }
 
-#[derive(Debug, Serialize, Clone, Default)]
-#[serde(rename_all = "camelCase")]
-struct ChatCompletionUsage {
-    prompt_tokens: Option<u64>,
-    completion_tokens: Option<u64>,
-    total_tokens: Option<u64>,
-    prompt_cache_hit_tokens: Option<u64>,
-    prompt_cache_miss_tokens: Option<u64>,
-}
 
-#[derive(Debug, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ChatTraceStep {
-    kind: String,
-    text: String,
-    detail: Option<String>,
-}
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -193,9 +178,8 @@ struct CcSwitchOpenAiConfig {
 }
 
 const MAX_CHAT_COMPLETION_TURNS: usize = 32;
+#[cfg(test)]
 const MAX_EDIT_RECOVERY_TOOL_ROUNDS: usize = 4;
-const MAX_CHAT_TRACE_STEPS: usize = 160;
-const TRACE_STEP_TEXT_LIMIT: usize = 280;
 const CHAT_COMPLETION_STREAM_EVENT: &str = "chat-completion-stream";
 const HTTP_RETRY_DELAY: Duration = Duration::from_secs(5);
 const RETRY_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(250);
@@ -238,39 +222,20 @@ fn write_json_file(path: &Path, value: &Value) -> Result<(), String> {
     fs::write(path, content).map_err(|error| format!("Failed to write {:?}: {}", path, error))
 }
 
-fn non_empty_string(value: &str) -> Option<String> {
-    let trimmed = value.trim();
-    (!trimmed.is_empty()).then(|| trimmed.to_string())
-}
-
-fn json_string(value: Option<&Value>, key: &str) -> Option<String> {
-    value
-        .and_then(|value| value.get(key))
-        .and_then(Value::as_str)
-        .and_then(non_empty_string)
-}
-
-fn toml_string(value: Option<&toml::Value>, key: &str) -> Option<String> {
-    value
-        .and_then(|value| value.get(key))
-        .and_then(toml::Value::as_str)
-        .and_then(non_empty_string)
-}
-
 fn user_home_dir() -> Option<PathBuf> {
     std::env::var("USERPROFILE")
         .ok()
-        .and_then(|value| non_empty_string(&value))
+        .and_then(|value| StrUtils::trim_non_empty(&value))
         .map(PathBuf::from)
         .or_else(|| {
             let drive = std::env::var("HOMEDRIVE").ok()?;
             let path = std::env::var("HOMEPATH").ok()?;
-            non_empty_string(&format!("{}{}", drive, path)).map(PathBuf::from)
+            StrUtils::trim_non_empty(&format!("{}{}", drive, path)).map(PathBuf::from)
         })
         .or_else(|| {
             std::env::var("HOME")
                 .ok()
-                .and_then(|value| non_empty_string(&value))
+                .and_then(|value| StrUtils::trim_non_empty(&value))
                 .map(PathBuf::from)
         })
 }
@@ -279,7 +244,7 @@ fn codex_config_dirs() -> Vec<PathBuf> {
     let mut dirs = Vec::new();
 
     if let Ok(codex_home) = std::env::var("CODEX_HOME") {
-        if let Some(path) = non_empty_string(&codex_home).map(PathBuf::from) {
+        if let Some(path) = StrUtils::trim_non_empty(&codex_home).map(PathBuf::from) {
             dirs.push(path);
         }
     }
@@ -306,7 +271,7 @@ fn ccswitch_config_dir() -> Result<PathBuf, String> {
         let default_db = default_dir.join("cc-switch.db");
         if !default_db.exists() {
             if let Ok(home_env) = std::env::var("HOME") {
-                if let Some(legacy_home) = non_empty_string(&home_env).map(PathBuf::from) {
+                if let Some(legacy_home) = StrUtils::trim_non_empty(&home_env).map(PathBuf::from) {
                     let legacy_dir = legacy_home.join(".cc-switch");
                     if legacy_dir.join("cc-switch.db").exists() {
                         return Ok(legacy_dir);
@@ -323,7 +288,7 @@ fn active_codex_provider<'a>(doc: &'a toml::Value) -> (Option<String>, Option<&'
     let active_provider = doc
         .get("model_provider")
         .and_then(toml::Value::as_str)
-        .and_then(non_empty_string);
+        .and_then(StrUtils::trim_non_empty);
     let active_provider_config = active_provider.as_deref().and_then(|provider| {
         doc.get("model_providers")
             .and_then(|providers| providers.get(provider))
@@ -338,11 +303,11 @@ fn codex_toml_field(doc: Option<&toml::Value>, key: &str) -> Option<String> {
     };
     let (_, active_provider_config) = active_codex_provider(doc);
 
-    toml_string(active_provider_config, key).or_else(|| toml_string(Some(doc), key))
+    StrUtils::toml_str(active_provider_config, key).or_else(|| StrUtils::toml_str(Some(doc), key))
 }
 
 fn codex_auth_api_key(auth: Option<&Value>) -> Option<String> {
-    json_string(auth, "OPENAI_API_KEY")
+    StrUtils::json_str(auth, "OPENAI_API_KEY")
 }
 
 fn is_local_ccswitch_proxy_url(base_url: &str) -> bool {
@@ -400,23 +365,23 @@ fn build_ccswitch_openai_config(
     let doc = config_text.parse::<toml::Value>().ok();
     let active_provider_name = doc.as_ref().and_then(|doc| {
         let (active_provider, active_provider_config) = active_codex_provider(doc);
-        toml_string(active_provider_config, "name").or(active_provider)
+        StrUtils::toml_str(active_provider_config, "name").or(active_provider)
     });
     let provider_name = provider_name.or(active_provider_name);
     let base_url = codex_toml_field(doc.as_ref(), "base_url")
-        .or_else(|| json_string(settings, "baseUrl"))
-        .or_else(|| json_string(settings, "base_url"))
+        .or_else(|| StrUtils::json_str(settings, "baseUrl"))
+        .or_else(|| StrUtils::json_str(settings, "base_url"))
         .ok_or_else(|| "Codex config does not contain a base_url.".to_string())?;
     let base_url = normalize_imported_base_url(&base_url);
     let wire_api = codex_toml_field(doc.as_ref(), "wire_api")
-        .or_else(|| json_string(meta, "apiFormat"))
-        .or_else(|| json_string(meta, "api_format"));
+        .or_else(|| StrUtils::json_str(meta, "apiFormat"))
+        .or_else(|| StrUtils::json_str(meta, "api_format"));
     let provider_type =
-        json_string(meta, "providerType").or_else(|| json_string(meta, "provider_type"));
+        StrUtils::json_str(meta, "providerType").or_else(|| StrUtils::json_str(meta, "provider_type"));
     let mut api_key = codex_toml_field(doc.as_ref(), "experimental_bearer_token")
         .or_else(|| codex_auth_api_key(auth))
-        .or_else(|| json_string(settings, "apiKey"))
-        .or_else(|| json_string(settings, "api_key"));
+        .or_else(|| StrUtils::json_str(settings, "apiKey"))
+        .or_else(|| StrUtils::json_str(settings, "api_key"));
 
     if api_key.is_none() && is_local_ccswitch_proxy_url(&base_url) {
         api_key = Some("cc-switch-local-proxy".to_string());
@@ -424,7 +389,7 @@ fn build_ccswitch_openai_config(
 
     let api_key =
         api_key.ok_or_else(|| "Codex config does not contain an OpenAI API key.".to_string())?;
-    let model = codex_toml_field(doc.as_ref(), "model").or_else(|| json_string(settings, "model"));
+    let model = codex_toml_field(doc.as_ref(), "model").or_else(|| StrUtils::json_str(settings, "model"));
     let warning = imported_config_warning(&base_url, wire_api.as_deref(), provider_type.as_deref());
 
     Ok(CcSwitchOpenAiConfig {
@@ -990,7 +955,7 @@ async fn chat_completion(
             }
             Err(error) => return Err(error),
         };
-        if let Some(usage) = usage_from_response(&parsed) {
+        if let Some(usage) = TraceCtx::usage_from(&parsed) {
             last_usage = Some(usage);
         }
         last_finish_reason = first_choice_finish_reason(&parsed);
@@ -1001,7 +966,7 @@ async fn chat_completion(
             .cloned()
             .ok_or_else(|| format!("{} returned no message.", request.provider_name))?;
         let message = normalize_dsml_tool_calls_in_message(message);
-        append_reasoning_trace_steps(&mut trace_steps, &message);
+        TraceCtx::append_reasoning(&mut trace_steps, &message);
 
         if let (Some(workspace), Some(tool_calls)) = (
             code_workspace.as_ref(),
@@ -1015,7 +980,7 @@ async fn chat_completion(
                 for tool_call in tool_calls {
                     let call_step = tool_call_trace_step(tool_call);
                     emit_trace_step(&app, stream_id.as_deref(), &call_step);
-                    append_trace_steps(&mut trace_steps, vec![call_step]);
+                    TraceCtx::append_steps(&mut trace_steps, vec![call_step]);
                     let tool_result = if let Some(tool_result) =
                         validation.redundant_validation_tool_result(tool_call)
                     {
@@ -1032,20 +997,20 @@ async fn chat_completion(
                         )
                     };
                     validation_run.observe_tool_result(tool_call, &tool_result);
-                    if tool_result_succeeded(&tool_result)
-                        && is_successful_edit_tool_call(tool_call)
+                    if ValidationOps::result_succeeded(&tool_result)
+                        && ValidationOps::is_edit_call(tool_call)
                     {
                         successful_edit = true;
                     }
-                    if failed_edit_requires_recovery(tool_call, &tool_result) {
+                    if ValidationOps::edit_needs_recovery(tool_call, &tool_result) {
                         failed_edit = true;
                     }
                     let result_step = tool_result_trace_step(tool_call, &tool_result);
                     emit_trace_step(&app, stream_id.as_deref(), &result_step);
-                    append_trace_steps(&mut trace_steps, vec![result_step]);
+                    TraceCtx::append_steps(&mut trace_steps, vec![result_step]);
                     messages.push(tool_result);
                 }
-                (edit_recovery_required, edit_recovery_rounds) = next_edit_recovery_state(
+                (edit_recovery_required, edit_recovery_rounds) = ValidationOps::next_recovery_state(
                     edit_recovery_required,
                     edit_recovery_rounds,
                     failed_edit,
@@ -1079,7 +1044,7 @@ async fn chat_completion(
                     let validation_run = code_workspace
                         .as_ref()
                         .map(|workspace| {
-                            run_default_validation_commands(
+                            ValidationOps::run_default(
                                 &app,
                                 stream_id.as_deref(),
                                 workspace,
@@ -1091,7 +1056,7 @@ async fn chat_completion(
                         .unwrap_or_default();
 
                     if !validation_run.ran() {
-                        mark_validation_unavailable(&mut messages);
+                        ValidationOps::mark_unavailable(&mut messages);
                         validation.mark_validator_discovery_required();
                         final_answer_requested = false;
                     } else if validation.record_run(validation_run) {
@@ -1108,7 +1073,7 @@ async fn chat_completion(
             }
         }
 
-        let content = message_content_text(&message);
+        let content = StrUtils::message_content_text(&message);
 
         if !content.is_empty() {
             if validation.is_pending() {
@@ -1117,7 +1082,7 @@ async fn chat_completion(
                     let validation_run = code_workspace
                         .as_ref()
                         .map(|workspace| {
-                            run_default_validation_commands(
+                            ValidationOps::run_default(
                                 &app,
                                 stream_id.as_deref(),
                                 workspace,
@@ -1140,7 +1105,7 @@ async fn chat_completion(
                         }
                         continue;
                     } else {
-                        mark_validation_unavailable(&mut messages);
+                        ValidationOps::mark_unavailable(&mut messages);
                         validation.mark_validator_discovery_required();
                         final_answer_requested = false;
                         continue;
@@ -1299,11 +1264,11 @@ async fn openai_responses_completion(
             previous_response_id = Some(response_id);
         }
 
-        if let Some(usage) = usage_from_response(&parsed) {
+        if let Some(usage) = TraceCtx::usage_from(&parsed) {
             last_usage = Some(usage);
         }
 
-        append_trace_steps(&mut trace_steps, responses_reasoning_trace_steps(&parsed));
+        TraceCtx::append_steps(&mut trace_steps, responses_reasoning_trace_steps(&parsed));
         let tool_calls = responses_function_calls(&parsed);
 
         if let Some(workspace) = code_workspace.as_ref() {
@@ -1315,7 +1280,7 @@ async fn openai_responses_completion(
                     let tool_call = response_function_call_to_chat_tool_call(response_tool_call);
                     let call_step = tool_call_trace_step(&tool_call);
                     emit_trace_step(&app, stream_id.as_deref(), &call_step);
-                    append_trace_steps(&mut trace_steps, vec![call_step]);
+                    TraceCtx::append_steps(&mut trace_steps, vec![call_step]);
 
                     let tool_result = if let Some(tool_result) =
                         validation.redundant_validation_tool_result(&tool_call)
@@ -1334,22 +1299,22 @@ async fn openai_responses_completion(
                     };
 
                     validation_run.observe_tool_result(&tool_call, &tool_result);
-                    if tool_result_succeeded(&tool_result)
-                        && is_successful_edit_tool_call(&tool_call)
+                    if ValidationOps::result_succeeded(&tool_result)
+                        && ValidationOps::is_edit_call(&tool_call)
                     {
                         successful_edit = true;
                     }
-                    if failed_edit_requires_recovery(&tool_call, &tool_result) {
+                    if ValidationOps::edit_needs_recovery(&tool_call, &tool_result) {
                         failed_edit = true;
                     }
 
                     let result_step = tool_result_trace_step(&tool_call, &tool_result);
                     emit_trace_step(&app, stream_id.as_deref(), &result_step);
-                    append_trace_steps(&mut trace_steps, vec![result_step]);
+                    TraceCtx::append_steps(&mut trace_steps, vec![result_step]);
                     pending_input.push(response_tool_output(&tool_call, &tool_result));
                 }
 
-                (edit_recovery_required, edit_recovery_rounds) = next_edit_recovery_state(
+                (edit_recovery_required, edit_recovery_rounds) = ValidationOps::next_recovery_state(
                     edit_recovery_required,
                     edit_recovery_rounds,
                     failed_edit,
@@ -1685,8 +1650,8 @@ fn responses_reasoning_trace_steps(response: &Value) -> Vec<ChatTraceStep> {
                 .or_else(|| summary.get("content"))
                 .and_then(Value::as_str)
         })
-        .flat_map(split_trace_text)
-        .map(|line| trace_step("reasoning", line))
+        .flat_map(TraceCtx::split_trace)
+        .map(|line| TraceCtx::trace_step("reasoning", line))
         .collect()
 }
 
@@ -1755,7 +1720,7 @@ fn response_tool_output(tool_call: &Value, tool_result: &Value) -> Value {
     json!({
         "type": "function_call_output",
         "call_id": call_id,
-        "output": message_content_text(tool_result),
+        "output": StrUtils::message_content_text(tool_result),
     })
 }
 
@@ -1769,10 +1734,10 @@ fn run_default_validation_commands_for_responses(
     let mut outputs = Vec::new();
     let mut run = ValidationRun::default();
 
-    for tool_call in validation_tool_calls(workspace) {
+    for tool_call in ValidationOps::make_calls(workspace) {
         let call_step = tool_call_trace_step(&tool_call);
         emit_trace_step(app, stream_id, &call_step);
-        append_trace_steps(trace_steps, vec![call_step]);
+        TraceCtx::append_steps(trace_steps, vec![call_step]);
 
         let mut stream_tool_output = |step: ChatTraceStep| {
             emit_tool_chunk(app, stream_id, &step);
@@ -1785,7 +1750,7 @@ fn run_default_validation_commands_for_responses(
         );
         let result_step = tool_result_trace_step(&tool_call, &tool_result);
         emit_trace_step(app, stream_id, &result_step);
-        append_trace_steps(trace_steps, vec![result_step]);
+        TraceCtx::append_steps(trace_steps, vec![result_step]);
         run.observe_tool_result(&tool_call, &tool_result);
 
         outputs.push(chat_tool_call_to_response_function_call(&tool_call));
@@ -1793,37 +1758,6 @@ fn run_default_validation_commands_for_responses(
     }
 
     (outputs, run)
-}
-
-fn failed_edit_requires_recovery(tool_call: &Value, tool_result: &Value) -> bool {
-    is_successful_edit_tool_call(tool_call) && !tool_result_succeeded(tool_result)
-}
-
-fn next_edit_recovery_state(
-    currently_required: bool,
-    current_rounds: usize,
-    failed_edit: bool,
-    successful_edit: bool,
-) -> (bool, usize) {
-    if failed_edit {
-        let rounds = if currently_required {
-            current_rounds.saturating_add(1)
-        } else {
-            0
-        };
-        return (rounds < MAX_EDIT_RECOVERY_TOOL_ROUNDS, rounds);
-    }
-
-    if successful_edit {
-        return (false, 0);
-    }
-
-    if currently_required {
-        let rounds = current_rounds.saturating_add(1);
-        return (rounds < MAX_EDIT_RECOVERY_TOOL_ROUNDS, rounds);
-    }
-
-    (false, 0)
 }
 
 fn first_choice_finish_reason(parsed: &Value) -> Option<String> {
@@ -1835,154 +1769,8 @@ fn first_choice_finish_reason(parsed: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
-pub(crate) fn message_content_text(message: &Value) -> String {
-    match message.get("content") {
-        Some(Value::String(content)) => content.trim().to_string(),
-        Some(Value::Array(parts)) => parts
-            .iter()
-            .filter_map(|part| part.get("text").and_then(Value::as_str))
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string(),
-        _ => String::new(),
-    }
-}
 
-fn value_text(value: &Value) -> String {
-    match value {
-        Value::String(content) => content.trim().to_string(),
-        Value::Array(parts) => parts
-            .iter()
-            .filter_map(|part| {
-                part.get("text")
-                    .or_else(|| part.get("content"))
-                    .and_then(Value::as_str)
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-            .trim()
-            .to_string(),
-        _ => String::new(),
-    }
-}
 
-fn message_reasoning_text(message: &Value) -> String {
-    for key in ["reasoning_content", "reasoning"] {
-        if let Some(value) = message.get(key) {
-            let text = value_text(value);
-
-            if !text.is_empty() {
-                return text;
-            }
-        }
-    }
-
-    String::new()
-}
-
-fn trace_step(kind: &str, text: String) -> ChatTraceStep {
-    ChatTraceStep {
-        kind: kind.to_string(),
-        text,
-        detail: None,
-    }
-}
-
-fn usage_from_response(parsed: &Value) -> Option<ChatCompletionUsage> {
-    let usage = parsed.get("usage")?;
-    let input_tokens = usage.get("input_tokens").and_then(Value::as_u64);
-    let output_tokens = usage.get("output_tokens").and_then(Value::as_u64);
-    let cached_tokens = usage
-        .get("input_tokens_details")
-        .and_then(|details| details.get("cached_tokens"))
-        .and_then(Value::as_u64);
-
-    Some(ChatCompletionUsage {
-        prompt_tokens: usage
-            .get("prompt_tokens")
-            .and_then(Value::as_u64)
-            .or(input_tokens),
-        completion_tokens: usage
-            .get("completion_tokens")
-            .and_then(Value::as_u64)
-            .or(output_tokens),
-        total_tokens: usage
-            .get("total_tokens")
-            .and_then(Value::as_u64)
-            .or_else(|| {
-                input_tokens
-                    .zip(output_tokens)
-                    .map(|(input, output)| input + output)
-            }),
-        prompt_cache_hit_tokens: usage
-            .get("prompt_cache_hit_tokens")
-            .and_then(Value::as_u64)
-            .or(cached_tokens),
-        prompt_cache_miss_tokens: usage
-            .get("prompt_cache_miss_tokens")
-            .and_then(Value::as_u64)
-            .or_else(|| {
-                input_tokens
-                    .zip(cached_tokens)
-                    .map(|(input, cached)| input - cached)
-            }),
-    })
-    .filter(|usage| {
-        usage.prompt_tokens.is_some()
-            || usage.completion_tokens.is_some()
-            || usage.total_tokens.is_some()
-            || usage.prompt_cache_hit_tokens.is_some()
-            || usage.prompt_cache_miss_tokens.is_some()
-    })
-}
-
-fn split_trace_text(text: &str) -> Vec<String> {
-    let mut steps = Vec::new();
-
-    for raw_line in text.lines() {
-        let line = raw_line.trim();
-
-        if line.is_empty() {
-            continue;
-        }
-
-        let chars: Vec<char> = line.chars().collect();
-
-        if chars.len() <= TRACE_STEP_TEXT_LIMIT {
-            steps.push(line.to_string());
-            continue;
-        }
-
-        for chunk in chars.chunks(TRACE_STEP_TEXT_LIMIT) {
-            steps.push(chunk.iter().collect());
-        }
-    }
-
-    steps
-}
-
-fn append_trace_steps(trace_steps: &mut Vec<ChatTraceStep>, next_steps: Vec<ChatTraceStep>) {
-    for step in next_steps {
-        if trace_steps.len() >= MAX_CHAT_TRACE_STEPS {
-            return;
-        }
-
-        if !step.text.trim().is_empty() {
-            trace_steps.push(step);
-        }
-    }
-}
-
-fn append_reasoning_trace_steps(trace_steps: &mut Vec<ChatTraceStep>, message: &Value) {
-    let reasoning = message_reasoning_text(message);
-    let steps = split_trace_text(&reasoning)
-        .into_iter()
-        .map(|line| trace_step("reasoning", line))
-        .collect();
-
-    append_trace_steps(trace_steps, steps);
-}
 
 fn should_retry_http_failure(status: reqwest::StatusCode, _body: &str) -> bool {
     !status.is_success()
@@ -2422,7 +2210,7 @@ fn apply_stream_delta(
     finish_reason: &mut Option<String>,
     usage: &mut Option<ChatCompletionUsage>,
 ) {
-    if let Some(next_usage) = usage_from_response(parsed) {
+    if let Some(next_usage) = TraceCtx::usage_from(parsed) {
         emit_usage_event(app, stream_id, next_usage.clone());
         *usage = Some(next_usage);
     }
@@ -2681,7 +2469,7 @@ fn apply_responses_stream_event(
     }
 
     if let Some(response) = parsed.get("response") {
-        if let Some(next_usage) = usage_from_response(response) {
+        if let Some(next_usage) = TraceCtx::usage_from(response) {
             emit_usage_event(app, stream_id, next_usage.clone());
             *usage = Some(next_usage);
         }
@@ -2732,7 +2520,7 @@ fn apply_responses_stream_event(
         }
         "response.completed" => {
             if let Some(response) = parsed.get("response") {
-                if let Some(next_usage) = usage_from_response(response) {
+                if let Some(next_usage) = TraceCtx::usage_from(response) {
                     emit_usage_event(app, stream_id, next_usage.clone());
                     *usage = Some(next_usage);
                 }
@@ -3090,7 +2878,7 @@ mod tests {
     #[test]
     fn strips_ansi_escape_sequences_from_status_output() {
         assert_eq!(
-            strip_ansi_escape_sequences("\x1b[1mCodeGraph Status\x1b[0m\n\x1b[32m[OK]\x1b[0m"),
+            StrUtils::strip_ansi_escape_sequences("\x1b[1mCodeGraph Status\x1b[0m\n\x1b[32m[OK]\x1b[0m"),
             "CodeGraph Status\n[OK]"
         );
     }
@@ -3182,8 +2970,8 @@ mod tests {
             "content": "Patch applied to files:\na"
         });
 
-        assert!(failed_edit_requires_recovery(&tool_call, &failed_result));
-        assert!(!failed_edit_requires_recovery(
+        assert!(ValidationOps::edit_needs_recovery(&tool_call, &failed_result));
+        assert!(!ValidationOps::edit_needs_recovery(
             &tool_call,
             &successful_result
         ));
@@ -3199,11 +2987,11 @@ mod tests {
 
     #[test]
     fn edit_recovery_persists_through_reads_and_clears_after_a_successful_edit() {
-        assert_eq!(next_edit_recovery_state(false, 0, true, false), (true, 0));
-        assert_eq!(next_edit_recovery_state(true, 0, false, false), (true, 1));
-        assert_eq!(next_edit_recovery_state(true, 1, false, true), (false, 0));
+        assert_eq!(ValidationOps::next_recovery_state(false, 0, true, false), (true, 0));
+        assert_eq!(ValidationOps::next_recovery_state(true, 0, false, false), (true, 1));
+        assert_eq!(ValidationOps::next_recovery_state(true, 1, false, true), (false, 0));
         assert_eq!(
-            next_edit_recovery_state(true, MAX_EDIT_RECOVERY_TOOL_ROUNDS - 1, false, false,),
+            ValidationOps::next_recovery_state(true, MAX_EDIT_RECOVERY_TOOL_ROUNDS - 1, false, false,),
             (false, MAX_EDIT_RECOVERY_TOOL_ROUNDS)
         );
     }
@@ -3315,7 +3103,7 @@ mod tests {
             "checked the workspace"
         );
 
-        let usage = usage_from_response(&response).unwrap();
+        let usage = TraceCtx::usage_from(&response).unwrap();
         assert_eq!(usage.prompt_tokens, Some(100));
         assert_eq!(usage.completion_tokens, Some(25));
         assert_eq!(usage.prompt_cache_hit_tokens, Some(40));
@@ -3416,11 +3204,11 @@ mod tests {
     #[test]
     fn extracts_message_content_from_string_and_text_parts() {
         assert_eq!(
-            message_content_text(&json!({ "content": "  hello  " })),
+            StrUtils::message_content_text(&json!({ "content": "  hello  " })),
             "hello"
         );
         assert_eq!(
-            message_content_text(&json!({
+            StrUtils::message_content_text(&json!({
                 "content": [
                     { "type": "text", "text": "hello" },
                     { "type": "text", "text": "world" }
@@ -3433,7 +3221,7 @@ mod tests {
     #[test]
     fn extracts_deepseek_reasoning_content() {
         assert_eq!(
-            message_reasoning_text(&json!({
+            TraceCtx::message_reasoning(&json!({
                 "reasoning_content": "  line one\nline two  ",
                 "content": "answer"
             })),
@@ -3443,7 +3231,7 @@ mod tests {
 
     #[test]
     fn extracts_deepseek_prompt_cache_usage() {
-        let usage = usage_from_response(&json!({
+        let usage = TraceCtx::usage_from(&json!({
             "usage": {
                 "prompt_tokens": 120,
                 "completion_tokens": 30,
@@ -3663,7 +3451,7 @@ mod tests {
     fn appends_reasoning_trace_lines() {
         let mut trace_steps = Vec::new();
 
-        append_reasoning_trace_steps(
+        TraceCtx::append_reasoning(
             &mut trace_steps,
             &json!({ "reasoning_content": "first\n\nsecond" }),
         );
@@ -3822,8 +3610,8 @@ pub fn run() {
             chat_completion,
             cancel_chat_completion,
             finish_chat_completion,
-            tools::inspect_code_workspace,
-            tools::apply_patch_proposal
+            tools::codegraph::inspect_code_workspace,
+            tools::patch::apply_patch_proposal
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
