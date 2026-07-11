@@ -199,6 +199,8 @@ const HTTP_RETRY_DELAY: Duration = Duration::from_secs(5);
 const RETRY_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const FINAL_ANSWER_INSTRUCTION: &str =
     "Use the tool results already provided and write the final answer now.";
+const CONTINUE_OUTPUT_INSTRUCTION: &str =
+    "Continue exactly from where you left off. Do not restart, repeat, or summarize prior text. Finish the same answer.";
 const EDIT_FAILURE_RECOVERY_INSTRUCTION: &str = "The previous edit tool call failed. Do not stop or provide a final answer solely because an edit did not apply. Recover using the error and the current workspace state: re-read the target when the context may be stale, then retry with a corrected smaller patch or a different available edit tool. Do not repeat the identical failing call. Continue until the requested change is complete or no available tool can resolve a genuine blocker.";
 const MAX_TOOL_ONLY_ROUNDS: usize = 6;
 const MAX_TOTAL_TOOL_CALLS_PER_AUTONOMOUS_ROUND: usize = 24;
@@ -869,6 +871,7 @@ async fn chat_completion(
     let mut last_finish_reason: Option<String> = None;
     let mut last_usage: Option<ChatCompletionUsage> = None;
     let mut trace_steps: Vec<ChatTraceStep> = Vec::new();
+    let mut accumulated_display_content = String::new();
     let stream_id = request
         .stream_id
         .as_deref()
@@ -1134,6 +1137,22 @@ async fn chat_completion(
                             "content": VALIDATION_FAILURE_RECOVERY_INSTRUCTION,
                         }));
                     }
+                    if should_finish_after_dispatch_tasks(
+                        dispatched_tasks.as_deref(),
+                        &validation,
+                        edit_recovery_required,
+                    ) {
+                        let content = dispatched_tasks
+                            .as_deref()
+                            .map(dispatched_tasks_completion_content)
+                            .unwrap_or_default();
+                        return Ok(ChatCompletionResponse {
+                            content,
+                            trace_steps,
+                            usage: last_usage,
+                            dispatched_tasks: dispatched_tasks.take(),
+                        });
+                    }
                     if edit_recovery_required || validation.requires_repair() {
                         final_answer_requested = false;
                     }
@@ -1248,11 +1267,20 @@ async fn chat_completion(
                         final_answer_requested = false;
                     }
                     AgentReflectionDecision::Finish(content) => {
+                        if finish_reason_indicates_truncated_output(last_finish_reason.as_deref()) {
+                            append_continued_output(&mut accumulated_display_content, &content);
+                            messages.push(json!({
+                                "role": "user",
+                                "content": CONTINUE_OUTPUT_INSTRUCTION,
+                            }));
+                            final_answer_requested = true;
+                            continue;
+                        }
                         return Ok(ChatCompletionResponse {
-                            content,
+                            content: combined_output_text(&accumulated_display_content, &content),
                             trace_steps,
                             usage: last_usage,
-                        dispatched_tasks: dispatched_tasks.take(),
+                            dispatched_tasks: dispatched_tasks.take(),
                         });
                     }
                     AgentReflectionDecision::RequestFinalAnswer => {
@@ -1315,8 +1343,19 @@ async fn chat_completion(
                 continue;
             }
 
+            if finish_reason_indicates_truncated_output(last_finish_reason.as_deref()) {
+                append_continued_output(&mut accumulated_display_content, &content);
+                messages.push(message.clone());
+                messages.push(json!({
+                    "role": "user",
+                    "content": CONTINUE_OUTPUT_INSTRUCTION,
+                }));
+                final_answer_requested = true;
+                continue;
+            }
+
             return Ok(ChatCompletionResponse {
-                content,
+                content: combined_output_text(&accumulated_display_content, &content),
                 trace_steps,
                 usage: last_usage,
                 dispatched_tasks: dispatched_tasks.take(),
@@ -1333,12 +1372,27 @@ async fn chat_completion(
                         final_answer_requested = false;
                     }
                     AgentReflectionDecision::Finish(finish_content) => {
-                        return Ok(ChatCompletionResponse {
-                            content: finish_content,
-                            trace_steps,
-                            usage: last_usage,
-                        dispatched_tasks: dispatched_tasks.take(),
-                        });
+                        if finish_reason_indicates_truncated_output(last_finish_reason.as_deref()) {
+                            append_continued_output(
+                                &mut accumulated_display_content,
+                                &finish_content,
+                            );
+                            messages.push(json!({
+                                "role": "user",
+                                "content": CONTINUE_OUTPUT_INSTRUCTION,
+                            }));
+                            final_answer_requested = true;
+                        } else {
+                            return Ok(ChatCompletionResponse {
+                                content: combined_output_text(
+                                    &accumulated_display_content,
+                                    &finish_content,
+                                ),
+                                trace_steps,
+                                usage: last_usage,
+                                dispatched_tasks: dispatched_tasks.take(),
+                            });
+                        }
                     }
                     AgentReflectionDecision::RequestFinalAnswer => {
                         final_answer_requested = true;
@@ -1442,6 +1496,7 @@ async fn openai_responses_completion(
     let mut pending_input: Vec<Value> = Vec::new();
     let mut last_usage: Option<ChatCompletionUsage> = None;
     let mut trace_steps: Vec<ChatTraceStep> = Vec::new();
+    let mut accumulated_display_content = String::new();
     let stream_id = request
         .stream_id
         .as_deref()
@@ -1777,8 +1832,15 @@ async fn openai_responses_completion(
                 continue;
             }
 
+            if responses_output_is_incomplete(&parsed) {
+                append_continued_output(&mut accumulated_display_content, &content);
+                pending_input.push(responses_user_message(CONTINUE_OUTPUT_INSTRUCTION));
+                final_answer_requested = true;
+                continue;
+            }
+
             return Ok(ChatCompletionResponse {
-                content,
+                content: combined_output_text(&accumulated_display_content, &content),
                 trace_steps,
                 usage: last_usage,
                 dispatched_tasks: None,
@@ -2128,6 +2190,49 @@ fn first_choice_finish_reason(parsed: &Value) -> Option<String> {
         .map(str::to_string)
 }
 
+fn finish_reason_indicates_truncated_output(reason: Option<&str>) -> bool {
+    reason.is_some_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "length" | "max_tokens"
+        )
+    })
+}
+
+fn responses_output_is_incomplete(response: &Value) -> bool {
+    response
+        .get("status")
+        .and_then(Value::as_str)
+        .is_some_and(|status| status.eq_ignore_ascii_case("incomplete"))
+        || response.get("incomplete_details").is_some()
+}
+
+fn append_continued_output(accumulated: &mut String, next: &str) {
+    let trimmed = next.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+
+    if !accumulated.is_empty() {
+        accumulated.push('\n');
+        accumulated.push('\n');
+    }
+
+    accumulated.push_str(trimmed);
+}
+
+fn combined_output_text(accumulated: &str, next: &str) -> String {
+    let trimmed_next = next.trim();
+    if accumulated.is_empty() {
+        return trimmed_next.to_string();
+    }
+    if trimmed_next.is_empty() {
+        return accumulated.to_string();
+    }
+
+    format!("{}\n\n{}", accumulated, trimmed_next)
+}
+
 fn should_retry_http_failure(status: reqwest::StatusCode, _body: &str) -> bool {
     status.is_server_error()
         || matches!(
@@ -2472,6 +2577,25 @@ fn extract_dispatched_tasks(tool_call: &Value, tool_result: &Value) -> Option<Ve
         .collect();
 
     if entries.is_empty() { None } else { Some(entries) }
+}
+
+fn should_finish_after_dispatch_tasks(
+    dispatched_tasks: Option<&[TaskDispatchedEntry]>,
+    validation: &ValidationState,
+    edit_recovery_required: bool,
+) -> bool {
+    dispatched_tasks.is_some()
+        && !edit_recovery_required
+        && !validation.requires_tool(edit_recovery_required)
+        && !validation.requires_repair()
+}
+
+fn dispatched_tasks_completion_content(entries: &[TaskDispatchedEntry]) -> String {
+    entries
+        .iter()
+        .map(|entry| format!("- @{}: {}", entry.member, entry.instruction))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn emit_trace_step(app: &AppHandle, stream_id: Option<&str>, step: &ChatTraceStep) {
@@ -3660,6 +3784,54 @@ mod tests {
     }
 
     #[test]
+    fn dispatched_tasks_completion_content_lists_assignments() {
+        let entries = vec![
+            TaskDispatchedEntry {
+                member: "Silver Wolf".to_string(),
+                instruction: "Inspect the log loop".to_string(),
+            },
+            TaskDispatchedEntry {
+                member: "Kafka".to_string(),
+                instruction: "Summarize the worker findings".to_string(),
+            },
+        ];
+
+        assert_eq!(
+            dispatched_tasks_completion_content(&entries),
+            "- @Silver Wolf: Inspect the log loop\n- @Kafka: Summarize the worker findings"
+        );
+    }
+
+    #[test]
+    fn dispatch_tasks_can_finish_without_reflection_when_validation_is_clear() {
+        let validation = ValidationState::default();
+        let entries = vec![TaskDispatchedEntry {
+            member: "Silver Wolf".to_string(),
+            instruction: "Inspect the log loop".to_string(),
+        }];
+
+        assert!(should_finish_after_dispatch_tasks(
+            Some(entries.as_slice()),
+            &validation,
+            false
+        ));
+
+        let mut pending_validation = ValidationState::default();
+        pending_validation.mark_successful_edit();
+        assert!(!should_finish_after_dispatch_tasks(
+            Some(entries.as_slice()),
+            &pending_validation,
+            false
+        ));
+
+        assert!(!should_finish_after_dispatch_tasks(
+            Some(entries.as_slice()),
+            &validation,
+            true
+        ));
+    }
+
+    #[test]
     fn extracts_message_content_from_string_and_text_parts() {
         assert_eq!(
             StrUtils::message_content_text(&json!({ "content": "  hello  " })),
@@ -4050,6 +4222,36 @@ wire_api = "chat"
             first_choice_finish_reason(&parsed),
             Some("tool_calls".to_string())
         );
+    }
+
+    #[test]
+    fn detects_truncated_finish_reasons() {
+        assert!(finish_reason_indicates_truncated_output(Some("length")));
+        assert!(finish_reason_indicates_truncated_output(Some("MAX_TOKENS")));
+        assert!(!finish_reason_indicates_truncated_output(Some("stop")));
+        assert!(!finish_reason_indicates_truncated_output(None));
+    }
+
+    #[test]
+    fn detects_incomplete_responses_output() {
+        assert!(responses_output_is_incomplete(&json!({
+            "status": "incomplete"
+        })));
+        assert!(responses_output_is_incomplete(&json!({
+            "incomplete_details": { "reason": "max_output_tokens" }
+        })));
+        assert!(!responses_output_is_incomplete(&json!({
+            "status": "completed"
+        })));
+    }
+
+    #[test]
+    fn combines_continued_output_segments() {
+        let mut accumulated = String::new();
+        append_continued_output(&mut accumulated, "Part one");
+        append_continued_output(&mut accumulated, "Part two");
+
+        assert_eq!(combined_output_text(&accumulated, "Part three"), "Part one\n\nPart two\n\nPart three");
     }
 }
 

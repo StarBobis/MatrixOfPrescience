@@ -163,6 +163,7 @@
       "status": {
         "checking": "判断中",
         "consensus": "共识中",
+        "error": "异常",
         "followup": "待补充",
         "queued": "排队中",
         "speaking": "发言中",
@@ -401,7 +402,8 @@
     "taskPlanRetryRule": "你上一轮没有返回可识别的任务分派。请从下面真实群友模板中按需保留至少一行，删除不需要参与的行，并在保留行的冒号后填写具体任务。不得改名，不要输出空任务行、引言或总结。",
     "taskPlanInvalid": "管理员连续两次未返回至少一项使用真实群友名的有效任务分派，本轮已停止，未将无效计划伪装成完成。",
     "taskRedispatchInstruction": "上一轮审查要求重新分派。你必须根据以下修正意见生成本轮任务，不得重复上一轮方案，也不得忽略这些意见：\n{instruction}",
-    "taskReviewRule": "第 {round} 轮审查。群友结果已在聊天中。立即决策：\n\n1）满意 → 直接给用户最终答案\n2）不满意 → 分派修正（调 dispatch_tasks 或 REDISPATCH: + - {'@'}群友: 修正任务）\n\n禁止：自己重做群友工作。",
+    "taskReviewRule": "第 {round} 轮审查。群友结果已在聊天中。立即决策：\n\n1）满意 → 直接给用户最终答案\n2）不满意 → 分派修正（调 dispatch_tasks 或 REDISPATCH: + - {'@'}群友: 修正任务）\n\n调用 dispatch_tasks 后必须输出 FINAL 结束本轮。系统会自动将任务转发给群友执行，完成后叫你回来复盘。\n禁止：自己重做群友工作、调度完还自己继续干活。",
+    "taskRepeatedDispatch": "管理员连续给出了与上一轮等价的重复分派。系统已停止重复空转，转入最终答复。",
     "taskWorkerAssignment": "管理员分配给你的任务：{task}",
     "taskWorkerRule": "第 {round} 轮执行群友。上下文隔离——只看到用户消息和分配给你的任务。独立完成、直接输出结果。禁止：称呼任何人、分派任务、指挥他人。你没有 dispatch_tasks。",
     "taskWorkerRetryRule": "你上一条回复没有直接执行自己被分配的任务。请重试，并且只输出你这项任务的实质结果：具体证据、交付物、风险或修正意见。不要称呼任何人，不要复述协调过程，不要分派任务，也不要把任务交回去。",

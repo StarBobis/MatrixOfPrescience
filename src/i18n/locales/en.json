@@ -163,6 +163,7 @@
       "status": {
         "checking": "Checking",
         "consensus": "Resolving",
+        "error": "Error",
         "followup": "Follow-up",
         "queued": "Queued",
         "speaking": "Speaking",
@@ -401,7 +402,8 @@
     "taskPlanRetryRule": "Your previous response contained no recognizable assignment. Keep at least one of the real worker templates below, delete lines for workers not needed, and fill a concrete task after each retained colon. Do not rename workers or add empty lines, an introduction, or a summary.",
     "taskPlanInvalid": "The coordinator twice failed to return at least one valid assignment using a real worker name. This round stopped instead of presenting the invalid plan as completed.",
     "taskRedispatchInstruction": "The previous review requested redispatch. You must create this round's assignments from the following correction instructions. Do not repeat the previous plan or ignore these corrections:\n{instruction}",
-    "taskReviewRule": "Round {round} review. Worker results are in the chat. Decide NOW:\n\n1) Good enough → give the user the final answer\n2) Not good enough → re-dispatch (call dispatch_tasks or REDISPATCH: + - {'@'}Name: correction task)\n\nForbidden: redoing worker work yourself.",
+    "taskReviewRule": "Round {round} review. Worker results are in the chat. Decide NOW:\n\n1) Good enough → give the user the final answer\n2) Not good enough → re-dispatch (call dispatch_tasks or REDISPATCH: + - {'@'}Name: correction task)\n\nAfter calling dispatch_tasks, you MUST return FINAL to end this round. The system automatically forwards tasks to workers and calls you back for review.\nForbidden: redoing worker work yourself or continuing to work after dispatching.",
+    "taskRepeatedDispatch": "The coordinator repeated an equivalent dispatch from the previous round. The system stopped the loop and switched to a forced final answer.",
     "taskWorkerAssignment": "Your assigned task: {task}",
     "taskWorkerRule": "You are a worker, not the coordinator, in task round {round}. Your context is fully isolated — you only see the user's original message and your assigned task, not other workers' work or the coordinator's planning. Execute only your assigned specialist task thoroughly and independently, and output the actual result itself. Do not address the coordinator, the user, or any other member (you have no such context). You must not plan overall work, assign or direct other members, or hand the task back. You do not have the dispatch_tasks tool.",
     "taskWorkerRetryRule": "Your previous reply did not execute the assigned task directly. Retry by producing only the substantive result for your own assigned work: concrete evidence, deliverables, risks, or corrections. Do not address anyone, do not restate coordination, do not assign work, and do not hand the task back.",

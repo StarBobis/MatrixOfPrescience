@@ -2512,6 +2512,39 @@ function buildTaskWorkerRetryRule(assignment: TaskAssignment, round: number) {
   ].join("\n");
 }
 
+function normalizeTaskInstructionSignature(instruction: string) {
+  return instruction.replace(/\s+/g, " ").trim().toLocaleLowerCase();
+}
+
+function buildTaskAssignmentSignature(assignments: TaskAssignment[]) {
+  return assignments
+    .map(
+      ({ member, instruction }) =>
+        `${member.name.trim().toLocaleLowerCase()}:${normalizeTaskInstructionSignature(instruction)}`,
+    )
+    .sort()
+    .join("\n");
+}
+
+function buildDispatchEntrySignature(entries: Array<{ member: string; instruction: string }>) {
+  return entries
+    .map(
+      ({ member, instruction }) =>
+        `${member.trim().replace(/^@+/, "").toLocaleLowerCase()}:${normalizeTaskInstructionSignature(instruction)}`,
+    )
+    .sort()
+    .join("\n");
+}
+
+function buildRedispatchInstructionSignature(instruction: string) {
+  return instruction
+    .split("\n")
+    .map((line) => normalizeTaskInstructionSignature(line))
+    .filter(Boolean)
+    .sort()
+    .join("\n");
+}
+
 async function askTaskWorker(
   assignment: TaskAssignment,
   members: AgentModel[],
@@ -2578,6 +2611,28 @@ function buildTaskReviewRule(round: number, forceFinal = false) {
     : t("chatRuntime.taskReviewRule", { round });
 }
 
+async function requestForcedTaskFinalReview(
+  admin: AgentModel,
+  round: number,
+  runId: string,
+  ownerName: string,
+) {
+  ElMessage.warning(t("chatRuntime.taskRepeatedDispatch"));
+  setSpeakerQueue([admin], "queued");
+  await askMember(
+    admin,
+    buildTaskReviewRule(round, true),
+    runId,
+    undefined,
+    ownerName,
+    false,
+    buildConversation(),
+    true,   // orchestrationToolsEnabled
+    false,  // orchestrationRequired
+    true,   // forceCodeTools
+  );
+}
+
 async function runTaskGroup(
   members: AgentModel[],
   runId: string,
@@ -2592,6 +2647,8 @@ async function runTaskGroup(
   }
 
   let redispatchInstruction = "";
+  let previousAssignmentSignature = "";
+  let previousRedispatchSignature = "";
 
   for (let round = 1; round <= maxTaskRounds; round += 1) {
     if (isRunInterrupted(runId)) {
@@ -2622,6 +2679,13 @@ async function runTaskGroup(
       ElMessage.warning(t("chatRuntime.taskPlanInvalid"));
       return;
     }
+
+    const assignmentSignature = buildTaskAssignmentSignature(assignments);
+    if (assignmentSignature && assignmentSignature === previousAssignmentSignature) {
+      await requestForcedTaskFinalReview(admin, round, runId, ownerName);
+      return;
+    }
+    previousAssignmentSignature = assignmentSignature;
 
     setSpeakerQueue(
       assignments.map((assignment) => assignment.member),
@@ -2683,9 +2747,16 @@ async function runTaskGroup(
     );
 
     if (reviewDispatches.length > 0) {
-      redispatchInstruction = reviewDispatches
+      const nextRedispatchInstruction = reviewDispatches
         .map((entry) => `- @${entry.member}: ${entry.instruction}`)
         .join("\n");
+      const nextRedispatchSignature = buildDispatchEntrySignature(reviewDispatches);
+      if (nextRedispatchSignature && nextRedispatchSignature === previousRedispatchSignature) {
+        await requestForcedTaskFinalReview(admin, round, runId, ownerName);
+        return;
+      }
+      redispatchInstruction = nextRedispatchInstruction;
+      previousRedispatchSignature = nextRedispatchSignature;
       continue;
     }
 
@@ -2695,7 +2766,13 @@ async function runTaskGroup(
       return;
     }
 
+    const nextRedispatchSignature = buildRedispatchInstructionSignature(redispatch.instruction);
+    if (nextRedispatchSignature && nextRedispatchSignature === previousRedispatchSignature) {
+      await requestForcedTaskFinalReview(admin, round, runId, ownerName);
+      return;
+    }
     redispatchInstruction = redispatch.instruction;
+    previousRedispatchSignature = nextRedispatchSignature;
   }
 
   if (!isRunInterrupted(runId)) {

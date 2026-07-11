@@ -32,6 +32,7 @@ export type SpeakerQueueStatus =
   | "voting"
   | "voted"
   | "consensus"
+  | "error"
   | "followup";
 
 export interface SpeakerQueueItem {
@@ -150,6 +151,7 @@ const speakerQueueStatusType: Record<
   voting: "warning",
   voted: "success",
   consensus: "primary",
+  error: "danger",
   followup: "warning",
 };
 const codeFenceLinePattern = /^\s*```([A-Za-z0-9_+.#-]*)?\s*$/;
