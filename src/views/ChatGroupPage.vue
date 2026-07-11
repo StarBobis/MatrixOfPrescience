@@ -1184,6 +1184,34 @@ function parseMemberVote(content: string): MemberVote {
   return "agree";
 }
 
+function getVotePendingContent(targetName: string) {
+  return t("chatRuntime.votePendingContent", { name: targetName });
+}
+
+function getVoteFinalContent(vote: MemberVote, targetName: string) {
+  if (vote === "disagree") {
+    return t("chatRuntime.voteDisagreeContent", { name: targetName });
+  }
+
+  if (vote === "supplement") {
+    return t("chatRuntime.voteSupplementContent", { name: targetName });
+  }
+
+  return t("chatRuntime.voteAgreeContent", { name: targetName });
+}
+
+function getVoteCompletionStep(vote: MemberVote) {
+  if (vote === "disagree") {
+    return t("chatRuntime.stepVoteDisagree");
+  }
+
+  if (vote === "supplement") {
+    return t("chatRuntime.stepVoteSupplement");
+  }
+
+  return t("chatRuntime.stepVoteAgree");
+}
+
 function isRunInterrupted(runId: string) {
   return !runId || activeRunId.value !== runId;
 }
@@ -2313,10 +2341,70 @@ async function voteOnAnswer(
   }
 
   const provider = getProvider(voter);
+  const pendingId = crypto.randomUUID();
+  const startedAt = Date.now();
+  const voteRule = [
+    t("chatRuntime.voteQuestion", { name: answer.member.name }),
+    t("chatRuntime.voteAgreeRule"),
+    t("chatRuntime.voteSupplementRule"),
+    t("chatRuntime.voteDisagreeRule"),
+  ].join("\n");
+  const conversation = buildConversation();
+  const codeToolsEnabled = workspaceToolsAllowed();
+  const systemPrompt = buildSystemPrompt(
+    voter,
+    activeGroup.value,
+    voteRule,
+    "",
+    buildDurableConversationContext(),
+  );
+  const contextUsage = buildContextUsageSnapshot(voter, conversation, systemPrompt);
+
+  settingsStore.appendPendingMessage({
+    id: pendingId,
+    role: "assistant",
+    modelName: voter.name,
+    providerName: getProviderLabel(voter.provider),
+    avatar: voter.avatar,
+    apiModel: voter.model,
+    reasoningEffort: voter.reasoningEffort,
+    startedAt,
+    durationMs: 0,
+    ...contextUsage,
+    status: "thinking",
+    content: getVotePendingContent(answer.member.name),
+    color: voter.color,
+    thoughtSteps: [],
+    activityItems: [
+      createActivityItem("status", t("chatRuntime.stepCheckingVote"), "running"),
+    ],
+    executionItems: [
+      createExecutionItem(
+        "status",
+        t("chatRuntime.stepCheckingVote"),
+        "running",
+        "",
+        ensureExecutionSegmentId(pendingId),
+      ),
+    ],
+  });
+  startSpeakingTimer(pendingId, startedAt);
+  pendingMessageIds.value = [...pendingMessageIds.value, pendingId];
+  await scrollToBottom();
 
   try {
-    const response = await invoke<ChatCompletionResponse>("chat_completion", {
-      request: {
+    addActivityItem(
+      pendingId,
+      "status",
+      codeToolsEnabled ? t("chatRuntime.stepGotContext") : t("chatRuntime.stepNoContext"),
+      codeToolsEnabled ? "running" : "info",
+    );
+    addActivityItem(pendingId, "status", t("chatRuntime.stepWaitingModel"), "running");
+
+    const { response, sawStreamReasoning, sawStreamTool } = await invokeStreamingCompletion(
+      pendingId,
+      runId,
+      {
         providerName: provider.name,
         baseUrl: provider.baseUrl,
         apiKey: provider.apiKey,
@@ -2325,33 +2413,54 @@ async function voteOnAnswer(
         reasoningEffort: voter.reasoningEffort,
         temperature: 0,
         workspacePath: activeGroup.value?.workspacePath ?? "",
-        codeToolsEnabled: workspaceToolsAllowed(),
-        cancellationId: runId,
-        systemPrompt: buildSystemPrompt(
-          voter,
-          activeGroup.value,
-          [
-            t("chatRuntime.voteQuestion", { name: answer.member.name }),
-            t("chatRuntime.voteAgreeRule"),
-            t("chatRuntime.voteSupplementRule"),
-            t("chatRuntime.voteDisagreeRule"),
-          ].join("\n"),
-          "",
-          buildDurableConversationContext(),
-        ),
-        messages: buildConversation(),
+        codeToolsEnabled,
+        systemPrompt,
+        messages: conversation,
       },
-    });
+      { showContent: false },
+    );
 
     if (isRunInterrupted(runId)) {
+      releasePendingMessage(pendingId, startedAt);
       return "agree";
     }
 
-    return parseMemberVote(response.content);
+    addResponseTraceSteps(pendingId, response, {
+      includeReasoning: !sawStreamReasoning,
+      includeTool: !sawStreamTool,
+    });
+
+    const vote = parseMemberVote(response.content);
+    const finalContent = getVoteFinalContent(vote, answer.member.name);
+    const savedReasoning = streamingReasoning.get(pendingId)?.trim();
+    settingsStore.updateMessage(pendingId, {
+      status: "done",
+      content: finalContent,
+      reasoningContent: savedReasoning || undefined,
+      contentSegments: getFinalContentSegments(pendingId, finalContent),
+    });
+    applyCompletionUsage(pendingId, response.usage);
+    addActivityItem(pendingId, "status", getVoteCompletionStep(vote), "done");
+    releasePendingMessage(pendingId, startedAt);
+    return vote;
   } catch (error) {
+    if (isRunInterrupted(runId)) {
+      releasePendingMessage(pendingId, startedAt);
+      return "agree";
+    }
+
     const errorPresentation = describeError(error, t("chatRuntime.unknownError"));
+    const failureContent = t("chatRuntime.callFailedContent", {
+      error: errorPresentation.summary,
+    });
+    releasePendingMessage(pendingId, startedAt);
+    settingsStore.updateMessage(pendingId, {
+      status: "error",
+      content: failureContent,
+      contentSegments: getFinalContentSegments(pendingId, failureContent),
+    });
     addActivityItem(
-      answer.messageId,
+      pendingId,
       "status",
       t("chatRuntime.voteFailed", {
         name: voter.name,
