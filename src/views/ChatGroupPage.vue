@@ -78,6 +78,7 @@ interface ChatCompletionResponse {
   content: string;
   traceSteps?: ChatTraceStep[];
   usage?: ChatCompletionUsage;
+  dispatchedTasks?: Array<{ member: string; instruction: string }>;
 }
 
 interface ChatCompletionStreamEvent {
@@ -108,7 +109,7 @@ interface ApplyPatchResponse {
 type MemberDecision = "speak" | "wait";
 type MemberVote = "agree" | "supplement" | "disagree";
 
-interface MemberAnswer { messageId: string; member: AgentModel; content: string; traceSteps: ChatTraceStep[] }
+interface MemberAnswer { messageId: string; member: AgentModel; content: string; traceSteps: ChatTraceStep[]; dispatchedTasks?: Array<{ member: string; instruction: string }> }
 
 interface TaskAssignment {
   member: AgentModel;
@@ -2255,12 +2256,20 @@ async function askMember(
       includeTool: !sawStreamTool,
     });
     addActivityItem(pendingId, "status", t("chatRuntime.stepDone"), "done");
+
+    if (response.dispatchedTasks && response.dispatchedTasks.length > 0) {
+      for (const task of response.dispatchedTasks) {
+        addExecutionItem(pendingId, "tool", `dispatch → ${task.member}`, "done", task.instruction);
+      }
+    }
+
     await maybeCreatePatchProposal(member, finalContent);
     return {
       messageId: pendingId,
       member,
       content: finalContent,
       traceSteps: response.traceSteps ?? [],
+      dispatchedTasks: response.dispatchedTasks,
     };
   } catch (error) {
     if (isRunInterrupted(runId)) {
@@ -2602,6 +2611,7 @@ async function runTaskGroup(
     const assignments = resolveTaskAssignments(plan, workers);
 
     if (assignments.length === 0) {
+      ElMessage.warning(t("chatRuntime.taskPlanInvalid"));
       return;
     }
 
@@ -2609,11 +2619,33 @@ async function runTaskGroup(
       assignments.map((assignment) => assignment.member),
       "queued",
     );
-    await Promise.all(
-      assignments.map((assignment) =>
-        askTaskWorker(assignment, members, round, runId),
+
+    const workerItemIds = assignments.map((assignment) => {
+      const itemId = addExecutionItem(
+        plan.messageId,
+        "tool",
+        `${assignment.member.name} 执行中…`,
+        "running",
+        assignment.instruction,
+      );
+      return { assignment, itemId };
+    });
+
+    const workerResults = await Promise.all(
+      workerItemIds.map(({ assignment, itemId }) =>
+        askTaskWorker(assignment, members, round, runId).then((result) => ({ itemId, result })),
       ),
     );
+
+    for (const { itemId, result } of workerResults) {
+      const workerName = result?.member?.name
+        ?? workerItemIds.find((w) => w.itemId === itemId)?.assignment.member.name
+        ?? "未知";
+      updateExecutionItem(plan.messageId, itemId, {
+        status: result ? "done" : "error",
+        text: result ? `${workerName} 已完成` : `${workerName} 执行失败`,
+      });
+    }
 
     if (isRunInterrupted(runId)) {
       return;
@@ -2684,13 +2716,9 @@ function resolveTaskAssignments(
 ): TaskAssignment[] {
   if (!adminResponse) return [];
 
-  const dispatchEntries = parseDispatchTasksFromResponse(
-    adminResponse.traceSteps ?? [],
-    workers,
-  );
-
-  if (dispatchEntries.length > 0) {
-    return dispatchEntries
+  // Priority 1: use dispatchedTasks from the response (authoritative backend signal)
+  if (adminResponse.dispatchedTasks && adminResponse.dispatchedTasks.length > 0) {
+    const assignments = adminResponse.dispatchedTasks
       .map((entry) => {
         const worker = workers.find(
           (member) => member.name.trim() === entry.member,
@@ -2698,8 +2726,34 @@ function resolveTaskAssignments(
         return worker ? { member: worker, instruction: entry.instruction } : null;
       })
       .filter((assignment): assignment is TaskAssignment => assignment !== null);
+
+    if (assignments.length > 0) {
+      return assignments;
+    }
   }
 
+  // Priority 2: parse from trace steps (backward compatible)
+  const dispatchEntries = parseDispatchTasksFromResponse(
+    adminResponse.traceSteps ?? [],
+    workers,
+  );
+
+  if (dispatchEntries.length > 0) {
+    const assignments = dispatchEntries
+      .map((entry) => {
+        const worker = workers.find(
+          (member) => member.name.trim() === entry.member,
+        );
+        return worker ? { member: worker, instruction: entry.instruction } : null;
+      })
+      .filter((assignment): assignment is TaskAssignment => assignment !== null);
+
+    if (assignments.length > 0) {
+      return assignments;
+    }
+  }
+
+  // Priority 3: fallback to parsing narrative assignment text
   return buildTaskAssignments(adminResponse.content, workers);
 }
 

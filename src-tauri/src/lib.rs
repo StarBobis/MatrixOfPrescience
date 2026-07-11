@@ -81,6 +81,15 @@ struct ChatCompletionResponse {
     content: String,
     trace_steps: Vec<ChatTraceStep>,
     usage: Option<ChatCompletionUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dispatched_tasks: Option<Vec<TaskDispatchedEntry>>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TaskDispatchedEntry {
+    member: String,
+    instruction: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -853,6 +862,7 @@ async fn chat_completion(
     let mut tool_only_rounds: usize = 0;
     let mut tool_calls_since_checkpoint = 0usize;
     let mut total_tool_calls_executed = 0usize;
+    let mut dispatched_tasks: Option<Vec<TaskDispatchedEntry>> = None;
     let mut tool_checkpoint_pending = false;
     let mut tool_budget_reset_pending = false;
     let mut validation = ValidationState::default();
@@ -890,7 +900,6 @@ async fn chat_completion(
             }
             _ => None,
         };
-        let deepseek_thinking = agent_turn_state.thinking_enabled(turn_phase);
         let payload_messages = chat_payload_messages(
             &messages,
             final_answer_requested && !validation_tool_required && !repair_required,
@@ -915,15 +924,7 @@ async fn chat_completion(
             && !orchestration_required;
         let orchestration_tools_allowed =
             !tools_blocked && request.orchestration_tools_enabled.unwrap_or(false);
-        let orchestration_tools_suppressed = deepseek_thinking
-            && orchestration_required
-            && matches!(
-                turn_phase,
-                AgentTurnPhase::ToolReflection | AgentTurnPhase::BudgetCheckpoint
-            );
-        let effective_orchestration_tools =
-            orchestration_tools_allowed && !orchestration_tools_suppressed;
-        let any_tools_allowed = code_tools_allowed || effective_orchestration_tools;
+        let any_tools_allowed = code_tools_allowed || orchestration_tools_allowed;
         let strict_tool_schema = is_deepseek && any_tools_allowed;
 
         let reasoning_effort = agent_turn_state.reasoning_effort(
@@ -943,7 +944,7 @@ async fn chat_completion(
                     tools.extend(code_tools);
                 }
             }
-            if effective_orchestration_tools {
+            if orchestration_tools_allowed {
                 if let Value::Array(orchestration_tools) = orchestration_tools_schema(is_deepseek) {
                     tools.extend(orchestration_tools);
                 }
@@ -953,7 +954,7 @@ async fn chat_completion(
                 turn_phase,
                 validation_tool_required,
                 repair_required,
-                orchestration_required && !orchestration_tools_suppressed,
+                orchestration_required,
             ) {
                 payload["tool_choice"] = tool_choice;
             }
@@ -980,7 +981,7 @@ async fn chat_completion(
                         fallback_tools.extend(code_tools);
                     }
                 }
-                if effective_orchestration_tools {
+                if orchestration_tools_allowed {
                     if let Value::Array(orchestration_tools) = orchestration_tools_schema(false) {
                         fallback_tools.extend(orchestration_tools);
                     }
@@ -990,7 +991,7 @@ async fn chat_completion(
                     turn_phase,
                     validation_tool_required,
                     repair_required,
-                    orchestration_required && !orchestration_tools_suppressed,
+                    orchestration_required,
                 ) {
                     payload["tool_choice"] = tool_choice;
                 } else {
@@ -1090,6 +1091,11 @@ async fn chat_completion(
                             )
                         };
                         validation_run.observe_tool_result(tool_call, &tool_result);
+                        if dispatched_tasks.is_none() {
+                            if let Some(entries) = extract_dispatched_tasks(tool_call, &tool_result) {
+                                dispatched_tasks = Some(entries);
+                            }
+                        }
                         if ValidationOps::result_succeeded(&tool_result)
                             && ValidationOps::is_edit_call(tool_call)
                         {
@@ -1246,6 +1252,7 @@ async fn chat_completion(
                             content,
                             trace_steps,
                             usage: last_usage,
+                        dispatched_tasks: dispatched_tasks.take(),
                         });
                     }
                     AgentReflectionDecision::RequestFinalAnswer => {
@@ -1312,6 +1319,7 @@ async fn chat_completion(
                 content,
                 trace_steps,
                 usage: last_usage,
+                dispatched_tasks: dispatched_tasks.take(),
             });
         }
 
@@ -1329,6 +1337,7 @@ async fn chat_completion(
                             content: finish_content,
                             trace_steps,
                             usage: last_usage,
+                        dispatched_tasks: dispatched_tasks.take(),
                         });
                     }
                     AgentReflectionDecision::RequestFinalAnswer => {
@@ -1772,6 +1781,7 @@ async fn openai_responses_completion(
                 content,
                 trace_steps,
                 usage: last_usage,
+                dispatched_tasks: None,
             });
         }
 
@@ -2425,6 +2435,43 @@ fn emit_overload_retry_event(app: &AppHandle, stream_id: &str, progress: HttpRet
             retry_reason,
         },
     );
+}
+
+/// If tool_call is a successful dispatch_tasks invocation, return the task entries.
+fn extract_dispatched_tasks(tool_call: &Value, tool_result: &Value) -> Option<Vec<TaskDispatchedEntry>> {
+    let function = tool_call.get("function")?;
+    let name = function.get("name")?.as_str()?;
+    if name != "dispatch_tasks" {
+        return None;
+    }
+
+    if !ValidationOps::result_succeeded(tool_result) {
+        return None;
+    }
+
+    let arguments: Value = function
+        .get("arguments")
+        .and_then(|a| serde_json::from_str(a.as_str()?).ok())?;
+    let tasks = arguments.get("tasks")?.as_array()?;
+
+    let entries: Vec<TaskDispatchedEntry> = tasks
+        .iter()
+        .filter_map(|task| {
+            let member = task
+                .get("member")?
+                .as_str()?
+                .trim()
+                .trim_start_matches('@')
+                .to_string();
+            let instruction = task.get("instruction")?.as_str()?.trim().to_string();
+            if member.is_empty() || instruction.is_empty() {
+                return None;
+            }
+            Some(TaskDispatchedEntry { member, instruction })
+        })
+        .collect();
+
+    if entries.is_empty() { None } else { Some(entries) }
 }
 
 fn emit_trace_step(app: &AppHandle, stream_id: Option<&str>, step: &ChatTraceStep) {
