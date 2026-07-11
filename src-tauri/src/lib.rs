@@ -827,8 +827,11 @@ async fn chat_completion(
 
     let endpoint = chat_completions_endpoint(&request.base_url);
     let client = reqwest::Client::new();
-    let deepseek_thinking =
+    let deepseek_reasoning_requested =
         deepseek_thinking_enabled(is_deepseek, request.reasoning_effort.as_deref());
+    let deepseek_tool_workflow = is_deepseek
+        && (request.code_tools_enabled.unwrap_or(false)
+            || request.orchestration_tools_enabled.unwrap_or(false));
     let can_write = request.can_write.unwrap_or(false);
     let max_tool_calls_per_turn = if is_deepseek {
         MAX_DEEPSEEK_TOOL_CALLS_PER_TURN
@@ -863,6 +866,15 @@ async fn chat_completion(
         let repair_required = edit_recovery_required || validation.requires_repair();
         let checkpoint_required =
             tool_checkpoint_pending && !validation_tool_required && !repair_required;
+        let deepseek_thinking = deepseek_thinking_for_turn(
+            deepseek_reasoning_requested,
+            deepseek_tool_workflow,
+            code_tool_called,
+            final_answer_requested,
+            checkpoint_required,
+            validation_tool_required,
+            repair_required,
+        );
         let payload_messages = chat_payload_messages(
             &messages,
             final_answer_requested && !validation_tool_required && !repair_required,
@@ -887,13 +899,15 @@ async fn chat_completion(
         let any_tools_allowed = code_tools_allowed || effective_orchestration_tools;
         let strict_tool_schema = is_deepseek && any_tools_allowed;
 
-        let reasoning_effort = if checkpoint_required {
-            Some(TOOL_CALL_CHECKPOINT_REASONING_EFFORT)
-        } else if is_deepseek && (validation_tool_required || repair_required) {
-            Some("off")
-        } else {
-            request.reasoning_effort.as_deref()
-        };
+        let reasoning_effort = reasoning_effort_for_turn(
+            is_deepseek,
+            request.reasoning_effort.as_deref(),
+            deepseek_tool_workflow,
+            deepseek_thinking,
+            checkpoint_required,
+            validation_tool_required,
+            repair_required,
+        );
         apply_reasoning_payload(&mut payload, is_deepseek, reasoning_effort);
 
         if any_tools_allowed {
@@ -1684,6 +1698,54 @@ fn reasoning_enabled(reasoning_effort: Option<&str>) -> bool {
 
 fn deepseek_thinking_enabled(is_deepseek: bool, reasoning_effort: Option<&str>) -> bool {
     is_deepseek && reasoning_enabled(reasoning_effort)
+}
+
+fn deepseek_thinking_for_turn(
+    deepseek_reasoning_requested: bool,
+    deepseek_tool_workflow: bool,
+    code_tool_called: bool,
+    final_answer_requested: bool,
+    checkpoint_required: bool,
+    validation_tool_required: bool,
+    repair_required: bool,
+) -> bool {
+    if !deepseek_reasoning_requested || validation_tool_required || repair_required {
+        return false;
+    }
+
+    if !deepseek_tool_workflow {
+        return true;
+    }
+
+    code_tool_called && (checkpoint_required || final_answer_requested)
+}
+
+fn reasoning_effort_for_turn<'a>(
+    is_deepseek: bool,
+    request_reasoning_effort: Option<&'a str>,
+    deepseek_tool_workflow: bool,
+    deepseek_thinking: bool,
+    checkpoint_required: bool,
+    validation_tool_required: bool,
+    repair_required: bool,
+) -> Option<&'a str> {
+    if checkpoint_required {
+        if is_deepseek && deepseek_tool_workflow && !deepseek_thinking {
+            return Some("off");
+        }
+
+        return Some(TOOL_CALL_CHECKPOINT_REASONING_EFFORT);
+    }
+
+    if is_deepseek
+        && (validation_tool_required
+            || repair_required
+            || (deepseek_tool_workflow && !deepseek_thinking))
+    {
+        return Some("off");
+    }
+
+    request_reasoning_effort
 }
 
 fn chat_tool_choice(
@@ -3176,6 +3238,38 @@ mod tests {
 
         assert_eq!(payload["thinking"], json!({ "type": "enabled" }));
         assert_eq!(payload["reasoning_effort"], json!("high"));
+    }
+
+    #[test]
+    fn deepseek_tool_workflow_disables_thinking_until_checkpoint_or_final_turn() {
+        assert!(!deepseek_thinking_for_turn(
+            true, true, false, false, false, false, false
+        ));
+        assert!(deepseek_thinking_for_turn(
+            true, true, true, false, true, false, false
+        ));
+        assert!(deepseek_thinking_for_turn(
+            true, true, true, true, false, false, false
+        ));
+        assert!(!deepseek_thinking_for_turn(
+            true, true, true, false, false, false, false
+        ));
+    }
+
+    #[test]
+    fn deepseek_tool_workflow_turns_reasoning_off_during_tool_phase_and_restores_it_later() {
+        assert_eq!(
+            reasoning_effort_for_turn(true, Some("high"), true, false, false, false, false),
+            Some("off")
+        );
+        assert_eq!(
+            reasoning_effort_for_turn(true, Some("medium"), true, true, true, false, false),
+            Some(TOOL_CALL_CHECKPOINT_REASONING_EFFORT)
+        );
+        assert_eq!(
+            reasoning_effort_for_turn(true, Some("low"), true, true, false, false, false),
+            Some("low")
+        );
     }
 
     #[test]
