@@ -2906,33 +2906,6 @@ async function sendMessage() {
       ownerName,
     );
     await resolveConsensus(latestAnswer, runId);
-
-    if (!latestAnswer) {
-      return;
-    }
-
-    const observerMembers = prioritizeMembers(members.filter((member) => member.id !== primaryMember.id));
-    setSpeakerQueue(observerMembers, "waiting");
-
-    for (const member of observerMembers) {
-      if (isRunInterrupted(runId)) {
-        return;
-      }
-
-      const decision = await decideMemberResponse(member, "afterPeers", runId);
-
-      if (decision.decision === "speak") {
-        const answer = await askMember(
-          member,
-          t("chatRuntime.observerRule"),
-          runId,
-          decision.pendingMessage,
-          latestAnswer?.member.name ?? ownerName,
-        );
-        latestAnswer = answer ?? latestAnswer;
-        await resolveConsensus(answer, runId);
-      }
-    }
   } finally {
     await invoke("finish_chat_completion", { cancellationId: runId }).catch(() => undefined);
     if (activeRunId.value === runId) {
