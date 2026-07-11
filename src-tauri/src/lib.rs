@@ -25,6 +25,7 @@ use tools::{
     code_tools_schema, execute_code_tool_call, orchestration_tools_schema, tool_call_trace_step,
     tool_result_trace_step, validate_workspace,
 };
+use utils::agent_turn_utils::{AgentReflectionDecision, AgentTurnPhase, AgentTurnState};
 use utils::tool_call_utils::ToolCallUtils;
 use validation::{
     ValidationOps, ValidationRun, ValidationState, VALIDATION_FAILURE_RECOVERY_INSTRUCTION,
@@ -196,6 +197,7 @@ const MAX_DEEPSEEK_TOOL_CALLS_PER_TURN: usize = 1;
 const TOOL_CALL_CHECKPOINT_INTERVAL: usize = 8;
 const TOOL_CALL_CHECKPOINT_REASONING_EFFORT: &str = "high";
 const TOOL_CALL_CHECKPOINT_INSTRUCTION: &str = "Checkpoint: the tool-call budget for this step has been reached. On this turn, do not call any tools. Briefly summarize what you have learned, what remains uncertain, and the single best next step. Keep it concise. After this checkpoint, continue the task on the following turn without waiting for user input if more work is needed.";
+const DEEPSEEK_TOOL_ACTION_INSTRUCTION: &str = "This is a tool action turn. Do not answer with prose. Call exactly one available tool now, using the latest reflection and tool results to choose it.";
 const CACHE_LOCATION_FILE: &str = "cache-location.json";
 const SETTINGS_FILE: &str = "settings.json";
 const MEMBER_LIBRARY_FILE: &str = "member-library.json";
@@ -828,10 +830,16 @@ async fn chat_completion(
     let endpoint = chat_completions_endpoint(&request.base_url);
     let client = reqwest::Client::new();
     let deepseek_reasoning_requested =
-        deepseek_thinking_enabled(is_deepseek, request.reasoning_effort.as_deref());
+        is_deepseek && reasoning_enabled(request.reasoning_effort.as_deref());
     let deepseek_tool_workflow = is_deepseek
         && (request.code_tools_enabled.unwrap_or(false)
             || request.orchestration_tools_enabled.unwrap_or(false));
+    let mut agent_turn_state = AgentTurnState::new(
+        is_deepseek,
+        deepseek_reasoning_requested,
+        deepseek_tool_workflow,
+    );
+    let max_chat_completion_turns = agent_turn_state.max_turns(MAX_CHAT_COMPLETION_TURNS);
     let can_write = request.can_write.unwrap_or(false);
     let max_tool_calls_per_turn = if is_deepseek {
         MAX_DEEPSEEK_TOOL_CALLS_PER_TURN
@@ -858,40 +866,43 @@ async fn chat_completion(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
 
-    for turn_index in 0..MAX_CHAT_COMPLETION_TURNS {
+    for turn_index in 0..max_chat_completion_turns {
         let validation_tool_required = validation.requires_tool(edit_recovery_required);
         if validation_tool_required {
             validation.mark_model_prompted();
         }
         let repair_required = edit_recovery_required || validation.requires_repair();
-        let checkpoint_required =
-            tool_checkpoint_pending && !validation_tool_required && !repair_required;
-        let deepseek_thinking = deepseek_thinking_for_turn(
-            deepseek_reasoning_requested,
-            deepseek_tool_workflow,
-            code_tool_called,
+        let turn_phase = agent_turn_state.phase(
             final_answer_requested,
-            checkpoint_required,
+            tool_checkpoint_pending,
             validation_tool_required,
             repair_required,
         );
+        let checkpoint_required = matches!(
+            turn_phase,
+            AgentTurnPhase::ToolReflection | AgentTurnPhase::BudgetCheckpoint
+        );
+        let checkpoint_instruction = match turn_phase {
+            AgentTurnPhase::ToolReflection => Some(AgentTurnState::DEEPSEEK_REFLECTION_INSTRUCTION),
+            AgentTurnPhase::BudgetCheckpoint => Some(TOOL_CALL_CHECKPOINT_INSTRUCTION),
+            _ => None,
+        };
+        let deepseek_thinking = agent_turn_state.thinking_enabled(turn_phase);
         let payload_messages = chat_payload_messages(
             &messages,
             final_answer_requested && !validation_tool_required && !repair_required,
             validation_tool_required,
-            checkpoint_required,
+            checkpoint_instruction,
         );
         let mut payload = json!({
             "model": request.model,
             "messages": payload_messages,
             "temperature": request.temperature.unwrap_or(0.7),
         });
-        let code_tools_allowed = !checkpoint_required
-            && code_workspace.is_some()
-            && (!final_answer_requested || validation_tool_required || repair_required);
-        let orchestration_tools_allowed = !checkpoint_required
-            && !final_answer_requested
-            && request.orchestration_tools_enabled.unwrap_or(false);
+        let tools_blocked = turn_phase.blocks_tools();
+        let code_tools_allowed = !tools_blocked && code_workspace.is_some();
+        let orchestration_tools_allowed =
+            !tools_blocked && request.orchestration_tools_enabled.unwrap_or(false);
         let orchestration_required = request.orchestration_required.unwrap_or(false);
         let orchestration_tools_suppressed = deepseek_thinking && orchestration_required;
         let effective_orchestration_tools =
@@ -899,16 +910,15 @@ async fn chat_completion(
         let any_tools_allowed = code_tools_allowed || effective_orchestration_tools;
         let strict_tool_schema = is_deepseek && any_tools_allowed;
 
-        let reasoning_effort = reasoning_effort_for_turn(
-            is_deepseek,
+        let reasoning_effort = agent_turn_state.reasoning_effort(
+            turn_phase,
             request.reasoning_effort.as_deref(),
-            deepseek_tool_workflow,
-            deepseek_thinking,
-            checkpoint_required,
-            validation_tool_required,
-            repair_required,
+            TOOL_CALL_CHECKPOINT_REASONING_EFFORT,
         );
         apply_reasoning_payload(&mut payload, is_deepseek, reasoning_effort);
+        if turn_phase == AgentTurnPhase::ToolReflection {
+            payload["max_tokens"] = json!(AgentTurnState::DEEPSEEK_REFLECTION_MAX_TOKENS);
+        }
 
         if any_tools_allowed {
             let mut tools: Vec<Value> = Vec::new();
@@ -923,12 +933,10 @@ async fn chat_completion(
                 }
             }
             payload["tools"] = Value::Array(tools);
-            if let Some(tool_choice) = chat_tool_choice(
-                is_deepseek,
-                deepseek_thinking,
+            if let Some(tool_choice) = agent_turn_state.tool_choice(
+                turn_phase,
                 validation_tool_required,
                 repair_required,
-                code_tool_called,
                 orchestration_required && !orchestration_tools_suppressed,
             ) {
                 payload["tool_choice"] = tool_choice;
@@ -961,12 +969,10 @@ async fn chat_completion(
                     }
                 }
                 payload["tools"] = Value::Array(fallback_tools);
-                if let Some(tool_choice) = chat_tool_choice(
-                    is_deepseek,
-                    deepseek_thinking,
+                if let Some(tool_choice) = agent_turn_state.tool_choice(
+                    turn_phase,
                     validation_tool_required,
                     repair_required,
-                    true,
                     orchestration_required && !orchestration_tools_suppressed,
                 ) {
                     payload["tool_choice"] = tool_choice;
@@ -1027,7 +1033,7 @@ async fn chat_completion(
                     if tool_execution_plan.executable_count == 0 {
                         if ToolCallUtils::can_open_next_autonomous_round(
                             turn_index,
-                            MAX_CHAT_COMPLETION_TURNS,
+                            max_chat_completion_turns,
                         ) {
                             tool_checkpoint_pending = true;
                             tool_budget_reset_pending = true;
@@ -1108,6 +1114,7 @@ async fn chat_completion(
                         final_answer_requested = false;
                     }
                     code_tool_called = true;
+                    agent_turn_state.mark_tools_executed();
                     total_tool_calls_executed += tool_execution_plan.executable_count;
                     ToolCallUtils::schedule_checkpoint(
                         &mut tool_calls_since_checkpoint,
@@ -1115,13 +1122,10 @@ async fn chat_completion(
                         tool_execution_plan.executable_count,
                         TOOL_CALL_CHECKPOINT_INTERVAL,
                     );
-                    if is_deepseek && tool_execution_plan.truncated {
-                        tool_checkpoint_pending = true;
-                    }
                     if total_tool_calls_executed >= MAX_TOTAL_TOOL_CALLS_PER_AUTONOMOUS_ROUND {
                         if ToolCallUtils::can_open_next_autonomous_round(
                             turn_index,
-                            MAX_CHAT_COMPLETION_TURNS,
+                            max_chat_completion_turns,
                         ) {
                             tool_checkpoint_pending = true;
                             tool_budget_reset_pending = true;
@@ -1137,7 +1141,7 @@ async fn chat_completion(
                         if !tool_checkpoint_pending && tool_only_rounds >= MAX_TOOL_ONLY_ROUNDS {
                             if ToolCallUtils::can_open_next_autonomous_round(
                                 turn_index,
-                                MAX_CHAT_COMPLETION_TURNS,
+                                max_chat_completion_turns,
                             ) {
                                 tool_checkpoint_pending = true;
                                 tool_budget_reset_pending = true;
@@ -1190,7 +1194,34 @@ async fn chat_completion(
         let content = StrUtils::message_content_text(&message);
 
         if !content.is_empty() {
-            if checkpoint_required {
+            if turn_phase == AgentTurnPhase::ToolReflection {
+                messages.push(message.clone());
+                agent_turn_state.complete_reflection();
+                tool_checkpoint_pending = false;
+                if tool_budget_reset_pending {
+                    tool_only_rounds = 0;
+                    tool_calls_since_checkpoint = 0;
+                    total_tool_calls_executed = 0;
+                    tool_budget_reset_pending = false;
+                }
+                match AgentTurnState::parse_reflection(&content) {
+                    AgentReflectionDecision::Continue => {
+                        final_answer_requested = false;
+                    }
+                    AgentReflectionDecision::Finish(content) => {
+                        return Ok(ChatCompletionResponse {
+                            content,
+                            trace_steps,
+                            usage: last_usage,
+                        });
+                    }
+                    AgentReflectionDecision::RequestFinalAnswer => {
+                        final_answer_requested = true;
+                    }
+                }
+                continue;
+            }
+            if turn_phase == AgentTurnPhase::BudgetCheckpoint {
                 messages.push(message.clone());
                 tool_checkpoint_pending = false;
                 final_answer_requested = false;
@@ -1240,6 +1271,13 @@ async fn chat_completion(
                 final_answer_requested = false;
                 continue;
             }
+            if turn_phase == AgentTurnPhase::ToolAction && deepseek_tool_workflow {
+                messages.push(json!({
+                    "role": "user",
+                    "content": DEEPSEEK_TOOL_ACTION_INSTRUCTION,
+                }));
+                continue;
+            }
 
             return Ok(ChatCompletionResponse {
                 content,
@@ -1248,7 +1286,8 @@ async fn chat_completion(
             });
         }
 
-        if checkpoint_required {
+        if turn_phase == AgentTurnPhase::ToolReflection {
+            agent_turn_state.complete_reflection();
             tool_checkpoint_pending = false;
             final_answer_requested = false;
             if tool_budget_reset_pending {
@@ -1257,6 +1296,26 @@ async fn chat_completion(
                 total_tool_calls_executed = 0;
                 tool_budget_reset_pending = false;
             }
+            continue;
+        }
+
+        if turn_phase == AgentTurnPhase::BudgetCheckpoint {
+            tool_checkpoint_pending = false;
+            final_answer_requested = false;
+            if tool_budget_reset_pending {
+                tool_only_rounds = 0;
+                tool_calls_since_checkpoint = 0;
+                total_tool_calls_executed = 0;
+                tool_budget_reset_pending = false;
+            }
+            continue;
+        }
+
+        if turn_phase == AgentTurnPhase::ToolAction && deepseek_tool_workflow {
+            messages.push(json!({
+                "role": "user",
+                "content": DEEPSEEK_TOOL_ACTION_INSTRUCTION,
+            }));
             continue;
         }
 
@@ -1696,85 +1755,6 @@ fn reasoning_enabled(reasoning_effort: Option<&str>) -> bool {
     !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("off")
 }
 
-fn deepseek_thinking_enabled(is_deepseek: bool, reasoning_effort: Option<&str>) -> bool {
-    is_deepseek && reasoning_enabled(reasoning_effort)
-}
-
-fn deepseek_thinking_for_turn(
-    deepseek_reasoning_requested: bool,
-    deepseek_tool_workflow: bool,
-    code_tool_called: bool,
-    final_answer_requested: bool,
-    checkpoint_required: bool,
-    validation_tool_required: bool,
-    repair_required: bool,
-) -> bool {
-    if !deepseek_reasoning_requested || validation_tool_required || repair_required {
-        return false;
-    }
-
-    if !deepseek_tool_workflow {
-        return true;
-    }
-
-    code_tool_called && (checkpoint_required || final_answer_requested)
-}
-
-fn reasoning_effort_for_turn<'a>(
-    is_deepseek: bool,
-    request_reasoning_effort: Option<&'a str>,
-    deepseek_tool_workflow: bool,
-    deepseek_thinking: bool,
-    checkpoint_required: bool,
-    validation_tool_required: bool,
-    repair_required: bool,
-) -> Option<&'a str> {
-    if checkpoint_required {
-        if is_deepseek && deepseek_tool_workflow && !deepseek_thinking {
-            return Some("off");
-        }
-
-        return Some(TOOL_CALL_CHECKPOINT_REASONING_EFFORT);
-    }
-
-    if is_deepseek
-        && (validation_tool_required
-            || repair_required
-            || (deepseek_tool_workflow && !deepseek_thinking))
-    {
-        return Some("off");
-    }
-
-    request_reasoning_effort
-}
-
-fn chat_tool_choice(
-    is_deepseek: bool,
-    deepseek_thinking: bool,
-    validation_tool_required: bool,
-    edit_recovery_required: bool,
-    code_tool_called: bool,
-    orchestration_required: bool,
-) -> Option<Value> {
-    if validation_tool_required || edit_recovery_required {
-        return Some(json!("required"));
-    }
-
-    if deepseek_thinking {
-        return None;
-    }
-
-    if orchestration_required {
-        return Some(json!("required"));
-    }
-
-    Some(if is_deepseek && !code_tool_called {
-        json!("required")
-    } else {
-        json!("auto")
-    })
-}
-
 fn apply_reasoning_payload(payload: &mut Value, is_deepseek: bool, reasoning_effort: Option<&str>) {
     let trimmed = reasoning_effort.unwrap_or("").trim();
     let reasoning_enabled = reasoning_enabled(reasoning_effort);
@@ -1796,7 +1776,7 @@ fn chat_payload_messages(
     messages: &[Value],
     final_answer_requested: bool,
     validation_required: bool,
-    checkpoint_required: bool,
+    checkpoint_instruction: Option<&str>,
 ) -> Vec<Value> {
     let mut payload_messages = messages.to_vec();
 
@@ -1805,10 +1785,10 @@ fn chat_payload_messages(
             "role": "user",
             "content": VALIDATION_REQUIRED_INSTRUCTION,
         }));
-    } else if checkpoint_required {
+    } else if let Some(checkpoint_instruction) = checkpoint_instruction {
         payload_messages.push(json!({
             "role": "user",
-            "content": TOOL_CALL_CHECKPOINT_INSTRUCTION,
+            "content": checkpoint_instruction,
         }));
     } else if final_answer_requested {
         payload_messages.push(json!({
@@ -3241,38 +3221,6 @@ mod tests {
     }
 
     #[test]
-    fn deepseek_tool_workflow_disables_thinking_until_checkpoint_or_final_turn() {
-        assert!(!deepseek_thinking_for_turn(
-            true, true, false, false, false, false, false
-        ));
-        assert!(deepseek_thinking_for_turn(
-            true, true, true, false, true, false, false
-        ));
-        assert!(deepseek_thinking_for_turn(
-            true, true, true, true, false, false, false
-        ));
-        assert!(!deepseek_thinking_for_turn(
-            true, true, true, false, false, false, false
-        ));
-    }
-
-    #[test]
-    fn deepseek_tool_workflow_turns_reasoning_off_during_tool_phase_and_restores_it_later() {
-        assert_eq!(
-            reasoning_effort_for_turn(true, Some("high"), true, false, false, false, false),
-            Some("off")
-        );
-        assert_eq!(
-            reasoning_effort_for_turn(true, Some("medium"), true, true, true, false, false),
-            Some(TOOL_CALL_CHECKPOINT_REASONING_EFFORT)
-        );
-        assert_eq!(
-            reasoning_effort_for_turn(true, Some("low"), true, true, false, false, false),
-            Some("low")
-        );
-    }
-
-    #[test]
     fn chat_message_deserializes_reasoning_content_from_camel_case() {
         let message: ChatMessage = serde_json::from_value(json!({
             "role": "assistant",
@@ -3294,46 +3242,6 @@ mod tests {
         .expect("snake_case reasoning_content should deserialize");
 
         assert_eq!(message.reasoning_content.as_deref(), Some("step one"));
-    }
-
-    #[test]
-    fn deepseek_thinking_omits_tool_choice_except_during_required_recovery() {
-        assert_eq!(
-            chat_tool_choice(true, true, false, false, false, false),
-            None
-        );
-        assert_eq!(
-            chat_tool_choice(true, true, true, false, false, false),
-            Some(json!("required"))
-        );
-    }
-
-    #[test]
-    fn deepseek_without_thinking_can_still_force_first_tool_call() {
-        assert_eq!(
-            chat_tool_choice(true, false, false, false, false, false),
-            Some(json!("required"))
-        );
-        assert_eq!(
-            chat_tool_choice(true, false, false, false, true, false),
-            Some(json!("auto"))
-        );
-    }
-
-    #[test]
-    fn validation_tool_choice_takes_priority_when_supported() {
-        assert_eq!(
-            chat_tool_choice(true, false, true, false, true, false),
-            Some(json!("required"))
-        );
-        assert_eq!(
-            chat_tool_choice(false, false, true, false, true, false),
-            Some(json!("required"))
-        );
-        assert_eq!(
-            chat_tool_choice(true, true, false, true, true, false),
-            Some(json!("required"))
-        );
     }
 
     #[test]
@@ -3365,8 +3273,9 @@ mod tests {
 
     #[test]
     fn edit_recovery_forces_the_next_supported_tool_call() {
+        let state = AgentTurnState::new(false, false, false);
         assert_eq!(
-            chat_tool_choice(false, false, false, true, true, false),
+            state.tool_choice(AgentTurnPhase::Conversation, false, true, false),
             Some(json!("required"))
         );
     }
@@ -3573,7 +3482,7 @@ mod tests {
     #[test]
     fn final_answer_request_appends_internal_instruction() {
         let messages = vec![json!({ "role": "user", "content": "question" })];
-        let payload_messages = chat_payload_messages(&messages, true, false, false);
+        let payload_messages = chat_payload_messages(&messages, true, false, None);
 
         assert_eq!(payload_messages.len(), 2);
         assert_eq!(payload_messages[0]["content"], json!("question"));
@@ -3587,7 +3496,7 @@ mod tests {
     #[test]
     fn validation_request_takes_priority_over_final_answer_instruction() {
         let messages = vec![json!({ "role": "user", "content": "question" })];
-        let payload_messages = chat_payload_messages(&messages, true, true, false);
+        let payload_messages = chat_payload_messages(&messages, true, true, None);
 
         assert_eq!(payload_messages.len(), 2);
         assert!(payload_messages[1]["content"]
@@ -3604,7 +3513,12 @@ mod tests {
     #[test]
     fn checkpoint_request_takes_priority_over_final_answer_instruction() {
         let messages = vec![json!({ "role": "user", "content": "question" })];
-        let payload_messages = chat_payload_messages(&messages, true, false, true);
+        let payload_messages = chat_payload_messages(
+            &messages,
+            true,
+            false,
+            Some(TOOL_CALL_CHECKPOINT_INSTRUCTION),
+        );
 
         assert_eq!(payload_messages.len(), 2);
         assert!(payload_messages[1]["content"]
