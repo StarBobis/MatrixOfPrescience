@@ -9,6 +9,13 @@ pub(crate) struct ToolCallExecutionPlan {
 pub(crate) struct ToolCallUtils;
 
 impl ToolCallUtils {
+    pub(crate) fn can_open_next_autonomous_round(
+        current_round: usize,
+        max_rounds: usize,
+    ) -> bool {
+        current_round < max_rounds
+    }
+
     pub(crate) fn checkpoint_budget_remaining(
         tool_calls_since_checkpoint: usize,
         checkpoint_interval: usize,
@@ -121,6 +128,13 @@ mod tests {
 
         assert_eq!(plan.executable_count, 0);
         assert!(plan.truncated);
+    }
+
+    #[test]
+    fn detects_when_another_autonomous_round_is_allowed() {
+        assert!(ToolCallUtils::can_open_next_autonomous_round(1, 4));
+        assert!(ToolCallUtils::can_open_next_autonomous_round(3, 4));
+        assert!(!ToolCallUtils::can_open_next_autonomous_round(4, 4));
     }
 
     #[test]

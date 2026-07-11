@@ -190,12 +190,13 @@ const RETRY_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const FINAL_ANSWER_INSTRUCTION: &str =
     "Use the tool results already provided and write the final answer now.";
 const EDIT_FAILURE_RECOVERY_INSTRUCTION: &str = "The previous edit tool call failed. Do not stop or provide a final answer solely because an edit did not apply. Recover using the error and the current workspace state: re-read the target when the context may be stale, then retry with a corrected smaller patch or a different available edit tool. Do not repeat the identical failing call. Continue until the requested change is complete or no available tool can resolve a genuine blocker.";
+const MAX_AUTONOMOUS_TOOL_ROUNDS: usize = 4;
 const MAX_TOOL_ONLY_ROUNDS: usize = 6;
-const MAX_TOTAL_TOOL_CALLS_PER_COMPLETION: usize = 24;
+const MAX_TOTAL_TOOL_CALLS_PER_AUTONOMOUS_ROUND: usize = 24;
 const MAX_DEEPSEEK_TOOL_CALLS_PER_TURN: usize = 1;
 const TOOL_CALL_CHECKPOINT_INTERVAL: usize = 8;
 const TOOL_CALL_CHECKPOINT_REASONING_EFFORT: &str = "high";
-const TOOL_CALL_CHECKPOINT_INSTRUCTION: &str = "Checkpoint: the tool-call budget for this step has been reached. On this turn, do not call any tools. Briefly summarize what you have learned, what remains uncertain, and the single best next step. Keep it concise. After this checkpoint, continue the task on the following turn if more work is needed.";
+const TOOL_CALL_CHECKPOINT_INSTRUCTION: &str = "Checkpoint: the tool-call budget for this step has been reached. On this turn, do not call any tools. Briefly summarize what you have learned, what remains uncertain, and the single best next step. Keep it concise. After this checkpoint, continue the task on the following turn without waiting for user input if more work is needed.";
 const CACHE_LOCATION_FILE: &str = "cache-location.json";
 const SETTINGS_FILE: &str = "settings.json";
 const MEMBER_LIBRARY_FILE: &str = "member-library.json";
@@ -839,10 +840,12 @@ async fn chat_completion(
     let mut edit_recovery_required = false;
     let mut edit_recovery_rounds = 0usize;
     let mut final_answer_requested = false;
+    let mut autonomous_tool_round = 1usize;
     let mut tool_only_rounds: usize = 0;
     let mut tool_calls_since_checkpoint = 0usize;
     let mut total_tool_calls_executed = 0usize;
     let mut tool_checkpoint_pending = false;
+    let mut tool_budget_reset_pending = false;
     let mut validation = ValidationState::default();
     let mut last_finish_reason: Option<String> = None;
     let mut last_usage: Option<ChatCompletionUsage> = None;
@@ -999,7 +1002,7 @@ async fn chat_completion(
                 message.get("tool_calls").and_then(Value::as_array),
             ) {
                 if !tool_calls.is_empty() {
-                    let remaining_total_tool_budget = MAX_TOTAL_TOOL_CALLS_PER_COMPLETION
+                    let remaining_total_tool_budget = MAX_TOTAL_TOOL_CALLS_PER_AUTONOMOUS_ROUND
                         .saturating_sub(total_tool_calls_executed);
                     // Hard-cap a single assistant tool batch so one response cannot skip the checkpoint.
                     let tool_execution_plan = ToolCallUtils::plan_execution(
@@ -1010,8 +1013,17 @@ async fn chat_completion(
                         remaining_total_tool_budget,
                     );
                     if tool_execution_plan.executable_count == 0 {
-                        tool_checkpoint_pending = false;
-                        final_answer_requested = true;
+                        if ToolCallUtils::can_open_next_autonomous_round(
+                            autonomous_tool_round,
+                            MAX_AUTONOMOUS_TOOL_ROUNDS,
+                        ) {
+                            tool_checkpoint_pending = true;
+                            tool_budget_reset_pending = true;
+                            final_answer_requested = false;
+                        } else {
+                            tool_checkpoint_pending = false;
+                            final_answer_requested = true;
+                        }
                         continue;
                     }
                     let executable_tool_calls = &tool_calls[..tool_execution_plan.executable_count];
@@ -1094,22 +1106,37 @@ async fn chat_completion(
                     if is_deepseek && tool_execution_plan.truncated {
                         tool_checkpoint_pending = true;
                     }
-                    if total_tool_calls_executed >= MAX_TOTAL_TOOL_CALLS_PER_COMPLETION
-                        && !validation_tool_required
-                        && !repair_required
-                    {
-                        tool_checkpoint_pending = false;
-                        final_answer_requested = true;
+                    if total_tool_calls_executed >= MAX_TOTAL_TOOL_CALLS_PER_AUTONOMOUS_ROUND {
+                        if ToolCallUtils::can_open_next_autonomous_round(
+                            autonomous_tool_round,
+                            MAX_AUTONOMOUS_TOOL_ROUNDS,
+                        ) {
+                            tool_checkpoint_pending = true;
+                            tool_budget_reset_pending = true;
+                            final_answer_requested = false;
+                        } else {
+                            tool_checkpoint_pending = false;
+                            final_answer_requested = true;
+                        }
                     }
 
                     if !validation_tool_required && !repair_required {
                         tool_only_rounds += 1;
                         if !tool_checkpoint_pending && tool_only_rounds >= MAX_TOOL_ONLY_ROUNDS {
-                            messages.push(json!({
-                                "role": "user",
-                                "content": FINAL_ANSWER_INSTRUCTION,
-                            }));
-                            final_answer_requested = true;
+                            if ToolCallUtils::can_open_next_autonomous_round(
+                                autonomous_tool_round,
+                                MAX_AUTONOMOUS_TOOL_ROUNDS,
+                            ) {
+                                tool_checkpoint_pending = true;
+                                tool_budget_reset_pending = true;
+                                final_answer_requested = false;
+                            } else {
+                                messages.push(json!({
+                                    "role": "user",
+                                    "content": FINAL_ANSWER_INSTRUCTION,
+                                }));
+                                final_answer_requested = true;
+                            }
                         }
                     }
 
@@ -1155,6 +1182,13 @@ async fn chat_completion(
                 messages.push(message.clone());
                 tool_checkpoint_pending = false;
                 final_answer_requested = false;
+                if tool_budget_reset_pending {
+                    autonomous_tool_round += 1;
+                    tool_only_rounds = 0;
+                    tool_calls_since_checkpoint = 0;
+                    total_tool_calls_executed = 0;
+                    tool_budget_reset_pending = false;
+                }
                 continue;
             }
             if validation.is_pending() {
@@ -1206,6 +1240,13 @@ async fn chat_completion(
         if checkpoint_required {
             tool_checkpoint_pending = false;
             final_answer_requested = false;
+            if tool_budget_reset_pending {
+                autonomous_tool_round += 1;
+                tool_only_rounds = 0;
+                tool_calls_since_checkpoint = 0;
+                total_tool_calls_executed = 0;
+                tool_budget_reset_pending = false;
+            }
             continue;
         }
 
@@ -1259,10 +1300,12 @@ async fn openai_responses_completion(
     let mut edit_recovery_required = false;
     let mut edit_recovery_rounds = 0usize;
     let mut final_answer_requested = false;
+    let mut autonomous_tool_round = 1usize;
     let mut tool_only_rounds: usize = 0;
     let mut tool_calls_since_checkpoint = 0usize;
     let mut total_tool_calls_executed = 0usize;
     let mut tool_checkpoint_pending = false;
+    let mut tool_budget_reset_pending = false;
     let mut validation = ValidationState::default();
     let mut previous_response_id: Option<String> = None;
     let mut pending_input: Vec<Value> = Vec::new();
@@ -1383,7 +1426,7 @@ async fn openai_responses_completion(
         if !checkpoint_required {
             if let Some(workspace) = code_workspace.as_ref() {
                 if !tool_calls.is_empty() {
-                    let remaining_total_tool_budget = MAX_TOTAL_TOOL_CALLS_PER_COMPLETION
+                    let remaining_total_tool_budget = MAX_TOTAL_TOOL_CALLS_PER_AUTONOMOUS_ROUND
                         .saturating_sub(total_tool_calls_executed);
                     // Apply the same hard batch cap for Responses API function calls.
                     let tool_execution_plan = ToolCallUtils::plan_execution(
@@ -1394,8 +1437,17 @@ async fn openai_responses_completion(
                         remaining_total_tool_budget,
                     );
                     if tool_execution_plan.executable_count == 0 {
-                        tool_checkpoint_pending = false;
-                        final_answer_requested = true;
+                        if ToolCallUtils::can_open_next_autonomous_round(
+                            autonomous_tool_round,
+                            MAX_AUTONOMOUS_TOOL_ROUNDS,
+                        ) {
+                            tool_checkpoint_pending = true;
+                            tool_budget_reset_pending = true;
+                            final_answer_requested = false;
+                        } else {
+                            tool_checkpoint_pending = false;
+                            final_answer_requested = true;
+                        }
                         continue;
                     }
                     let executable_tool_calls = ToolCallUtils::truncate_tool_calls(
@@ -1481,19 +1533,34 @@ async fn openai_responses_completion(
                     if is_deepseek && tool_execution_plan.truncated {
                         tool_checkpoint_pending = true;
                     }
-                    if total_tool_calls_executed >= MAX_TOTAL_TOOL_CALLS_PER_COMPLETION
-                        && !validation_tool_required
-                        && !repair_required
-                    {
-                        tool_checkpoint_pending = false;
-                        final_answer_requested = true;
+                    if total_tool_calls_executed >= MAX_TOTAL_TOOL_CALLS_PER_AUTONOMOUS_ROUND {
+                        if ToolCallUtils::can_open_next_autonomous_round(
+                            autonomous_tool_round,
+                            MAX_AUTONOMOUS_TOOL_ROUNDS,
+                        ) {
+                            tool_checkpoint_pending = true;
+                            tool_budget_reset_pending = true;
+                            final_answer_requested = false;
+                        } else {
+                            tool_checkpoint_pending = false;
+                            final_answer_requested = true;
+                        }
                     }
 
                     if !validation_tool_required && !repair_required {
                         tool_only_rounds += 1;
                         if !tool_checkpoint_pending && tool_only_rounds >= MAX_TOOL_ONLY_ROUNDS {
-                            pending_input.push(responses_user_message(FINAL_ANSWER_INSTRUCTION));
-                            final_answer_requested = true;
+                            if ToolCallUtils::can_open_next_autonomous_round(
+                                autonomous_tool_round,
+                                MAX_AUTONOMOUS_TOOL_ROUNDS,
+                            ) {
+                                tool_checkpoint_pending = true;
+                                tool_budget_reset_pending = true;
+                                final_answer_requested = false;
+                            } else {
+                                pending_input.push(responses_user_message(FINAL_ANSWER_INSTRUCTION));
+                                final_answer_requested = true;
+                            }
                         }
                     }
 
@@ -1536,6 +1603,13 @@ async fn openai_responses_completion(
             if checkpoint_required {
                 tool_checkpoint_pending = false;
                 final_answer_requested = false;
+                if tool_budget_reset_pending {
+                    autonomous_tool_round += 1;
+                    tool_only_rounds = 0;
+                    tool_calls_since_checkpoint = 0;
+                    total_tool_calls_executed = 0;
+                    tool_budget_reset_pending = false;
+                }
                 continue;
             }
             if validation.is_pending() {
@@ -1582,6 +1656,13 @@ async fn openai_responses_completion(
         if checkpoint_required {
             tool_checkpoint_pending = false;
             final_answer_requested = false;
+            if tool_budget_reset_pending {
+                autonomous_tool_round += 1;
+                tool_only_rounds = 0;
+                tool_calls_since_checkpoint = 0;
+                total_tool_calls_executed = 0;
+                tool_budget_reset_pending = false;
+            }
             continue;
         }
 
