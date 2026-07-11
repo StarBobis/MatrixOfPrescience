@@ -87,10 +87,7 @@ impl TraceCtx {
         }
     }
 
-    pub(crate) fn append_reasoning(
-        trace_steps: &mut Vec<ChatTraceStep>,
-        message: &Value,
-    ) {
+    pub(crate) fn append_reasoning(trace_steps: &mut Vec<ChatTraceStep>, message: &Value) {
         let reasoning = Self::message_reasoning(message);
         let steps = Self::split_trace(&reasoning)
             .into_iter()

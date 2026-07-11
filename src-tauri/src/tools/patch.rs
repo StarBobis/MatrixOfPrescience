@@ -292,8 +292,12 @@ fn apply_patch_by_line_fragments(
             return Err("Fallback patch apply could not detect a target file.".to_string());
         };
         let target_path = resolve_workspace_relative_path(workspace, &target_file)?;
-        let existing = fs::read_to_string(&target_path)
-            .map_err(|error| format!("Fallback patch apply failed to read {}: {}", target_file, error))?;
+        let existing = fs::read_to_string(&target_path).map_err(|error| {
+            format!(
+                "Fallback patch apply failed to read {}: {}",
+                target_file, error
+            )
+        })?;
         let normalized_existing = existing.replace("\r\n", "\n").replace('\r', "\n");
         let had_trailing_newline = normalized_existing.ends_with('\n');
         let mut file_lines = normalized_existing
@@ -420,14 +424,13 @@ fn run_git_apply(
     }
 
     // If all git apply attempts failed, try the text-fragment fallback
-    apply_patch_by_line_fragments(workspace, patch_file, check_only)
-        .map_err(|fallback_error| {
-            format!(
-                "git apply failed:\n{}\ntext-fragment fallback failed: {}",
-                failures.join("\n"),
-                fallback_error
-            )
-        })
+    apply_patch_by_line_fragments(workspace, patch_file, check_only).map_err(|fallback_error| {
+        format!(
+            "git apply failed:\n{}\ntext-fragment fallback failed: {}",
+            failures.join("\n"),
+            fallback_error
+        )
+    })
 }
 
 pub(crate) fn apply_patch_tool(workspace: &Path, arguments: &Value) -> Result<String, String> {

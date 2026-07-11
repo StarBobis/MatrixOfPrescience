@@ -22,7 +22,10 @@ fn split_first_token(text: &str) -> (&str, &str) {
 }
 
 fn is_dsml_quote(ch: char) -> bool {
-    matches!(ch, '"' | '\'' | '\u{201C}' | '\u{201D}' | '\u{2018}' | '\u{2019}')
+    matches!(
+        ch,
+        '"' | '\'' | '\u{201C}' | '\u{201D}' | '\u{2018}' | '\u{2019}'
+    )
 }
 
 fn dsml_closing_quote(opening: char) -> char {
@@ -131,7 +134,11 @@ fn next_dsml_tag(content: &str, from: usize) -> Option<DsmlTag> {
             continue;
         }
 
-        let prefix_len = if closing { "</DSML".len() } else { "<DSML".len() };
+        let prefix_len = if closing {
+            "</DSML".len()
+        } else {
+            "<DSML".len()
+        };
         let after_prefix = &content[start + prefix_len..];
 
         // Consume optional whitespace, then the pipe delimiter (ASCII | or fullwidth \u{FF5C}),
@@ -489,7 +496,10 @@ mod tests {
         }));
 
         // Content outside DSML tags is preserved
-        assert!(message["content"].as_str().unwrap_or("").contains("Let me update."));
+        assert!(message["content"]
+            .as_str()
+            .unwrap_or("")
+            .contains("Let me update."));
         assert_eq!(
             message["tool_calls"][0]["function"]["name"],
             json!("write_file")

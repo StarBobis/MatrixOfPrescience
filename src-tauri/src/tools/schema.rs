@@ -447,4 +447,3 @@ pub(crate) fn orchestration_tools_schema(strict: bool) -> Value {
         strict,
     )])
 }
-

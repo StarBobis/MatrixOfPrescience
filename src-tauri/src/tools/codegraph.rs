@@ -334,7 +334,10 @@ fn build_codegraph_command_args(arguments: &Value) -> Result<(Vec<String>, bool)
     Ok((args, requires_index))
 }
 
-pub(crate) fn execute_codegraph_explore_tool(workspace: &Path, arguments: &Value) -> Result<String, String> {
+pub(crate) fn execute_codegraph_explore_tool(
+    workspace: &Path,
+    arguments: &Value,
+) -> Result<String, String> {
     let query = arguments
         .get("query")
         .and_then(Value::as_str)
@@ -363,7 +366,10 @@ pub(crate) fn execute_codegraph_explore_tool(workspace: &Path, arguments: &Value
     }
 }
 
-pub(crate) fn execute_codegraph_command_tool(workspace: &Path, arguments: &Value) -> Result<String, String> {
+pub(crate) fn execute_codegraph_command_tool(
+    workspace: &Path,
+    arguments: &Value,
+) -> Result<String, String> {
     let (args, requires_index) = build_codegraph_command_args(arguments)?;
     let command = args.first().map(String::as_str).unwrap_or("command");
 

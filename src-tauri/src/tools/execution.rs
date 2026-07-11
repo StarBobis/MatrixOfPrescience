@@ -70,7 +70,9 @@ pub(crate) fn parsed_tool_arguments(function: &Value) -> Value {
     if let Some(arguments_text) = arguments.as_str() {
         serde_json::from_str::<Value>(arguments_text)
             .or_else(|_| {
-                serde_json::from_str::<Value>(&StrUtils::normalize_json_smart_quotes(arguments_text))
+                serde_json::from_str::<Value>(&StrUtils::normalize_json_smart_quotes(
+                    arguments_text,
+                ))
             })
             .unwrap_or_else(|_| Value::String(arguments_text.to_string()))
     } else {
@@ -203,8 +205,12 @@ pub(crate) fn execute_code_tool_call(
         )
     } else {
         match name {
-            "codegraph_explore" => crate::tools::codegraph::execute_codegraph_explore_tool(workspace, &arguments),
-            "codegraph_command" => crate::tools::codegraph::execute_codegraph_command_tool(workspace, &arguments),
+            "codegraph_explore" => {
+                crate::tools::codegraph::execute_codegraph_explore_tool(workspace, &arguments)
+            }
+            "codegraph_command" => {
+                crate::tools::codegraph::execute_codegraph_command_tool(workspace, &arguments)
+            }
             "read_file" => read_workspace_file_tool(workspace, &arguments),
             "list_files" => list_workspace_files_tool(workspace, &arguments),
             "search_files" => search_workspace_files_tool(workspace, &arguments),
@@ -214,7 +220,11 @@ pub(crate) fn execute_code_tool_call(
             "delete_path" => delete_workspace_path_tool(workspace, &arguments),
             "move_path" => move_workspace_path_tool(workspace, &arguments),
             "apply_patch" => crate::tools::patch::apply_patch_tool(workspace, &arguments),
-            "run_command" => crate::tools::command::run_workspace_command_tool(workspace, &arguments, stream_sink),
+            "run_command" => crate::tools::command::run_workspace_command_tool(
+                workspace,
+                &arguments,
+                stream_sink,
+            ),
             "dispatch_tasks" => execute_dispatch_tasks(&arguments),
             _ => Err(format!("Unknown tool: {}", name)),
         }
@@ -349,7 +359,13 @@ pub(crate) fn tool_arg_string_map(arguments: &Value, key: &str) -> Vec<(String, 
         .unwrap_or_default()
 }
 
-pub(crate) fn tool_arg_usize(arguments: &Value, key: &str, default: usize, min: usize, max: usize) -> usize {
+pub(crate) fn tool_arg_usize(
+    arguments: &Value,
+    key: &str,
+    default: usize,
+    min: usize,
+    max: usize,
+) -> usize {
     arguments
         .get(key)
         .and_then(Value::as_u64)

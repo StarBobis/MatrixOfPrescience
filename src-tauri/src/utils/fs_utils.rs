@@ -24,7 +24,10 @@ impl FileUtils {
             .map_err(|error| format!("Failed to parse {:?}: {}", path, error))
     }
 
-    pub(crate) fn write_json(path: &std::path::Path, value: &serde_json::Value) -> Result<(), String> {
+    pub(crate) fn write_json(
+        path: &std::path::Path,
+        value: &serde_json::Value,
+    ) -> Result<(), String> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|error| format!("Failed to create {:?}: {}", parent, error))?;
@@ -33,7 +36,8 @@ impl FileUtils {
         let content = serde_json::to_string_pretty(value)
             .map_err(|error| format!("Failed to serialize {:?}: {}", path, error))?;
 
-        std::fs::write(path, content).map_err(|error| format!("Failed to write {:?}: {}", path, error))
+        std::fs::write(path, content)
+            .map_err(|error| format!("Failed to write {:?}: {}", path, error))
     }
 
     pub(crate) fn user_home() -> Option<PathBuf> {
