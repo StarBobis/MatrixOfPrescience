@@ -242,11 +242,11 @@ const activeGroupWorkspacePath = computed({
     }
   },
 });
-const activeGroupAgentConfig = computed({
-  get: () => activeGroup.value?.agentConfig,
+const activeGroupApprovalMode = computed({
+  get: () => activeGroup.value?.agentConfig.approvalMode ?? "manual",
   set: (value) => {
-    if (activeGroup.value && value) {
-      activeGroup.value.agentConfig = value;
+    if (activeGroup.value) {
+      activeGroup.value.agentConfig.approvalMode = value;
     }
   },
 });
@@ -3021,6 +3021,7 @@ async function sendMessage() {
         <ChatConversationPanel
           ref="chatPanel"
           v-model:composer="composer"
+          v-model:approval-mode="activeGroupApprovalMode"
           :active-group="activeGroup"
           :active-member-count="activeMembers.length"
           :active-members="orderedActiveMembers"
@@ -3042,9 +3043,8 @@ async function sendMessage() {
 
       <template #right>
         <GroupRightPanel
-          v-if="activeGroupAgentConfig"
+          v-if="activeGroup"
           v-model:announcement="activeGroupAnnouncement"
-          v-model:agent-config="activeGroupAgentConfig"
           :members="activeGroupMembers"
           :friends="friends"
           :owner-profile="ownerProfile"

@@ -16,6 +16,7 @@ import PatchApprovalPanel from "./PatchApprovalPanel.vue";
 import { getAvatarSrc } from "../utils/avatar";
 import { sanitizeAssistantMessageContent } from "../utils/messageTransport";
 import type {
+  AgentApprovalMode,
   AgentModel,
   ChatGroup,
   ChatMessage,
@@ -75,6 +76,7 @@ const props = defineProps<{
   messages: ChatMessage[];
   patchProposals: ChatGroup["patchProposals"];
   composer: string;
+  approvalMode: AgentApprovalMode;
   workspacePath: string;
   sending: boolean;
   canSend: boolean;
@@ -84,6 +86,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   "update:composer": [value: string];
+  "update:approvalMode": [value: AgentApprovalMode];
   "update:workspacePath": [value: string];
   updatePatchStatus: [proposalId: string, status: PatchApprovalStatus];
   removePatchProposal: [proposalId: string];
@@ -105,6 +108,15 @@ let pendingScrollFrame = 0;
 let layoutResizeObserver: ResizeObserver | null = null;
 const bottomStickyThreshold = 96;
 const followScrollFrames = 3;
+const approvalModeOptions = computed<Array<{ label: string; value: AgentApprovalMode }>>(() => [
+  { label: t("rightPanel.approvalModeOptions.manual"), value: "manual" },
+  { label: t("rightPanel.approvalModeOptions.confirmRisky"), value: "confirm-risky" },
+  { label: t("rightPanel.approvalModeOptions.auto"), value: "auto" },
+]);
+
+function updateApprovalMode(value: string | number | boolean) {
+  emit("update:approvalMode", String(value) as AgentApprovalMode);
+}
 
 const mentionMatch = computed(() => {
   const match = props.composer.match(/(?:^|\s)@([^@\s]*)$/);
@@ -1586,25 +1598,43 @@ defineExpose({
       </div>
 
       <div class="composer-actions">
-        <el-button
-          v-if="sending"
-          type="danger"
-          plain
-          :icon="CircleClose"
-          @click="emit('stopGeneration')"
-        >
-          {{ t("chat.stop") }}
-        </el-button>
+        <div class="composer-approval">
+          <span class="composer-approval-label">{{ t("rightPanel.approvalMode") }}</span>
+          <el-select
+            :model-value="approvalMode"
+            size="small"
+            @update:model-value="updateApprovalMode"
+          >
+            <el-option
+              v-for="option in approvalModeOptions"
+              :key="option.value"
+              :label="option.label"
+              :value="option.value"
+            />
+          </el-select>
+        </div>
 
-        <el-button
-          type="primary"
-          :loading="sending"
-          :disabled="!canSend"
-          :icon="Promotion"
-          @click="emit('sendMessage')"
-        >
-          {{ t("chat.sendToMembers", { count: activeMemberCount }) }}
-        </el-button>
+        <div class="composer-button-group">
+          <el-button
+            v-if="sending"
+            type="danger"
+            plain
+            :icon="CircleClose"
+            @click="emit('stopGeneration')"
+          >
+            {{ t("chat.stop") }}
+          </el-button>
+
+          <el-button
+            type="primary"
+            :loading="sending"
+            :disabled="!canSend"
+            :icon="Promotion"
+            @click="emit('sendMessage')"
+          >
+            {{ t("chat.sendToMembers", { count: activeMemberCount }) }}
+          </el-button>
+        </div>
       </div>
     </footer>
   </main>
@@ -2547,9 +2577,41 @@ defineExpose({
 .composer-actions {
   display: flex;
   flex-wrap: wrap;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
   gap: 10px;
   min-width: 0;
+}
+
+.composer-approval {
+  display: inline-flex;
+  flex: 1 1 240px;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.composer-approval-label {
+  flex: 0 0 auto;
+  color: #5a6760;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.composer-approval :deep(.el-select) {
+  width: min(100%, 220px);
+}
+
+.composer-button-group {
+  display: inline-flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.composer-button-group :deep(.el-button) {
+  margin-left: 0;
 }
 
 .composer-actions :deep(.el-button) {

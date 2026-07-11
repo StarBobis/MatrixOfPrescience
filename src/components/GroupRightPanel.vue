@@ -3,11 +3,6 @@ import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import GroupMemberPanel from "./GroupMemberPanel.vue";
 import type {
-  AgentCollaborationConfig,
-  AgentMode,
-  AgentWorkflowMode,
-  AgentApprovalMode,
-  AgentSafetyModel,
   AgentModel,
   AgentReasoningEffort,
   OwnerProfile,
@@ -15,35 +10,8 @@ import type {
 } from "../stores/settings";
 
 const announcement = defineModel<string>("announcement", { default: "" });
-const agentConfig = defineModel<AgentCollaborationConfig>("agentConfig", { required: true });
 const editingAnnouncement = ref(false);
 const { t } = useI18n();
-
-const agentModeOptions = computed<Array<{ label: string; value: AgentMode }>>(() => [
-  { label: t("rightPanel.agentModeOptions.chat"), value: "chat" },
-  { label: t("rightPanel.agentModeOptions.localAgent"), value: "local-agent" },
-  { label: t("rightPanel.agentModeOptions.architect"), value: "architect" },
-]);
-
-const workflowModeOptions: Array<{ label: string; value: AgentWorkflowMode }> = [
-  { label: "Ask", value: "ask" },
-  { label: "EditBeforeAsk", value: "edit-before-ask" },
-  { label: "Code", value: "code" },
-  { label: "YOLO", value: "yolo" },
-];
-
-const approvalModeOptions = computed<Array<{ label: string; value: AgentApprovalMode }>>(() => [
-  { label: t("rightPanel.approvalModeOptions.manual"), value: "manual" },
-  { label: t("rightPanel.approvalModeOptions.confirmRisky"), value: "confirm-risky" },
-  { label: t("rightPanel.approvalModeOptions.auto"), value: "auto" },
-]);
-
-const safetyModelOptions: Array<{ label: string; value: AgentSafetyModel }> = [
-  { label: "Strict", value: "strict" },
-  { label: "Balanced", value: "balanced" },
-  { label: "Security Analyzer", value: "security-analyzer" },
-  { label: "Sandbox YOLO", value: "sandbox-yolo" },
-];
 
 const reasoningEffortOptions = computed<Array<{ label: string; value: AgentReasoningEffort }>>(
   () => [
@@ -72,45 +40,6 @@ const emit = defineEmits<{
   updateMemberProfile: [member: AgentModel];
   updateMemberProvider: [member: AgentModel];
 }>();
-
-function syncEditBeforeAsk(value: boolean) {
-  if (value) {
-    agentConfig.value.workflowMode = "edit-before-ask";
-    agentConfig.value.yoloMode = false;
-  } else if (agentConfig.value.workflowMode === "edit-before-ask") {
-    agentConfig.value.workflowMode = "ask";
-  }
-}
-
-function syncYoloMode(value: boolean) {
-  if (value) {
-    agentConfig.value.agentMode = "local-agent";
-    agentConfig.value.editBeforeAsk = false;
-    agentConfig.value.workflowMode = "yolo";
-    agentConfig.value.approvalMode = "auto";
-    agentConfig.value.safetyModel = "sandbox-yolo";
-    return;
-  }
-
-  if (agentConfig.value.workflowMode === "yolo") {
-    agentConfig.value.workflowMode = "code";
-  }
-
-  if (agentConfig.value.approvalMode === "auto") {
-    agentConfig.value.approvalMode = "confirm-risky";
-  }
-}
-
-function syncWorkflowMode(value: AgentWorkflowMode) {
-  agentConfig.value.editBeforeAsk = value === "edit-before-ask";
-  agentConfig.value.yoloMode = value === "yolo";
-
-  if (value === "yolo") {
-    agentConfig.value.agentMode = "local-agent";
-    agentConfig.value.approvalMode = "auto";
-    agentConfig.value.safetyModel = "sandbox-yolo";
-  }
-}
 
 function finishAnnouncementEdit() {
   editingAnnouncement.value = false;
@@ -142,78 +71,6 @@ function finishAnnouncementEdit() {
         @blur="finishAnnouncementEdit"
         @keydown.ctrl.enter.prevent="finishAnnouncementEdit"
       />
-	    </section>
-
-    <section class="agent-panel">
-      <div class="section-heading">
-        <span>{{ t("rightPanel.collaborationTitle") }}</span>
-        <el-tag size="small" type="info">{{ agentConfig.agentMode }}</el-tag>
-      </div>
-
-      <el-form label-position="top" class="agent-settings-form">
-        <div class="agent-settings-grid">
-          <el-form-item :label="t('rightPanel.agentMode')">
-            <el-select v-model="agentConfig.agentMode">
-              <el-option
-                v-for="option in agentModeOptions"
-                :key="option.value"
-                :label="option.label"
-                :value="option.value"
-              />
-            </el-select>
-          </el-form-item>
-
-          <el-form-item :label="t('rightPanel.workflow')">
-            <el-select v-model="agentConfig.workflowMode" @change="syncWorkflowMode">
-              <el-option
-                v-for="option in workflowModeOptions"
-                :key="option.value"
-                :label="option.label"
-                :value="option.value"
-              />
-            </el-select>
-          </el-form-item>
-        </div>
-
-        <div class="agent-settings-grid">
-          <el-form-item :label="t('rightPanel.approvalMode')">
-            <el-select v-model="agentConfig.approvalMode">
-              <el-option
-                v-for="option in approvalModeOptions"
-                :key="option.value"
-                :label="option.label"
-                :value="option.value"
-              />
-            </el-select>
-          </el-form-item>
-
-          <el-form-item :label="t('rightPanel.safetyModel')">
-            <el-select v-model="agentConfig.safetyModel">
-              <el-option
-                v-for="option in safetyModelOptions"
-                :key="option.value"
-                :label="option.label"
-                :value="option.value"
-              />
-            </el-select>
-          </el-form-item>
-        </div>
-
-        <div class="agent-mode-toggles">
-          <el-checkbox
-            v-model="agentConfig.editBeforeAsk"
-            @change="(value: boolean) => syncEditBeforeAsk(value)"
-          >
-            EditBeforeAsk
-          </el-checkbox>
-          <el-checkbox
-            v-model="agentConfig.yoloMode"
-            @change="(value: boolean) => syncYoloMode(value)"
-          >
-            {{ t("rightPanel.yoloMode") }}
-          </el-checkbox>
-        </div>
-      </el-form>
     </section>
 
     <GroupMemberPanel

@@ -225,8 +225,8 @@ function createDefaultOwnerProfile(): OwnerProfile {
 }
 
 const defaultAgentConfig: AgentCollaborationConfig = {
-  agentMode: "chat",
-  workflowMode: "ask",
+  agentMode: "local-agent",
+  workflowMode: "code",
   approvalMode: "manual",
   safetyModel: "balanced",
   editBeforeAsk: false,
@@ -241,15 +241,11 @@ function normalizeAgentConfig(
     ...config,
   };
 
-  if (merged.yoloMode) {
-    merged.workflowMode = "yolo";
-    merged.approvalMode = "auto";
-    merged.safetyModel = "sandbox-yolo";
-  }
-
-  if (merged.editBeforeAsk) {
-    merged.workflowMode = "edit-before-ask";
-  }
+  merged.agentMode = "local-agent";
+  merged.workflowMode = "code";
+  merged.safetyModel = "balanced";
+  merged.editBeforeAsk = false;
+  merged.yoloMode = false;
 
   return merged;
 }
