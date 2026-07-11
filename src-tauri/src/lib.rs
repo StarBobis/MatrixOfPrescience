@@ -1558,7 +1558,8 @@ async fn openai_responses_completion(
                                 tool_budget_reset_pending = true;
                                 final_answer_requested = false;
                             } else {
-                                pending_input.push(responses_user_message(FINAL_ANSWER_INSTRUCTION));
+                                pending_input
+                                    .push(responses_user_message(FINAL_ANSWER_INSTRUCTION));
                                 final_answer_requested = true;
                             }
                         }

@@ -9,10 +9,7 @@ pub(crate) struct ToolCallExecutionPlan {
 pub(crate) struct ToolCallUtils;
 
 impl ToolCallUtils {
-    pub(crate) fn can_open_next_autonomous_round(
-        current_round: usize,
-        max_rounds: usize,
-    ) -> bool {
+    pub(crate) fn can_open_next_autonomous_round(current_round: usize, max_rounds: usize) -> bool {
         current_round < max_rounds
     }
 
