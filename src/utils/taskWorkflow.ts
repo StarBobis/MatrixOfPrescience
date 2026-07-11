@@ -19,6 +19,11 @@ const workerDelegationPhrases = [
   /next round/i,
 ];
 
+export interface DispatchTaskEntry {
+  member: string;
+  instruction: string;
+}
+
 export function getTaskAssignment(plan: string, member: AgentModel) {
   const normalizedName = member.name.trim().toLocaleLowerCase();
   const line = plan.split("\n").find((candidate) => {
@@ -66,4 +71,61 @@ export function isWorkerDelegationResponse(content: string, members: AgentModel[
   }
 
   return workerDelegationPhrases.some((pattern) => pattern.test(content));
+}
+
+interface ChatTraceStepLike {
+  kind: string;
+  text: string;
+  detail?: string;
+}
+
+export function parseDispatchTasksFromResponse(
+  traceSteps: ChatTraceStepLike[],
+  members: AgentModel[],
+): DispatchTaskEntry[] {
+  const memberNames = new Set(members.map((member) => member.name.trim()));
+
+  for (const step of traceSteps) {
+    if (step.kind !== "tool") {
+      continue;
+    }
+
+    const detail = step.detail ?? "";
+    if (!detail.startsWith("Tool: dispatch_tasks")) {
+      continue;
+    }
+
+    const argsBlock = detail.slice(detail.indexOf("Arguments:\n") + "Arguments:\n".length).trim();
+    if (!argsBlock) {
+      continue;
+    }
+
+    try {
+      const args = JSON.parse(argsBlock);
+      if (!args.tasks || !Array.isArray(args.tasks) || args.tasks.length === 0) {
+        continue;
+      }
+
+      const entries = args.tasks
+        .map((task: unknown) => {
+          if (!task || typeof task !== "object") {
+            return null;
+          }
+          const record = task as Record<string, unknown>;
+          const member = String(record.member ?? "").trim();
+          const instruction = String(record.instruction ?? "").trim();
+          return member && instruction ? { member, instruction } : null;
+        })
+        .filter((entry: DispatchTaskEntry | null): entry is DispatchTaskEntry => entry !== null)
+        .filter((entry: DispatchTaskEntry) => memberNames.has(entry.member));
+
+      if (entries.length > 0) {
+        return entries;
+      }
+    } catch {
+      continue;
+    }
+  }
+
+  return [];
 }

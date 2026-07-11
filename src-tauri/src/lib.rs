@@ -21,8 +21,8 @@ mod validation;
 
 use dsml::normalize_dsml_tool_calls_in_message;
 use tools::{
-    code_tools_schema, execute_code_tool_call, tool_call_trace_step, tool_result_trace_step,
-    validate_workspace,
+    code_tools_schema, execute_code_tool_call, orchestration_tools_schema, tool_call_trace_step,
+    tool_result_trace_step, validate_workspace,
 };
 use validation::{
     is_successful_edit_tool_call, mark_validation_unavailable, run_default_validation_commands,
@@ -34,9 +34,9 @@ use validation::{
 #[cfg(test)]
 use tools::{
     delete_workspace_path_tool, format_codegraph_explore_output, is_codegraph_status_query,
-    move_workspace_path_tool, normalize_codegraph_max_files, read_workspace_file_tool,
-    resolve_workspace_relative_path, strip_ansi_escape_sequences, write_workspace_file_tool,
-    DEFAULT_CODEGRAPH_MAX_FILES, MAX_CODEGRAPH_MAX_FILES,
+    move_workspace_path_tool, normalize_codegraph_max_files,
+    read_workspace_file_tool, resolve_workspace_relative_path, strip_ansi_escape_sequences,
+    write_workspace_file_tool, DEFAULT_CODEGRAPH_MAX_FILES, MAX_CODEGRAPH_MAX_FILES,
 };
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -44,6 +44,8 @@ use tools::{
 struct ChatMessage {
     role: String,
     content: String,
+    #[serde(default)]
+    reasoning_content: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -59,6 +61,8 @@ struct ChatCompletionRequest {
     system_prompt: Option<String>,
     workspace_path: Option<String>,
     code_tools_enabled: Option<bool>,
+    orchestration_tools_enabled: Option<bool>,
+    orchestration_required: Option<bool>,
     can_write: Option<bool>,
     stream_id: Option<String>,
     cancellation_id: Option<String>,
@@ -827,10 +831,16 @@ async fn chat_completion(
     }
 
     for message in &request.messages {
-        messages.push(json!({
+        let mut msg = json!({
             "role": message.role,
             "content": message.content,
-        }));
+        });
+        if let Some(reasoning) = &message.reasoning_content {
+            if !reasoning.trim().is_empty() {
+                msg["reasoning_content"] = json!(reasoning);
+            }
+        }
+        messages.push(msg);
     }
 
     let is_deepseek = is_deepseek_provider(&request.provider_name, &request.base_url);
@@ -875,9 +885,18 @@ async fn chat_completion(
             "messages": payload_messages,
             "temperature": request.temperature.unwrap_or(0.7),
         });
-        let tools_allowed = code_workspace.is_some()
+        let code_tools_allowed = code_workspace.is_some()
             && (!final_answer_requested || validation_tool_required || repair_required);
-        let strict_tool_schema = is_deepseek && tools_allowed;
+        let orchestration_tools_allowed =
+            request.orchestration_tools_enabled.unwrap_or(false);
+        let orchestration_required =
+            request.orchestration_required.unwrap_or(false);
+        let orchestration_tools_suppressed =
+            deepseek_thinking && orchestration_required;
+        let effective_orchestration_tools =
+            orchestration_tools_allowed && !orchestration_tools_suppressed;
+        let any_tools_allowed = code_tools_allowed || effective_orchestration_tools;
+        let strict_tool_schema = is_deepseek && any_tools_allowed;
 
         let reasoning_effort = if is_deepseek && (validation_tool_required || repair_required) {
             Some("off")
@@ -886,14 +905,26 @@ async fn chat_completion(
         };
         apply_reasoning_payload(&mut payload, is_deepseek, reasoning_effort);
 
-        if tools_allowed {
-            payload["tools"] = code_tools_schema(is_deepseek, can_write);
+        if any_tools_allowed {
+            let mut tools: Vec<Value> = Vec::new();
+            if code_tools_allowed {
+                if let Value::Array(code_tools) = code_tools_schema(is_deepseek, can_write) {
+                    tools.extend(code_tools);
+                }
+            }
+            if effective_orchestration_tools {
+                if let Value::Array(orchestration_tools) = orchestration_tools_schema(is_deepseek) {
+                    tools.extend(orchestration_tools);
+                }
+            }
+            payload["tools"] = Value::Array(tools);
             if let Some(tool_choice) = chat_tool_choice(
                 is_deepseek,
                 deepseek_thinking,
                 validation_tool_required,
                 repair_required,
                 code_tool_called,
+                orchestration_required && !orchestration_tools_suppressed,
             ) {
                 payload["tool_choice"] = tool_choice;
             }
@@ -913,13 +944,25 @@ async fn chat_completion(
         {
             Ok(parsed) => parsed,
             Err(error) if strict_tool_schema => {
-                payload["tools"] = code_tools_schema(false, can_write);
+                let mut fallback_tools: Vec<Value> = Vec::new();
+                if code_tools_allowed {
+                    if let Value::Array(code_tools) = code_tools_schema(false, can_write) {
+                        fallback_tools.extend(code_tools);
+                    }
+                }
+                if effective_orchestration_tools {
+                    if let Value::Array(orchestration_tools) = orchestration_tools_schema(false) {
+                        fallback_tools.extend(orchestration_tools);
+                    }
+                }
+                payload["tools"] = Value::Array(fallback_tools);
                 if let Some(tool_choice) = chat_tool_choice(
                     is_deepseek,
                     deepseek_thinking,
                     validation_tool_required,
                     repair_required,
                     true,
+                    orchestration_required && !orchestration_tools_suppressed,
                 ) {
                     payload["tool_choice"] = tool_choice;
                 } else {
@@ -1195,8 +1238,13 @@ async fn openai_responses_completion(
             }
         }
 
-        let tools_allowed = code_workspace.is_some()
+        let code_tools_allowed = code_workspace.is_some()
             && (!final_answer_requested || validation_tool_required || repair_required);
+        let orchestration_tools_allowed =
+            request.orchestration_tools_enabled.unwrap_or(false);
+        let orchestration_required =
+            request.orchestration_required.unwrap_or(false);
+        let any_tools_allowed = code_tools_allowed || orchestration_tools_allowed;
         let mut payload = json!({
             "model": request.model,
             "input": input,
@@ -1217,9 +1265,20 @@ async fn openai_responses_completion(
             payload["reasoning"] = reasoning;
         }
 
-        if tools_allowed {
-            payload["tools"] = responses_tools_schema(can_write);
-            if repair_required {
+        if any_tools_allowed {
+            let mut tools: Vec<Value> = Vec::new();
+            if code_tools_allowed {
+                if let Value::Array(code_tools) = responses_tools_schema(can_write) {
+                    tools.extend(code_tools);
+                }
+            }
+            if orchestration_tools_allowed {
+                if let Value::Array(orchestration_tools) = responses_orchestration_tools_schema() {
+                    tools.extend(orchestration_tools);
+                }
+            }
+            payload["tools"] = Value::Array(tools);
+            if repair_required || orchestration_required {
                 payload["tool_choice"] = json!("required");
             }
         }
@@ -1424,6 +1483,7 @@ fn chat_tool_choice(
     validation_tool_required: bool,
     edit_recovery_required: bool,
     code_tool_called: bool,
+    orchestration_required: bool,
 ) -> Option<Value> {
     if validation_tool_required || edit_recovery_required {
         return Some(json!("required"));
@@ -1431,6 +1491,10 @@ fn chat_tool_choice(
 
     if deepseek_thinking {
         return None;
+    }
+
+    if orchestration_required {
+        return Some(json!("required"));
     }
 
     Some(if is_deepseek && !code_tool_called {
@@ -1498,10 +1562,16 @@ fn responses_payload_messages(
     let mut payload_messages = messages
         .iter()
         .map(|message| {
-            json!({
+            let mut msg = json!({
                 "role": message.role,
                 "content": message.content,
-            })
+            });
+            if let Some(reasoning) = &message.reasoning_content {
+                if !reasoning.trim().is_empty() {
+                    msg["reasoning_content"] = json!(reasoning);
+                }
+            }
+            msg
         })
         .collect::<Vec<_>>();
 
@@ -1527,6 +1597,23 @@ fn responses_reasoning_payload(reasoning_effort: Option<&str>) -> Option<Value> 
 
 fn responses_tools_schema(allow_writes: bool) -> Value {
     let tools = code_tools_schema(true, allow_writes)
+        .as_array()
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|tool| {
+            let function = tool.get("function")?.clone();
+            let mut response_tool = function;
+            response_tool["type"] = json!("function");
+            Some(response_tool)
+        })
+        .collect::<Vec<_>>();
+
+    Value::Array(tools)
+}
+
+fn responses_orchestration_tools_schema() -> Value {
+    let tools = orchestration_tools_schema(true)
         .as_array()
         .cloned()
         .unwrap_or_default()
@@ -3043,9 +3130,9 @@ mod tests {
 
     #[test]
     fn deepseek_thinking_omits_tool_choice_except_during_required_recovery() {
-        assert_eq!(chat_tool_choice(true, true, false, false, false), None);
+        assert_eq!(chat_tool_choice(true, true, false, false, false, false), None);
         assert_eq!(
-            chat_tool_choice(true, true, true, false, false),
+            chat_tool_choice(true, true, true, false, false, false),
             Some(json!("required"))
         );
     }
@@ -3053,11 +3140,11 @@ mod tests {
     #[test]
     fn deepseek_without_thinking_can_still_force_first_tool_call() {
         assert_eq!(
-            chat_tool_choice(true, false, false, false, false),
+            chat_tool_choice(true, false, false, false, false, false),
             Some(json!("required"))
         );
         assert_eq!(
-            chat_tool_choice(true, false, false, false, true),
+            chat_tool_choice(true, false, false, false, true, false),
             Some(json!("auto"))
         );
     }
@@ -3065,15 +3152,15 @@ mod tests {
     #[test]
     fn validation_tool_choice_takes_priority_when_supported() {
         assert_eq!(
-            chat_tool_choice(true, false, true, false, true),
+            chat_tool_choice(true, false, true, false, true, false),
             Some(json!("required"))
         );
         assert_eq!(
-            chat_tool_choice(false, false, true, false, true),
+            chat_tool_choice(false, false, true, false, true, false),
             Some(json!("required"))
         );
         assert_eq!(
-            chat_tool_choice(true, true, false, true, true),
+            chat_tool_choice(true, true, false, true, true, false),
             Some(json!("required"))
         );
     }
@@ -3105,7 +3192,7 @@ mod tests {
     #[test]
     fn edit_recovery_forces_the_next_supported_tool_call() {
         assert_eq!(
-            chat_tool_choice(false, false, false, true, true),
+            chat_tool_choice(false, false, false, true, true, false),
             Some(json!("required"))
         );
     }
@@ -3154,6 +3241,8 @@ mod tests {
             system_prompt: None,
             workspace_path: None,
             code_tools_enabled: None,
+            orchestration_tools_enabled: None,
+            orchestration_required: None,
             can_write: None,
             stream_id: None,
             cancellation_id: None,

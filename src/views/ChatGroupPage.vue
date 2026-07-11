@@ -40,6 +40,7 @@ import { parseMentionedMembers } from "../utils/mentions";
 import {
   getTaskAssignment,
   isWorkerDelegationResponse,
+  parseDispatchTasksFromResponse,
   parseTaskRedispatch,
 } from "../utils/taskWorkflow";
 import {
@@ -55,6 +56,7 @@ type MessageStatus = "done" | "thinking" | "error" | "interrupted";
 interface ApiChatMessage {
   role: ChatRole;
   content: string;
+  reasoningContent?: string;
 }
 
 interface ChatTraceStep {
@@ -105,7 +107,7 @@ interface ApplyPatchResponse {
 type MemberDecision = "speak" | "wait";
 type MemberVote = "agree" | "supplement" | "disagree";
 
-interface MemberAnswer { messageId: string; member: AgentModel; content: string }
+interface MemberAnswer { messageId: string; member: AgentModel; content: string; traceSteps: ChatTraceStep[] }
 
 interface TaskAssignment {
   member: AgentModel;
@@ -132,6 +134,8 @@ interface ChatCompletionInvokeRequest {
   temperature: number;
   workspacePath?: string;
   codeToolsEnabled?: boolean;
+  orchestrationToolsEnabled?: boolean;
+  orchestrationRequired?: boolean;
   canWrite?: boolean;
   streamId?: string;
   cancellationId?: string;
@@ -199,6 +203,7 @@ type ChatConversationPanelInstance = InstanceType<typeof ChatConversationPanel> 
 const chatPanel = ref<ChatConversationPanelInstance | null>(null);
 const speakingTimers = new Map<string, number>();
 const streamingContent = new Map<string, string>();
+const streamingReasoning = new Map<string, string>();
 const streamingTraceLines = new Map<
   string,
   { kind: ChatTraceStep["kind"]; itemId: string; index: number; text: string }
@@ -660,6 +665,37 @@ function isDurableConventionText(content: string) {
   );
 }
 
+function buildWorkerIsolatedConversation(workerName: string): ApiChatMessage[] {
+  const userMessage = activeMessages.value
+    .filter((message) => message.role === "user")
+    .slice(-1)[0];
+  const userMessageId = userMessage?.id ?? "";
+
+  const workerMessages = activeMessages.value.filter((message) => {
+    if (message.id === userMessageId) return true;
+    if (message.role === "assistant" && message.modelName === workerName) return true;
+    return false;
+  });
+
+  const cacheFriendlyMessages =
+    workerMessages.length <= CACHE_PREFIX_MESSAGE_COUNT + RECENT_CONVERSATION_MESSAGE_COUNT
+      ? workerMessages
+      : [
+          ...workerMessages.slice(0, CACHE_PREFIX_MESSAGE_COUNT),
+          ...workerMessages.slice(-RECENT_CONVERSATION_MESSAGE_COUNT).filter(
+            (message) =>
+              !workerMessages.slice(0, CACHE_PREFIX_MESSAGE_COUNT).some(
+                (prefixMessage) => prefixMessage.id === message.id,
+              ),
+          ),
+        ];
+
+  return cacheFriendlyMessages.map<ApiChatMessage>((message) => ({
+    role: message.role,
+    content: formatMessageForModel(message),
+  }));
+}
+
 function buildDurableConversationContext() {
   const durableMessages = activeMessages.value
     .filter(isDurableConventionMessage)
@@ -702,6 +738,7 @@ function buildConversation(excludeMessageIds: string[] = []): ApiChatMessage[] {
     .map<ApiChatMessage>((message) => ({
       role: message.role,
       content: formatMessageForModel(message),
+      reasoningContent: message.reasoningContent ?? undefined,
     }));
 }
 
@@ -855,12 +892,22 @@ function buildAddressedResponseRule(baseRule: string, targetName: string) {
   return rules.filter(Boolean).join("\n");
 }
 
+function workspaceToolsAllowed() {
+  const group = activeGroup.value;
+  if (!group?.workspacePath?.trim()) return false;
+  if (group.mode === "task") return true;
+  if (!group.agentConfig || group.agentConfig.agentMode === "chat") return false;
+  return true;
+}
+
 function shouldInspectWorkspace(extraRule: string) {
   const group = activeGroup.value;
 
   if (!group?.workspacePath?.trim()) {
     return false;
   }
+
+  if (group.mode === "task") return true;
 
   if (!group.agentConfig || group.agentConfig.agentMode === "chat") {
     return false;
@@ -1737,6 +1784,10 @@ function applyCompletionStreamEvent(messageId: string, payload: ChatCompletionSt
   }
 
   if (payload.eventType === "traceChunk") {
+    if (traceKind === "reasoning") {
+      const currentReasoning = streamingReasoning.get(messageId) ?? "";
+      streamingReasoning.set(messageId, `${currentReasoning}${payload.text}`);
+    }
     appendStreamingTraceChunk(messageId, traceKind, payload.text);
     return;
   }
@@ -1809,6 +1860,7 @@ function releasePendingMessage(messageId: string, startedAt?: number) {
   flushStreamingTraceLine(messageId);
   flushStreamingToolOutput(messageId);
   streamingContent.delete(messageId);
+  streamingReasoning.delete(messageId);
   streamingExecutionSegments.delete(messageId);
   stopSpeakingTimer(messageId, startedAt);
   pendingMessageIds.value = pendingMessageIds.value.filter((id) => id !== messageId);
@@ -2061,6 +2113,10 @@ async function askMember(
   pendingMessage?: PendingMemberMessage,
   replyTargetName = getOwnerDisplayName(),
   addressReply = true,
+  customConversation?: ApiChatMessage[],
+  orchestrationToolsEnabled?: boolean,
+  orchestrationRequired?: boolean,
+  forceCodeTools?: boolean,
 ): Promise<MemberAnswer | null> {
   if (isRunInterrupted(runId)) {
     return null;
@@ -2069,7 +2125,7 @@ async function askMember(
   const provider = getProvider(member);
   const pendingId = pendingMessage?.id ?? crypto.randomUUID();
   const startedAt = pendingMessage?.startedAt ?? Date.now();
-  const conversation = buildConversation(pendingMessage ? [pendingId] : []);
+  const conversation = customConversation ?? buildConversation(pendingMessage ? [pendingId] : []);
   const baseResponseRule = extraRule || t("chatRuntime.responseRule");
   const responseRule = addressReply
     ? buildAddressedResponseRule(baseResponseRule, replyTargetName)
@@ -2130,7 +2186,8 @@ async function askMember(
   await scrollToBottom();
 
   try {
-    const codeToolsEnabled = shouldInspectWorkspace(responseRule);
+    const codeToolsEnabled = shouldInspectWorkspace(responseRule)
+      || (forceCodeTools === true && workspaceToolsAllowed());
     addActivityItem(
       pendingId,
       "status",
@@ -2150,6 +2207,8 @@ async function askMember(
         temperature: member.temperature,
         workspacePath: activeGroup.value?.workspacePath ?? "",
         codeToolsEnabled,
+        orchestrationToolsEnabled: orchestrationToolsEnabled ?? false,
+        orchestrationRequired: orchestrationRequired ?? false,
         canWrite: Boolean(member.canWrite),
         systemPrompt,
         messages: conversation,
@@ -2165,9 +2224,11 @@ async function askMember(
     const finalContent = addressReply
       ? ensureAddressedReply(response.content, replyTargetName)
       : annotateMarkdownCodeFences(response.content).trim();
+    const savedReasoning = streamingReasoning.get(pendingId)?.trim();
     settingsStore.updateMessage(pendingId, {
       status: "done",
       content: finalContent,
+      reasoningContent: savedReasoning || undefined,
       contentSegments: getFinalContentSegments(pendingId, finalContent),
     });
     applyCompletionUsage(pendingId, response.usage);
@@ -2182,6 +2243,7 @@ async function askMember(
       messageId: pendingId,
       member,
       content: finalContent,
+      traceSteps: response.traceSteps ?? [],
     };
   } catch (error) {
     if (isRunInterrupted(runId)) {
@@ -2400,15 +2462,6 @@ function buildTaskPlanningRule(workers: AgentModel[], round: number, redispatchI
   ].join("\n");
 }
 
-function buildTaskPlanningRetryRule(workers: AgentModel[]) {
-  const assignmentTemplateLines = workers.map((member) => `- @${member.name}:`).join("\n");
-  return [t("chatRuntime.taskPlanRetryRule"), assignmentTemplateLines].join("\n");
-}
-
-function hasTaskAssignments(plan: string, workers: AgentModel[]) {
-  return workers.some((worker) => Boolean(getTaskAssignment(plan, worker)));
-}
-
 function buildTaskWorkerRule(assignment: TaskAssignment, round: number) {
   return [
     t("chatRuntime.taskWorkerRule", { round }),
@@ -2429,6 +2482,8 @@ async function askTaskWorker(
   round: number,
   runId: string,
 ) {
+  const workerContext = buildWorkerIsolatedConversation(assignment.member.name);
+
   let answer = await askMember(
     assignment.member,
     buildTaskWorkerRule(assignment, round),
@@ -2436,6 +2491,10 @@ async function askTaskWorker(
     undefined,
     "",
     false,
+    workerContext,
+    false,  // orchestrationToolsEnabled
+    false,  // orchestrationRequired
+    true,   // forceCodeTools
   );
 
   if (!answer || isRunInterrupted(runId)) {
@@ -2453,6 +2512,10 @@ async function askTaskWorker(
     undefined,
     "",
     false,
+    workerContext,
+    false,  // orchestrationToolsEnabled
+    false,  // orchestrationRequired
+    true,   // forceCodeTools
   );
 
   if (!answer || isRunInterrupted(runId)) {
@@ -2507,38 +2570,22 @@ async function runTaskGroup(
       undefined,
       ownerName,
       false,
+      undefined,
+      true,   // orchestrationToolsEnabled
+      true,   // orchestrationRequired
+      true,   // forceCodeTools
     );
 
     if (!plan || isRunInterrupted(runId)) {
       return;
     }
 
-    if (!hasTaskAssignments(plan.content, workers)) {
-      const retryPlan = await askMember(
-        admin,
-        buildTaskPlanningRetryRule(workers),
-        runId,
-        undefined,
-        ownerName,
-        false,
-      );
-      if (retryPlan && !isRunInterrupted(runId)) {
-        plan = retryPlan;
-      }
-    }
+    const assignments = resolveTaskAssignments(plan, workers);
 
-    if (!hasTaskAssignments(plan.content, workers)) {
-      appendMessage({
-        role: "assistant",
-        modelName: t("common.systemName"),
-        status: "error",
-        color: "#c45656",
-        content: t("chatRuntime.taskPlanInvalid"),
-      });
+    if (assignments.length === 0) {
       return;
     }
 
-    const assignments = buildTaskAssignments(plan.content, workers);
     setSpeakerQueue(
       assignments.map((assignment) => assignment.member),
       "queued",
@@ -2560,10 +2607,27 @@ async function runTaskGroup(
       runId,
       undefined,
       ownerName,
+      false,
+      buildConversation(),
+      true,   // orchestrationToolsEnabled
+      false,  // orchestrationRequired
+      true,   // forceCodeTools
     );
 
     if (!review) {
       return;
+    }
+
+    const reviewDispatches = parseDispatchTasksFromResponse(
+      review.traceSteps ?? [],
+      workers,
+    );
+
+    if (reviewDispatches.length > 0) {
+      redispatchInstruction = reviewDispatches
+        .map((entry) => `- @${entry.member}: ${entry.instruction}`)
+        .join("\n");
+      continue;
     }
 
     const redispatch = parseTaskRedispatch(review.content);
@@ -2579,9 +2643,45 @@ async function runTaskGroup(
     const admin = members.find((member) => member.isAdmin);
 
     if (admin) {
-      await askMember(admin, buildTaskReviewRule(maxTaskRounds, true), runId, undefined, ownerName);
+      await askMember(
+        admin,
+        buildTaskReviewRule(maxTaskRounds, true),
+        runId,
+        undefined,
+        ownerName,
+        false,
+        buildConversation(),
+        true,   // orchestrationToolsEnabled
+        false,  // orchestrationRequired
+        true,   // forceCodeTools
+      );
     }
   }
+}
+
+function resolveTaskAssignments(
+  adminResponse: MemberAnswer | null,
+  workers: AgentModel[],
+): TaskAssignment[] {
+  if (!adminResponse) return [];
+
+  const dispatchEntries = parseDispatchTasksFromResponse(
+    adminResponse.traceSteps ?? [],
+    workers,
+  );
+
+  if (dispatchEntries.length > 0) {
+    return dispatchEntries
+      .map((entry) => {
+        const worker = workers.find(
+          (member) => member.name.trim() === entry.member,
+        );
+        return worker ? { member: worker, instruction: entry.instruction } : null;
+      })
+      .filter((assignment): assignment is TaskAssignment => assignment !== null);
+  }
+
+  return buildTaskAssignments(adminResponse.content, workers);
 }
 
 async function sendMessage() {

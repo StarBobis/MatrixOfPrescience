@@ -95,6 +95,7 @@ export interface ChatMessage {
   agreeMemberIds?: string[];
   supplementMemberIds?: string[];
   disagreeMemberIds?: string[];
+  reasoningContent?: string;
   thoughtSteps?: string[];
   activityItems?: ChatMessageActivityItem[];
   executionItems?: ChatMessageExecutionItem[];
@@ -325,6 +326,7 @@ function normalizeGroup(group: ChatGroup): ChatGroup {
       agreeMemberIds: message.agreeMemberIds ?? [],
       supplementMemberIds: message.supplementMemberIds ?? [],
       disagreeMemberIds: message.disagreeMemberIds ?? [],
+      reasoningContent: message.reasoningContent ?? undefined,
       thoughtSteps: message.thoughtSteps ?? [],
       activityItems: message.activityItems ?? [],
       executionItems: message.executionItems ?? [],
@@ -1168,6 +1170,7 @@ export const useSettingsStore = defineStore("settings", {
         agreeMemberIds: message.agreeMemberIds ?? [],
         supplementMemberIds: message.supplementMemberIds ?? [],
         disagreeMemberIds: message.disagreeMemberIds ?? [],
+        reasoningContent: message.reasoningContent ?? undefined,
         thoughtSteps: message.thoughtSteps ?? [],
         activityItems: message.activityItems ?? [],
         executionItems: message.executionItems ?? [],
@@ -1185,6 +1188,7 @@ export const useSettingsStore = defineStore("settings", {
         agreeMemberIds: message.agreeMemberIds ?? [],
         supplementMemberIds: message.supplementMemberIds ?? [],
         disagreeMemberIds: message.disagreeMemberIds ?? [],
+        reasoningContent: message.reasoningContent ?? undefined,
         thoughtSteps: message.thoughtSteps ?? [],
         activityItems: message.activityItems ?? [],
         executionItems: message.executionItems ?? [],

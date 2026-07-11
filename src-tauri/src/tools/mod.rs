@@ -653,6 +653,41 @@ pub(crate) fn code_tools_schema(strict: bool, allow_writes: bool) -> Value {
     json!(tools)
 }
 
+pub(crate) fn orchestration_tools_schema(strict: bool) -> Value {
+    json!([finalize_tool_function(
+        json!({
+            "name": "dispatch_tasks",
+            "description": "Formally dispatch tasks to specific group members. Only the coordinator should call this tool. Each entry assigns exactly one task to one member. Use this structured tool instead of writing assignment text; the system will route each task to its target member automatically.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tasks": {
+                        "type": "array",
+                        "minItems": 1,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "member": {
+                                    "type": "string",
+                                    "description": "The exact name of the group member to assign this task to."
+                                },
+                                "instruction": {
+                                    "type": "string",
+                                    "description": "The specific task instruction. Include the goal, expected output, and any constraints. Be precise and actionable."
+                                }
+                            },
+                            "required": ["member", "instruction"]
+                        },
+                        "description": "One or more task assignments. Each entry dispatches a single task to one member."
+                    }
+                },
+                "required": ["tasks"]
+            }
+        }),
+        strict,
+    )])
+}
+
 fn is_write_code_tool(name: &str, arguments: &Value) -> bool {
     matches!(
         name,
@@ -702,6 +737,7 @@ pub(crate) fn execute_code_tool_call(
             "move_path" => move_workspace_path_tool(workspace, &arguments),
             "apply_patch" => apply_patch_tool(workspace, &arguments),
             "run_command" => run_workspace_command_tool(workspace, &arguments, stream_sink),
+            "dispatch_tasks" => execute_dispatch_tasks(&arguments),
             _ => Err(format!("Unknown tool: {}", name)),
         }
     };
@@ -711,6 +747,58 @@ pub(crate) fn execute_code_tool_call(
         "tool_call_id": tool_call_id,
         "content": content.unwrap_or_else(|error| format!("Tool {} failed: {}", name, error)),
     })
+}
+
+fn execute_dispatch_tasks(arguments: &Value) -> Result<String, String> {
+    let tasks = arguments
+        .get("tasks")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "dispatch_tasks requires a non-empty \"tasks\" array.".to_string())?;
+
+    if tasks.is_empty() {
+        return Err("dispatch_tasks requires at least one task entry.".to_string());
+    }
+
+    let mut dispatched = Vec::new();
+    for (index, task) in tasks.iter().enumerate() {
+        let member = task
+            .get("member")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| format!("Task {} is missing a non-empty \"member\" name.", index + 1))?;
+        let instruction = task
+            .get("instruction")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|inst| !inst.is_empty())
+            .ok_or_else(|| {
+                format!(
+                    "Task {} (member \"{}\") is missing a non-empty \"instruction\".",
+                    index + 1,
+                    member
+                )
+            })?;
+
+        dispatched.push(json!({
+            "member": member,
+            "instruction": instruction,
+        }));
+    }
+
+    Ok(format!(
+        "Tasks dispatched successfully to {} member(s):\n{}",
+        dispatched.len(),
+        dispatched
+            .iter()
+            .map(|entry| format!(
+                "- @{}: {}",
+                entry["member"].as_str().unwrap_or("?"),
+                entry["instruction"].as_str().unwrap_or("?")
+            ))
+            .collect::<Vec<_>>()
+            .join("\n")
+    ))
 }
 
 fn execute_codegraph_explore_tool(workspace: &Path, arguments: &Value) -> Result<String, String> {
