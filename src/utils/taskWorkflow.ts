@@ -112,7 +112,7 @@ export function parseDispatchTasksFromResponse(
             return null;
           }
           const record = task as Record<string, unknown>;
-          const member = String(record.member ?? "").trim();
+          const member = String(record.member ?? "").trim().replace(/^@+/, "");
           const instruction = String(record.instruction ?? "").trim();
           return member && instruction ? { member, instruction } : null;
         })

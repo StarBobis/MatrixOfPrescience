@@ -909,11 +909,18 @@ async fn chat_completion(
             "temperature": request.temperature.unwrap_or(0.7),
         });
         let tools_blocked = turn_phase.blocks_tools();
-        let code_tools_allowed = !tools_blocked && code_workspace.is_some();
+        let orchestration_required = request.orchestration_required.unwrap_or(false);
+        let code_tools_allowed = !tools_blocked
+            && code_workspace.is_some()
+            && !orchestration_required;
         let orchestration_tools_allowed =
             !tools_blocked && request.orchestration_tools_enabled.unwrap_or(false);
-        let orchestration_required = request.orchestration_required.unwrap_or(false);
-        let orchestration_tools_suppressed = deepseek_thinking && orchestration_required;
+        let orchestration_tools_suppressed = deepseek_thinking
+            && orchestration_required
+            && matches!(
+                turn_phase,
+                AgentTurnPhase::ToolReflection | AgentTurnPhase::BudgetCheckpoint
+            );
         let effective_orchestration_tools =
             orchestration_tools_allowed && !orchestration_tools_suppressed;
         let any_tools_allowed = code_tools_allowed || effective_orchestration_tools;

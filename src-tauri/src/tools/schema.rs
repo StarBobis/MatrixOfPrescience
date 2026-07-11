@@ -417,7 +417,7 @@ pub(crate) fn orchestration_tools_schema(strict: bool) -> Value {
     json!([finalize_tool_function(
         json!({
             "name": "dispatch_tasks",
-            "description": "Formally dispatch tasks to specific group members. Only the coordinator should call this tool. Each entry assigns exactly one task to one member. Use this structured tool instead of writing assignment text; the system will route each task to its target member automatically.",
+            "description": "Formally dispatch tasks to specific group members. Only the coordinator should call this tool. Each entry assigns exactly one task to one member. Use this structured tool instead of writing assignment text; the system will route each task to its target member automatically. IMPORTANT: After calling this tool, reply with the control line FINAL — do not continue working yourself.",
             "parameters": {
                 "type": "object",
                 "properties": {
