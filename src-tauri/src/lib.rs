@@ -823,6 +823,7 @@ async fn chat_completion(
     let mut edit_recovery_required = false;
     let mut edit_recovery_rounds = 0usize;
     let mut final_answer_requested = false;
+    let mut tool_only_rounds: usize = 0;
     let mut validation = ValidationState::default();
     let mut last_finish_reason: Option<String> = None;
     let mut last_usage: Option<ChatCompletionUsage> = None;
@@ -1039,6 +1040,17 @@ async fn chat_completion(
                 }
                 code_tool_called = true;
 
+                if !validation_tool_required && !repair_required {
+                    tool_only_rounds += 1;
+                    if tool_only_rounds >= MAX_CHAT_COMPLETION_TURNS.saturating_sub(2) {
+                        messages.push(json!({
+                            "role": "user",
+                            "content": FINAL_ANSWER_INSTRUCTION,
+                        }));
+                        final_answer_requested = true;
+                    }
+                }
+
                 if validation.should_auto_validate(edit_recovery_required) {
                     validation.mark_auto_attempted();
                     let validation_run = code_workspace
@@ -1166,6 +1178,7 @@ async fn openai_responses_completion(
     let mut edit_recovery_required = false;
     let mut edit_recovery_rounds = 0usize;
     let mut final_answer_requested = false;
+    let mut tool_only_rounds: usize = 0;
     let mut validation = ValidationState::default();
     let mut previous_response_id: Option<String> = None;
     let mut pending_input: Vec<Value> = Vec::new();
@@ -1339,6 +1352,14 @@ async fn openai_responses_completion(
                 }
 
                 code_tool_called = true;
+
+                if !validation_tool_required && !repair_required {
+                    tool_only_rounds += 1;
+                    if tool_only_rounds >= MAX_CHAT_COMPLETION_TURNS.saturating_sub(2) {
+                        pending_input.push(responses_user_message(FINAL_ANSWER_INSTRUCTION));
+                        final_answer_requested = true;
+                    }
+                }
 
                 if validation.should_auto_validate(edit_recovery_required) {
                     validation.mark_auto_attempted();

@@ -198,6 +198,34 @@ fn collect_dsml_tags(content: &str) -> Vec<DsmlTag> {
     tags
 }
 
+/// Strip DSML tags from content while preserving surrounding text.
+/// Only removes `<DSML | ...>` and `</DSML | ...>` tag markers;
+/// text outside these markers is kept.
+fn strip_dsml_tags(content: &str) -> String {
+    let tags = collect_dsml_tags(content);
+    if tags.is_empty() {
+        return content.to_string();
+    }
+
+    let mut result = String::with_capacity(content.len());
+    let mut last_end = 0usize;
+
+    for tag in &tags {
+        // Copy text from last_end to this tag's start
+        if tag.start > last_end {
+            result.push_str(&content[last_end..tag.start]);
+        }
+        last_end = tag.end;
+    }
+
+    // Copy any remaining text after the last tag
+    if last_end < content.len() {
+        result.push_str(&content[last_end..]);
+    }
+
+    result
+}
+
 fn clean_dsml_parameter_text(raw: &str, parameter_name: &str) -> String {
     let without_leading_line = raw
         .strip_prefix("\r\n")
@@ -340,7 +368,10 @@ pub(crate) fn normalize_dsml_tool_calls_in_message(mut message: Value) -> Value 
     let tool_calls = extract_dsml_tool_calls_from_content(&content);
 
     if !tool_calls.is_empty() {
-        message["content"] = json!("");
+        // Strip DSML tags but preserve surrounding text content,
+        // so the model's final answer text is not lost
+        let cleaned = strip_dsml_tags(&content);
+        message["content"] = json!(cleaned);
         message["tool_calls"] = Value::Array(tool_calls);
     }
 
@@ -454,10 +485,11 @@ mod tests {
     fn normalizes_deepseek_dsml_content_into_tool_calls() {
         let message = normalize_dsml_tool_calls_in_message(json!({
             "role": "assistant",
-            "content": "<DSML | tool_calls>\n<DSML | invoke name=\"write_file\">\n<DSML | parameter name=\"content\" string=\"true\">body"
+            "content": "Let me update.\n<DSML | tool_calls>\n<DSML | invoke name=\"write_file\">\n<DSML | parameter name=\"content\" string=\"true\">body"
         }));
 
-        assert_eq!(message["content"], json!(""));
+        // Content outside DSML tags is preserved
+        assert!(message["content"].as_str().unwrap_or("").contains("Let me update."));
         assert_eq!(
             message["tool_calls"][0]["function"]["name"],
             json!("write_file")
