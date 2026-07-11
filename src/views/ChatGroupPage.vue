@@ -107,7 +107,7 @@ interface ApplyPatchResponse {
 }
 
 type MemberDecision = "speak" | "wait";
-type MemberVote = "agree" | "supplement" | "disagree";
+type MemberVote = "agree" | "supplement" | "disagree" | "error";
 
 interface MemberAnswer { messageId: string; member: AgentModel; content: string; traceSteps: ChatTraceStep[]; dispatchedTasks?: Array<{ member: string; instruction: string }> }
 
@@ -2324,6 +2324,8 @@ async function voteOnAnswer(
         wireApi: provider.wireApi,
         reasoningEffort: voter.reasoningEffort,
         temperature: 0,
+        workspacePath: activeGroup.value?.workspacePath ?? "",
+        codeToolsEnabled: workspaceToolsAllowed(),
         cancellationId: runId,
         systemPrompt: buildSystemPrompt(
           voter,
@@ -2358,7 +2360,7 @@ async function voteOnAnswer(
       "error",
       errorPresentation.detail,
     );
-    return "agree";
+    return "error";
   }
 }
 
@@ -2371,20 +2373,26 @@ async function collectMemberVotes(answer: MemberAnswer, runId: string) {
   setSpeakerQueue([answer.member, ...voters], "voting");
   upsertSpeakerQueueMember(answer.member, "consensus");
 
-  for (const voter of voters) {
-    if (isRunInterrupted(runId)) {
-      return [];
-    }
+  const votes = await Promise.all(
+    voters.map(async (voter) => {
+      if (isRunInterrupted(runId)) {
+        return { voter, vote: "agree" as MemberVote };
+      }
+      upsertSpeakerQueueMember(voter, "voting");
+      const vote = await voteOnAnswer(answer, voter, runId);
+      return { voter, vote };
+    }),
+  );
 
-    upsertSpeakerQueueMember(voter, "voting");
-    const vote = await voteOnAnswer(answer, voter, runId);
-
+  for (const { voter, vote } of votes) {
     if (vote === "disagree") {
       disagreeMemberIds.push(voter.id);
       upsertSpeakerQueueMember(voter, "followup");
     } else if (vote === "supplement") {
       supplementMemberIds.push(voter.id);
       upsertSpeakerQueueMember(voter, "followup");
+    } else if (vote === "error") {
+      upsertSpeakerQueueMember(voter, "error");
     } else {
       agreeMemberIds.push(voter.id);
       upsertSpeakerQueueMember(voter, "voted");
@@ -2419,6 +2427,7 @@ async function resolveConsensus(initialAnswer: MemberAnswer | null, runId: strin
       return;
     }
 
+    round += 1;
     const membersNeedingFollowUp = await collectMemberVotes(currentAnswer, runId);
 
     if (membersNeedingFollowUp.length === 0) {
@@ -2426,12 +2435,6 @@ async function resolveConsensus(initialAnswer: MemberAnswer | null, runId: strin
     }
 
     for (const member of membersNeedingFollowUp) {
-      round += 1;
-
-      if (round > maxConsensusRounds) {
-        break;
-      }
-
       if (!currentAnswer) {
         break;
       }
@@ -2446,6 +2449,11 @@ async function resolveConsensus(initialAnswer: MemberAnswer | null, runId: strin
         runId,
         undefined,
         replyTargetName,
+        true,   // addressReply
+        undefined, // customConversation
+        undefined, // orchestrationToolsEnabled
+        undefined, // orchestrationRequired
+        true,      // forceCodeTools — let members verify claims with code tools
       );
     }
   }
