@@ -2246,7 +2246,7 @@ async function askMember(
       status: "done",
       content: finalContent,
       reasoningContent: savedReasoning || undefined,
-      contentSegments: getFinalContentSegments(pendingId, finalContent),
+      contentSegments: finalContent.trim().length > 0 ? getFinalContentSegments(pendingId, finalContent) : [],
     });
     applyCompletionUsage(pendingId, response.usage);
     releasePendingMessage(pendingId, startedAt);

@@ -82,6 +82,14 @@ impl ToolCallUtils {
             return message.clone();
         };
 
+        if executable_count == 0 {
+            let mut trimmed_message = message.clone();
+            if let Some(object) = trimmed_message.as_object_mut() {
+                object.remove("tool_calls");
+            }
+            return trimmed_message;
+        }
+
         if executable_count >= tool_calls.len() {
             return message.clone();
         }
@@ -188,6 +196,22 @@ mod tests {
 
         assert_eq!(trimmed["tool_calls"].as_array().map(Vec::len), Some(2));
         assert_eq!(trimmed["tool_calls"][1]["id"], json!("call_2"));
+    }
+
+    #[test]
+    fn trims_chat_tool_call_message_to_zero_by_removing_tool_calls() {
+        let message = json!({
+            "role": "assistant",
+            "content": "summary",
+            "tool_calls": [
+                { "id": "call_1", "type": "function" }
+            ]
+        });
+
+        let trimmed = ToolCallUtils::trim_chat_tool_calls(&message, 0);
+
+        assert_eq!(trimmed["content"], json!("summary"));
+        assert!(trimmed.get("tool_calls").is_none());
     }
 
     #[test]

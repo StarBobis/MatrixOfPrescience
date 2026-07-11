@@ -108,7 +108,8 @@ impl AgentTurnState {
 
         matches!(
             phase,
-            AgentTurnPhase::ToolReflection
+            AgentTurnPhase::ToolAction
+                | AgentTurnPhase::ToolReflection
                 | AgentTurnPhase::BudgetCheckpoint
                 | AgentTurnPhase::FinalAnswer
         )
@@ -138,15 +139,16 @@ impl AgentTurnState {
         repair_required: bool,
         orchestration_required: bool,
     ) -> Option<Value> {
-        if validation_tool_required || repair_required || orchestration_required {
-            return Some(json!("required"));
-        }
-
-        if self.thinking_enabled(phase) {
+        // DeepSeek thinking mode rejects tool_choice: "required" under any condition.
+        // Return None so no tool_choice is sent; the model defaults to whatever it
+        // prefers (including DSML tool calls in content). The phase instruction
+        // (DEEPSEEK_TOOL_ACTION_INSTRUCTION / VALIDATION_REQUIRED_INSTRUCTION /
+        // EDIT_FAILURE_RECOVERY_INSTRUCTION) guides the model to call the appropriate tool.
+        if self.is_deepseek && self.deepseek_tool_workflow && self.thinking_enabled(phase) {
             return None;
         }
 
-        if self.is_deepseek && self.deepseek_tool_workflow && phase == AgentTurnPhase::ToolAction {
+        if validation_tool_required || repair_required || orchestration_required {
             return Some(json!("required"));
         }
 
@@ -214,9 +216,9 @@ mod tests {
         );
         assert_eq!(
             state.tool_choice(AgentTurnPhase::ToolAction, false, false, false),
-            Some(json!("required"))
+            None
         );
-        assert!(!state.thinking_enabled(AgentTurnPhase::ToolAction));
+        assert!(state.thinking_enabled(AgentTurnPhase::ToolAction));
 
         state.mark_tools_executed();
         assert_eq!(
@@ -232,7 +234,7 @@ mod tests {
         );
         assert_eq!(
             state.tool_choice(AgentTurnPhase::ToolAction, false, false, false),
-            Some(json!("required"))
+            None
         );
     }
 
@@ -274,10 +276,10 @@ mod tests {
             state.phase(false, false, false, true),
             AgentTurnPhase::ToolAction
         );
-        assert!(!state.thinking_enabled(AgentTurnPhase::ToolAction));
+        assert!(state.thinking_enabled(AgentTurnPhase::ToolAction));
         assert_eq!(
             state.tool_choice(AgentTurnPhase::ToolAction, false, true, false),
-            Some(json!("required"))
+            None
         );
     }
 }

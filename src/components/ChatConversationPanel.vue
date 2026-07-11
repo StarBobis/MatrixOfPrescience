@@ -733,10 +733,12 @@ function getContentSegments(message: ChatMessage): ChatMessageContentSegment[] {
       return segments;
     }
 
-    return segments.map((segment) => ({
-      ...segment,
-      text: sanitizeAssistantMessageContent(segment.text),
-    }));
+    return segments
+      .map((segment) => ({
+        ...segment,
+        text: sanitizeAssistantMessageContent(segment.text),
+      }))
+      .filter((segment) => segment.text.trim().length > 0);
   }
 
   const visibleContent =

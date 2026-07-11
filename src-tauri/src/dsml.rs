@@ -403,13 +403,9 @@ pub(crate) fn normalize_dsml_tool_calls_in_message(mut message: Value) -> Value 
         .map(|calls| !calls.is_empty())
         .unwrap_or(false);
 
-    if has_tool_calls {
-        return message;
-    }
-
     let content = StrUtils::message_content_text(&message);
 
-    if content.is_empty() || !content.contains("DSML") {
+    if content.is_empty() || !content.contains('<') {
         return message;
     }
 
@@ -418,7 +414,9 @@ pub(crate) fn normalize_dsml_tool_calls_in_message(mut message: Value) -> Value 
     if !tool_calls.is_empty() {
         let cleaned = strip_dsml_payloads(&content);
         message["content"] = json!(cleaned);
-        message["tool_calls"] = Value::Array(tool_calls);
+        if !has_tool_calls {
+            message["tool_calls"] = Value::Array(tool_calls);
+        }
     }
 
     message
@@ -607,6 +605,43 @@ Re-read these four to determine which still need patching.\n\n\
     }
 
     #[test]
+    fn parses_native_deepseek_dsml_with_truncated_tail() {
+        let dsml = "\u{FF5C}\u{FF5C}DSML\u{FF5C}\u{FF5C}";
+        let content = format!(
+            "\
+Reviewing the next reads.\n\
+<{dsml}tool_calls>\n\
+<{dsml}invoke name=\"read_file\">\n\
+<{dsml}parameter name=\"file\" string=\"true\">src/DirectX12/command/DX12CommandListHooks.cpp</{dsml}parameter>\n\
+<{dsml}parameter name=\"startLine\" string=\"false\">375</{dsml}parameter>\n\
+</{dsml}invoke>\n\
+<{dsml}invoke name=\"read_file\">\n\
+<{dsml}parameter name=\"file\" string=\"true\">src/DirectX12/command/DX12CommandListHooks.cpp</{dsml}parameter>\n\
+<{dsml}"
+        );
+
+        let message = normalize_dsml_tool_calls_in_message(json!({
+            "role": "assistant",
+            "content": content,
+        }));
+        let tool_calls = message["tool_calls"]
+            .as_array()
+            .expect("truncated native DeepSeek DSML should still become tool calls");
+
+        assert_eq!(tool_calls.len(), 2);
+        let first_args: Value =
+            serde_json::from_str(tool_calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+        let second_args: Value =
+            serde_json::from_str(tool_calls[1]["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(first_args["startLine"], json!(375));
+        assert_eq!(
+            second_args["file"],
+            json!("src/DirectX12/command/DX12CommandListHooks.cpp")
+        );
+        assert!(!message["content"].as_str().unwrap_or("").contains("DSML"));
+    }
+
+    #[test]
     fn normalize_skips_when_already_has_tool_calls() {
         let message = normalize_dsml_tool_calls_in_message(json!({
             "role": "assistant",
@@ -615,6 +650,35 @@ Re-read these four to determine which still need patching.\n\n\
         }));
 
         assert_eq!(message["content"], json!("<DSML | tool_calls>..."));
+        assert_eq!(message["tool_calls"][0]["id"], json!("existing"));
+    }
+
+    #[test]
+    fn normalize_strips_dsml_content_when_tool_calls_already_exist() {
+        let message = normalize_dsml_tool_calls_in_message(json!({
+            "role": "assistant",
+            "content": "\
+Planning.\n\
+<DSML | tool_calls>\n\
+<DSML | invoke name=\"read_file\">\n\
+<DSML | parameter name=\"file\" string=\"true\">src/lib.rs\n\
+</DSML | invoke>\n\
+</DSML | tool_calls>\n\
+Continue.",
+            "tool_calls": [{
+                "id": "existing",
+                "type": "function",
+                "function": {
+                    "name": "read_file",
+                    "arguments": "{\"file\":\"src/lib.rs\"}"
+                }
+            }]
+        }));
+
+        let content = message["content"].as_str().unwrap_or("");
+        assert!(content.contains("Planning."));
+        assert!(content.contains("Continue."));
+        assert!(!content.contains("<DSML"));
         assert_eq!(message["tool_calls"][0]["id"], json!("existing"));
     }
 
