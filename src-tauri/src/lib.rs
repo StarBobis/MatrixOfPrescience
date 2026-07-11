@@ -45,11 +45,11 @@ use tools::{
 };
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "camelCase")]
 struct ChatMessage {
     role: String,
     content: String,
-    #[serde(default)]
+    #[serde(default, alias = "reasoning_content")]
     reasoning_content: Option<String>,
 }
 
@@ -190,7 +190,6 @@ const RETRY_CANCELLATION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const FINAL_ANSWER_INSTRUCTION: &str =
     "Use the tool results already provided and write the final answer now.";
 const EDIT_FAILURE_RECOVERY_INSTRUCTION: &str = "The previous edit tool call failed. Do not stop or provide a final answer solely because an edit did not apply. Recover using the error and the current workspace state: re-read the target when the context may be stale, then retry with a corrected smaller patch or a different available edit tool. Do not repeat the identical failing call. Continue until the requested change is complete or no available tool can resolve a genuine blocker.";
-const MAX_AUTONOMOUS_TOOL_ROUNDS: usize = 4;
 const MAX_TOOL_ONLY_ROUNDS: usize = 6;
 const MAX_TOTAL_TOOL_CALLS_PER_AUTONOMOUS_ROUND: usize = 24;
 const MAX_DEEPSEEK_TOOL_CALLS_PER_TURN: usize = 1;
@@ -840,7 +839,6 @@ async fn chat_completion(
     let mut edit_recovery_required = false;
     let mut edit_recovery_rounds = 0usize;
     let mut final_answer_requested = false;
-    let mut autonomous_tool_round = 1usize;
     let mut tool_only_rounds: usize = 0;
     let mut tool_calls_since_checkpoint = 0usize;
     let mut total_tool_calls_executed = 0usize;
@@ -857,7 +855,7 @@ async fn chat_completion(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
 
-    for _ in 0..MAX_CHAT_COMPLETION_TURNS {
+    for turn_index in 0..MAX_CHAT_COMPLETION_TURNS {
         let validation_tool_required = validation.requires_tool(edit_recovery_required);
         if validation_tool_required {
             validation.mark_model_prompted();
@@ -1014,8 +1012,8 @@ async fn chat_completion(
                     );
                     if tool_execution_plan.executable_count == 0 {
                         if ToolCallUtils::can_open_next_autonomous_round(
-                            autonomous_tool_round,
-                            MAX_AUTONOMOUS_TOOL_ROUNDS,
+                            turn_index,
+                            MAX_CHAT_COMPLETION_TURNS,
                         ) {
                             tool_checkpoint_pending = true;
                             tool_budget_reset_pending = true;
@@ -1108,8 +1106,8 @@ async fn chat_completion(
                     }
                     if total_tool_calls_executed >= MAX_TOTAL_TOOL_CALLS_PER_AUTONOMOUS_ROUND {
                         if ToolCallUtils::can_open_next_autonomous_round(
-                            autonomous_tool_round,
-                            MAX_AUTONOMOUS_TOOL_ROUNDS,
+                            turn_index,
+                            MAX_CHAT_COMPLETION_TURNS,
                         ) {
                             tool_checkpoint_pending = true;
                             tool_budget_reset_pending = true;
@@ -1124,8 +1122,8 @@ async fn chat_completion(
                         tool_only_rounds += 1;
                         if !tool_checkpoint_pending && tool_only_rounds >= MAX_TOOL_ONLY_ROUNDS {
                             if ToolCallUtils::can_open_next_autonomous_round(
-                                autonomous_tool_round,
-                                MAX_AUTONOMOUS_TOOL_ROUNDS,
+                                turn_index,
+                                MAX_CHAT_COMPLETION_TURNS,
                             ) {
                                 tool_checkpoint_pending = true;
                                 tool_budget_reset_pending = true;
@@ -1183,7 +1181,6 @@ async fn chat_completion(
                 tool_checkpoint_pending = false;
                 final_answer_requested = false;
                 if tool_budget_reset_pending {
-                    autonomous_tool_round += 1;
                     tool_only_rounds = 0;
                     tool_calls_since_checkpoint = 0;
                     total_tool_calls_executed = 0;
@@ -1241,7 +1238,6 @@ async fn chat_completion(
             tool_checkpoint_pending = false;
             final_answer_requested = false;
             if tool_budget_reset_pending {
-                autonomous_tool_round += 1;
                 tool_only_rounds = 0;
                 tool_calls_since_checkpoint = 0;
                 total_tool_calls_executed = 0;
@@ -1300,7 +1296,6 @@ async fn openai_responses_completion(
     let mut edit_recovery_required = false;
     let mut edit_recovery_rounds = 0usize;
     let mut final_answer_requested = false;
-    let mut autonomous_tool_round = 1usize;
     let mut tool_only_rounds: usize = 0;
     let mut tool_calls_since_checkpoint = 0usize;
     let mut total_tool_calls_executed = 0usize;
@@ -1318,7 +1313,7 @@ async fn openai_responses_completion(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
 
-    for _ in 0..MAX_CHAT_COMPLETION_TURNS {
+    for turn_index in 0..MAX_CHAT_COMPLETION_TURNS {
         let validation_tool_required = validation.requires_tool(edit_recovery_required);
         if validation_tool_required {
             validation.mark_model_prompted();
@@ -1438,8 +1433,8 @@ async fn openai_responses_completion(
                     );
                     if tool_execution_plan.executable_count == 0 {
                         if ToolCallUtils::can_open_next_autonomous_round(
-                            autonomous_tool_round,
-                            MAX_AUTONOMOUS_TOOL_ROUNDS,
+                            turn_index,
+                            MAX_CHAT_COMPLETION_TURNS,
                         ) {
                             tool_checkpoint_pending = true;
                             tool_budget_reset_pending = true;
@@ -1535,8 +1530,8 @@ async fn openai_responses_completion(
                     }
                     if total_tool_calls_executed >= MAX_TOTAL_TOOL_CALLS_PER_AUTONOMOUS_ROUND {
                         if ToolCallUtils::can_open_next_autonomous_round(
-                            autonomous_tool_round,
-                            MAX_AUTONOMOUS_TOOL_ROUNDS,
+                            turn_index,
+                            MAX_CHAT_COMPLETION_TURNS,
                         ) {
                             tool_checkpoint_pending = true;
                             tool_budget_reset_pending = true;
@@ -1551,8 +1546,8 @@ async fn openai_responses_completion(
                         tool_only_rounds += 1;
                         if !tool_checkpoint_pending && tool_only_rounds >= MAX_TOOL_ONLY_ROUNDS {
                             if ToolCallUtils::can_open_next_autonomous_round(
-                                autonomous_tool_round,
-                                MAX_AUTONOMOUS_TOOL_ROUNDS,
+                                turn_index,
+                                MAX_CHAT_COMPLETION_TURNS,
                             ) {
                                 tool_checkpoint_pending = true;
                                 tool_budget_reset_pending = true;
@@ -1605,7 +1600,6 @@ async fn openai_responses_completion(
                 tool_checkpoint_pending = false;
                 final_answer_requested = false;
                 if tool_budget_reset_pending {
-                    autonomous_tool_round += 1;
                     tool_only_rounds = 0;
                     tool_calls_since_checkpoint = 0;
                     total_tool_calls_executed = 0;
@@ -1658,7 +1652,6 @@ async fn openai_responses_completion(
             tool_checkpoint_pending = false;
             final_answer_requested = false;
             if tool_budget_reset_pending {
-                autonomous_tool_round += 1;
                 tool_only_rounds = 0;
                 tool_calls_since_checkpoint = 0;
                 total_tool_calls_executed = 0;
@@ -2030,7 +2023,13 @@ fn first_choice_finish_reason(parsed: &Value) -> Option<String> {
 }
 
 fn should_retry_http_failure(status: reqwest::StatusCode, _body: &str) -> bool {
-    !status.is_success()
+    status.is_server_error()
+        || matches!(
+            status,
+            reqwest::StatusCode::REQUEST_TIMEOUT
+                | reqwest::StatusCode::TOO_MANY_REQUESTS
+                | reqwest::StatusCode::CONFLICT
+        )
 }
 
 fn request_was_cancelled(cancellation: Option<&AtomicBool>) -> bool {
@@ -3089,10 +3088,14 @@ mod tests {
     }
 
     #[test]
-    fn retries_any_http_failure_status() {
-        assert!(should_retry_http_failure(
+    fn retries_only_transient_http_failures() {
+        assert!(!should_retry_http_failure(
             reqwest::StatusCode::BAD_REQUEST,
             "bad request",
+        ));
+        assert!(should_retry_http_failure(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            "rate limited",
         ));
         assert!(should_retry_http_failure(
             reqwest::StatusCode::BAD_GATEWAY,
@@ -3173,6 +3176,30 @@ mod tests {
 
         assert_eq!(payload["thinking"], json!({ "type": "enabled" }));
         assert_eq!(payload["reasoning_effort"], json!("high"));
+    }
+
+    #[test]
+    fn chat_message_deserializes_reasoning_content_from_camel_case() {
+        let message: ChatMessage = serde_json::from_value(json!({
+            "role": "assistant",
+            "content": "done",
+            "reasoningContent": "step one"
+        }))
+        .expect("camelCase reasoningContent should deserialize");
+
+        assert_eq!(message.reasoning_content.as_deref(), Some("step one"));
+    }
+
+    #[test]
+    fn chat_message_deserializes_reasoning_content_from_snake_case_alias() {
+        let message: ChatMessage = serde_json::from_value(json!({
+            "role": "assistant",
+            "content": "done",
+            "reasoning_content": "step one"
+        }))
+        .expect("snake_case reasoning_content should deserialize");
+
+        assert_eq!(message.reasoning_content.as_deref(), Some("step one"));
     }
 
     #[test]

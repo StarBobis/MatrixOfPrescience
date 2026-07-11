@@ -348,7 +348,7 @@ onBeforeUnmount(() => {
         :visible="activeMemberCardId === member.id"
         trigger="manual"
         placement="left-start"
-        :width="292"
+        :width="320"
         popper-class="member-popover"
       >
         <template #reference>
@@ -568,7 +568,7 @@ onBeforeUnmount(() => {
             <el-input
               v-model="member.systemPrompt"
               type="textarea"
-              :autosize="{ minRows: 3 }"
+              :autosize="{ minRows: 4, maxRows: 10 }"
               resize="none"
               :placeholder="t('members.rolePlaceholder')"
               @focus="startMemberCardEdit(member.id)"
@@ -852,6 +852,8 @@ onBeforeUnmount(() => {
 
 /* ===== Popover 弹出卡片 ===== */
 :global(.member-popover.el-popover) {
+  width: min(320px, calc(100vw - 32px)) !important;
+  max-width: calc(100vw - 32px);
   border-radius: 8px;
   padding: 0;
 }
@@ -860,7 +862,13 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 12px;
+  box-sizing: border-box;
+  max-height: min(72vh, 680px);
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 14px;
+  scrollbar-gutter: stable;
 }
 
 .profile-head {
@@ -941,6 +949,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
 }
 
 .profile-settings label {
@@ -974,7 +983,13 @@ onBeforeUnmount(() => {
 .profile-prompt {
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
   gap: 6px;
+  min-width: 0;
+}
+
+.profile-prompt :deep(.el-textarea) {
+  width: 100%;
 }
 
 .profile-prompt :deep(.el-textarea__inner),
@@ -983,9 +998,16 @@ onBeforeUnmount(() => {
   box-shadow: none;
 }
 
+.profile-prompt :deep(.el-textarea__inner) {
+  max-height: min(30vh, 280px);
+  line-height: 1.6;
+  overflow-y: auto;
+}
+
 .profile-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
+  min-width: 0;
 }
 </style>
