@@ -376,6 +376,8 @@
     "interruptedContent": "Generation was interrupted.",
     "interruptedStep": "The user interrupted this round.",
     "mentionedRule": "The user explicitly mentioned you. Answer first; other members will observe and decide whether to add anything after you reply.",
+    "taskAdminMentionedRule": "The user directly mentioned you in a task group. This is not a planning round or a tool-action round. Answer the user directly, using context if needed, but do not dispatch work, do not call dispatch_tasks, do not continue coordinating other members, and do not output FINAL, CONTINUE, or REDISPATCH.",
+    "taskWorkerMentionedRule": "The user directly mentioned you in a task group. Treat this as a direct Q&A turn, not a coordination or planning round. Answer only from your own role, using your isolated context if needed, but do not dispatch work, do not direct others, do not hand the task back, and do not call dispatch_tasks.",
     "markdownCodeFenceRule": "When your final Markdown contains a fenced code block, always write the language after the opening fence, for example ```cpp, ```ts, ```vue, ```rust, ```python, ```json, or ```bash. Never output a bare ``` fence for code.",
     "observerRule": "You were observing. The mentioned member has now replied. Decide whether to supplement, challenge, or help close consensus.",
     "pendingContent": "Generating reply...",

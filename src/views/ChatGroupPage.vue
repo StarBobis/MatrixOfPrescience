@@ -2512,6 +2512,16 @@ function buildTaskWorkerRetryRule(assignment: TaskAssignment, round: number) {
   ].join("\n");
 }
 
+function buildTaskMentionRule(member: AgentModel) {
+  return member.isAdmin
+    ? t("chatRuntime.taskAdminMentionedRule")
+    : t("chatRuntime.taskWorkerMentionedRule");
+}
+
+function buildTaskMentionConversation(member: AgentModel) {
+  return member.isAdmin ? buildConversation() : buildWorkerIsolatedConversation(member.name);
+}
+
 function normalizeTaskInstructionSignature(instruction: string) {
   return instruction.replace(/\s+/g, " ").trim().toLocaleLowerCase();
 }
@@ -2884,17 +2894,7 @@ async function sendMessage() {
   const mentionedMembers = parseMentionedMembers(userText, members);
 
   try {
-    const taskAdminWasMentioned = mentionedMembers.some((member) => member.isAdmin);
-
-    if (
-      activeGroup.value?.mode === "task" &&
-      (mentionedMembers.length === 0 || taskAdminWasMentioned)
-    ) {
-      await runTaskGroup(members, runId, ownerName);
-      return;
-    }
-
-    if (activeGroup.value?.mode === "task") {
+    if (activeGroup.value?.mode === "task" && mentionedMembers.length > 0) {
       setSpeakerQueue(mentionedMembers, "queued");
 
       for (const member of mentionedMembers) {
@@ -2904,13 +2904,22 @@ async function sendMessage() {
 
         await askMember(
           member,
-          t("chatRuntime.mentionedRule"),
+          buildTaskMentionRule(member),
           runId,
           undefined,
           ownerName,
+          true,
+          buildTaskMentionConversation(member),
+          false,
+          false,
         );
       }
 
+      return;
+    }
+
+    if (activeGroup.value?.mode === "task") {
+      await runTaskGroup(members, runId, ownerName);
       return;
     }
 

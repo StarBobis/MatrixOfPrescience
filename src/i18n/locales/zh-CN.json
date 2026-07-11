@@ -376,6 +376,8 @@
     "interruptedContent": "已中断生成。",
     "interruptedStep": "用户中断，本轮停止。",
     "mentionedRule": "用户明确提到了你。请你先回答；其它群友会先观望，等你回答完再判断是否需要补充。",
+    "taskAdminMentionedRule": "你在任务群里被用户直接点名了。当前不是任务编排回合，也不是工具行动回合；请直接回答用户，必要时可以查阅上下文，但不要分派任务、不要调用 dispatch_tasks、不要继续调度群友，也不要输出 FINAL、CONTINUE 或 REDISPATCH。",
+    "taskWorkerMentionedRule": "你在任务群里被用户直接点名了。把这当作一次直接问答，不是协调回合也不是任务编排回合。请只用你自己的角色直接回答用户；可以参考你的隔离上下文，但不要分派任务、不要指挥他人、不要把任务交回去，也不要调用 dispatch_tasks。",
     "markdownCodeFenceRule": "当你的最终 Markdown 包含围栏代码块时，必须在开头围栏后写语言类型，例如 ```cpp、```ts、```vue、```rust、```python、```json 或 ```bash。不要输出裸的 ``` 代码围栏。",
     "observerRule": "你刚才处于观望状态。现在被提到的群友已经回答，请判断是否需要补充、反驳或帮助收束共识。",
     "pendingContent": "正在生成回复...",
