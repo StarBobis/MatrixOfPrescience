@@ -25,6 +25,7 @@ use tools::{
     code_tools_schema, execute_code_tool_call, orchestration_tools_schema, tool_call_trace_step,
     tool_result_trace_step, validate_workspace,
 };
+use utils::tool_call_utils::ToolCallUtils;
 use validation::{
     ValidationOps, ValidationRun, ValidationState, VALIDATION_FAILURE_RECOVERY_INSTRUCTION,
     VALIDATION_REQUIRED_INSTRUCTION, VALIDATION_UNAVAILABLE_INSTRUCTION,
@@ -191,7 +192,7 @@ const FINAL_ANSWER_INSTRUCTION: &str =
 const EDIT_FAILURE_RECOVERY_INSTRUCTION: &str = "The previous edit tool call failed. Do not stop or provide a final answer solely because an edit did not apply. Recover using the error and the current workspace state: re-read the target when the context may be stale, then retry with a corrected smaller patch or a different available edit tool. Do not repeat the identical failing call. Continue until the requested change is complete or no available tool can resolve a genuine blocker.";
 const TOOL_CALL_CHECKPOINT_INTERVAL: usize = 8;
 const TOOL_CALL_CHECKPOINT_REASONING_EFFORT: &str = "high";
-const TOOL_CALL_CHECKPOINT_INSTRUCTION: &str = "Checkpoint: you have already used several tool calls. On this turn, do not call any tools. Briefly summarize what you have learned, what remains uncertain, and the single best next step. Keep it concise. After this checkpoint, continue the task on the following turn if more work is needed.";
+const TOOL_CALL_CHECKPOINT_INSTRUCTION: &str = "Checkpoint: the tool-call budget for this step has been reached. On this turn, do not call any tools. Briefly summarize what you have learned, what remains uncertain, and the single best next step. Keep it concise. After this checkpoint, continue the task on the following turn if more work is needed.";
 const CACHE_LOCATION_FILE: &str = "cache-location.json";
 const SETTINGS_FILE: &str = "settings.json";
 const MEMBER_LIBRARY_FILE: &str = "member-library.json";
@@ -988,11 +989,21 @@ async fn chat_completion(
                 message.get("tool_calls").and_then(Value::as_array),
             ) {
                 if !tool_calls.is_empty() {
-                    messages.push(message.clone());
+                    // Hard-cap a single assistant tool batch so one response cannot skip the checkpoint.
+                    let tool_execution_plan = ToolCallUtils::plan_execution(
+                        tool_calls.len(),
+                        tool_calls_since_checkpoint,
+                        TOOL_CALL_CHECKPOINT_INTERVAL,
+                    );
+                    let executable_tool_calls = &tool_calls[..tool_execution_plan.executable_count];
+                    messages.push(ToolCallUtils::trim_chat_tool_calls(
+                        &message,
+                        tool_execution_plan.executable_count,
+                    ));
                     let mut failed_edit = false;
                     let mut successful_edit = false;
                     let mut validation_run = ValidationRun::default();
-                    for tool_call in tool_calls {
+                    for tool_call in executable_tool_calls {
                         let call_step = tool_call_trace_step(tool_call);
                         emit_trace_step(&app, stream_id.as_deref(), &call_step);
                         TraceCtx::append_steps(&mut trace_steps, vec![call_step]);
@@ -1054,15 +1065,18 @@ async fn chat_completion(
                         final_answer_requested = false;
                     }
                     code_tool_called = true;
-                    schedule_tool_call_checkpoint(
+                    ToolCallUtils::schedule_checkpoint(
                         &mut tool_calls_since_checkpoint,
                         &mut tool_checkpoint_pending,
-                        tool_calls.len(),
+                        tool_execution_plan.executable_count,
+                        TOOL_CALL_CHECKPOINT_INTERVAL,
                     );
 
                     if !validation_tool_required && !repair_required {
                         tool_only_rounds += 1;
-                        if tool_only_rounds >= MAX_CHAT_COMPLETION_TURNS.saturating_sub(2) {
+                        if !tool_checkpoint_pending
+                            && tool_only_rounds >= MAX_CHAT_COMPLETION_TURNS.saturating_sub(2)
+                        {
                             messages.push(json!({
                                 "role": "user",
                                 "content": FINAL_ANSWER_INSTRUCTION,
@@ -1333,10 +1347,20 @@ async fn openai_responses_completion(
         if !checkpoint_required {
             if let Some(workspace) = code_workspace.as_ref() {
                 if !tool_calls.is_empty() {
+                    // Apply the same hard batch cap for Responses API function calls.
+                    let tool_execution_plan = ToolCallUtils::plan_execution(
+                        tool_calls.len(),
+                        tool_calls_since_checkpoint,
+                        TOOL_CALL_CHECKPOINT_INTERVAL,
+                    );
+                    let executable_tool_calls = ToolCallUtils::truncate_tool_calls(
+                        &tool_calls,
+                        tool_execution_plan.executable_count,
+                    );
                     let mut failed_edit = false;
                     let mut successful_edit = false;
                     let mut validation_run = ValidationRun::default();
-                    for response_tool_call in &tool_calls {
+                    for response_tool_call in &executable_tool_calls {
                         let tool_call =
                             response_function_call_to_chat_tool_call(response_tool_call);
                         let call_step = tool_call_trace_step(&tool_call);
@@ -1402,15 +1426,18 @@ async fn openai_responses_completion(
                     }
 
                     code_tool_called = true;
-                    schedule_tool_call_checkpoint(
+                    ToolCallUtils::schedule_checkpoint(
                         &mut tool_calls_since_checkpoint,
                         &mut tool_checkpoint_pending,
-                        tool_calls.len(),
+                        executable_tool_calls.len(),
+                        TOOL_CALL_CHECKPOINT_INTERVAL,
                     );
 
                     if !validation_tool_required && !repair_required {
                         tool_only_rounds += 1;
-                        if tool_only_rounds >= MAX_CHAT_COMPLETION_TURNS.saturating_sub(2) {
+                        if !tool_checkpoint_pending
+                            && tool_only_rounds >= MAX_CHAT_COMPLETION_TURNS.saturating_sub(2)
+                        {
                             pending_input.push(responses_user_message(FINAL_ANSWER_INSTRUCTION));
                             final_answer_requested = true;
                         }
@@ -1655,22 +1682,6 @@ fn responses_reasoning_payload(reasoning_effort: Option<&str>) -> Option<Value> 
         "effort": reasoning_effort.unwrap_or("").trim(),
         "summary": "auto",
     }))
-}
-
-fn schedule_tool_call_checkpoint(
-    tool_calls_since_checkpoint: &mut usize,
-    tool_checkpoint_pending: &mut bool,
-    tool_call_count: usize,
-) {
-    if tool_call_count == 0 {
-        return;
-    }
-
-    *tool_calls_since_checkpoint += tool_call_count;
-    if *tool_calls_since_checkpoint >= TOOL_CALL_CHECKPOINT_INTERVAL {
-        *tool_calls_since_checkpoint %= TOOL_CALL_CHECKPOINT_INTERVAL;
-        *tool_checkpoint_pending = true;
-    }
 }
 
 fn responses_tools_schema(allow_writes: bool) -> Value {
@@ -3347,37 +3358,6 @@ mod tests {
             .as_str()
             .unwrap()
             .contains(FINAL_ANSWER_INSTRUCTION));
-    }
-
-    #[test]
-    fn schedules_tool_call_checkpoint_every_eight_calls() {
-        let mut tool_calls_since_checkpoint = 0usize;
-        let mut tool_checkpoint_pending = false;
-
-        schedule_tool_call_checkpoint(
-            &mut tool_calls_since_checkpoint,
-            &mut tool_checkpoint_pending,
-            3,
-        );
-        assert_eq!(tool_calls_since_checkpoint, 3);
-        assert!(!tool_checkpoint_pending);
-
-        schedule_tool_call_checkpoint(
-            &mut tool_calls_since_checkpoint,
-            &mut tool_checkpoint_pending,
-            5,
-        );
-        assert_eq!(tool_calls_since_checkpoint, 0);
-        assert!(tool_checkpoint_pending);
-
-        tool_checkpoint_pending = false;
-        schedule_tool_call_checkpoint(
-            &mut tool_calls_since_checkpoint,
-            &mut tool_checkpoint_pending,
-            10,
-        );
-        assert_eq!(tool_calls_since_checkpoint, 2);
-        assert!(tool_checkpoint_pending);
     }
 
     #[test]
