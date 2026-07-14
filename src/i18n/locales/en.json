@@ -22,6 +22,16 @@
     "temperature": "Temperature",
     "yes": "Yes"
   },
+  "navigation": {
+    "chats": "Agent chats",
+    "primary": "Primary navigation"
+  },
+  "windowControls": {
+    "close": "Close window",
+    "group": "Window controls",
+    "maximize": "Maximize or restore window",
+    "minimize": "Minimize window"
+  },
   "settings": {
     "title": "Global Settings",
     "cache": {
@@ -55,12 +65,18 @@
     }
   },
   "friends": {
+    "add": "Add friend",
     "addDeepSeek": "New DeepSeek friend",
     "addOpenAI": "New ChatGPT friend",
+    "confirmRemove": {
+      "message": "Delete {name} from the friend library?",
+      "title": "Delete friend?"
+    },
     "count": "{count} friends",
     "emptyDescription": "Create a friend here, then add it to any chat group.",
     "emptyTitle": "No friends yet",
     "eyebrow": "My friends",
+    "friendSettings": "Settings for {name}",
     "remove": "Delete friend",
     "title": "Friend Library",
     "usedInGroups": "Used in {count} groups"
@@ -68,6 +84,8 @@
   "groups": {
     "brandTitle": "Agent Chats",
     "createTitle": "New chat group",
+    "emptyDescription": "Create a group to start a focused conversation.",
+    "emptyTitle": "No chat groups",
     "listTitle": "Chat groups",
     "meta": "{members} members · {messages} messages"
   },
@@ -87,6 +105,7 @@
     "title": "New chat group"
   },
   "members": {
+    "active": "Active",
     "addDeepSeekMember": "New DeepSeek member",
     "addFromFriends": "Add from my friends",
     "addOpenAIMember": "New ChatGPT member",
@@ -98,8 +117,11 @@
     "writePermission": "Write access",
     "listTitle": "Members",
     "localAvatar": "Local avatar",
+    "memberName": "Member name",
     "muted": "Muted",
     "muteQuestion": "Muted",
+    "openProfile": "Open settings for {name}",
+    "profileTitle": "Settings for {name}",
     "reasoningEffort": "Reasoning",
     "reasoningEffortOptions": {
       "off": "Off",
@@ -114,12 +136,14 @@
   "rightPanel": {
     "agentMode": "Agent mode",
     "announcement": {
-      "editTitle": "Double-click to edit announcement",
-      "empty": "Double-click to edit announcement",
+      "editTitle": "Edit announcement",
+      "empty": "Add shared instructions for this group",
       "placeholder": "Base prompt shared with every member",
+      "saveTitle": "Finish editing announcement",
       "tag": "Base agreement",
       "title": "Announcement"
     },
+    "inspectorLabel": "Group inspector",
     "approvalMode": "Approval mode",
     "collaborationTitle": "Agent collaboration",
     "safetyModel": "Safety model",
@@ -139,6 +163,7 @@
   "chat": {
     "agree": "Agree {count}",
     "chooseWorkspaceTitle": "Choose workspace folder",
+    "composerLabel": "Message",
     "composerPlaceholder": "Type a message. Enter to send, Shift + Enter for a new line",
     "disagree": "Disagree {count}",
     "allAgree": "All agree",
@@ -158,6 +183,16 @@
       "generatedText": "Generated text",
       "success": "Copied"
     },
+    "empty": {
+      "description": "Send a message to begin this group conversation.",
+      "noGroupDescription": "Create or select a group from the sidebar.",
+      "noGroupTitle": "No group selected",
+      "title": "Start the conversation"
+    },
+    "mentions": {
+      "label": "Mention a member"
+    },
+    "messageLog": "Conversation",
     "onlineMembers": "{count} members online",
     "queue": {
       "status": {
@@ -224,9 +259,19 @@
       "message": "This patch needs manual confirmation. After confirmation, git apply will run inside the current group workspace.",
       "title": "Confirm patch application"
     },
+    "confirmDiscard": {
+      "message": "Discard \"{title}\"? This removes it from the approval queue.",
+      "title": "Discard patch?"
+    },
     "noFiles": "No specific files detected",
     "panelTitle": "Approval queue",
     "pendingCount": "{count} pending",
+    "preview": "Patch preview",
+    "risk": {
+      "high": "High risk",
+      "low": "Low risk",
+      "medium": "Medium risk"
+    },
     "showPanel": "Show approval card",
     "hidePanel": "Hide approval card",
     "generatedSummary": "Ready to modify {count} files. See the patch preview for details.",
@@ -435,7 +480,11 @@
     "stderr": "Note: {stderr}"
   },
   "resizable": {
+    "closePanels": "Close side panel",
+    "controlsLabel": "Workspace panels",
     "left": "Resize left area width",
-    "right": "Resize right area width"
+    "right": "Resize right area width",
+    "showGroups": "Show chat groups",
+    "showInspector": "Show group inspector"
   }
 }

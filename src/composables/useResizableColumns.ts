@@ -62,11 +62,47 @@ export function useResizableColumns() {
     window.addEventListener("pointerup", stopResize, { once: true });
   }
 
+  function resizeWithKeyboard(handle: ResizeHandle, event: KeyboardEvent) {
+    const step = event.shiftKey ? 32 : 12;
+    let handled = true;
+
+    if (handle === "left") {
+      if (event.key === "ArrowLeft") {
+        leftWidth.value = clamp(leftWidth.value - step, minLeftWidth, maxLeftWidth);
+      } else if (event.key === "ArrowRight") {
+        leftWidth.value = clamp(leftWidth.value + step, minLeftWidth, maxLeftWidth);
+      } else if (event.key === "Home") {
+        leftWidth.value = minLeftWidth;
+      } else if (event.key === "End") {
+        leftWidth.value = maxLeftWidth;
+      } else {
+        handled = false;
+      }
+    } else if (event.key === "ArrowLeft") {
+      rightWidth.value = clamp(rightWidth.value + step, minRightWidth, maxRightWidth);
+    } else if (event.key === "ArrowRight") {
+      rightWidth.value = clamp(rightWidth.value - step, minRightWidth, maxRightWidth);
+    } else if (event.key === "Home") {
+      rightWidth.value = minRightWidth;
+    } else if (event.key === "End") {
+      rightWidth.value = maxRightWidth;
+    } else {
+      handled = false;
+    }
+
+    if (handled) {
+      event.preventDefault();
+    }
+  }
+
   onBeforeUnmount(stopResize);
 
   return {
+    leftWidth,
     layoutStyle,
     resizing,
+    resizeWithKeyboard,
+    rightWidth,
     startResize,
   };
 }

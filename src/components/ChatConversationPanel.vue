@@ -3,17 +3,19 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { open } from "@tauri-apps/plugin-dialog";
 import { ElMessage } from "element-plus";
 import {
-  CircleClose,
-  CopyDocument,
-  FolderOpened,
-  Promotion,
-  RefreshLeft,
-  Tools,
-} from "@element-plus/icons-vue";
-import { Wifi } from "@lucide/vue";
+  CircleStop as CircleClose,
+  Copy as CopyDocument,
+  FolderOpen as FolderOpened,
+  MessagesSquare,
+  RotateCcw as RefreshLeft,
+  Send as Promotion,
+  Wifi,
+  Wrench as Tools,
+} from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import PatchApprovalPanel from "./PatchApprovalPanel.vue";
 import { getAvatarSrc } from "../utils/avatar";
+import { getReadableTextColor } from "../utils/colorContrast";
 import { sanitizeAssistantMessageContent } from "../utils/messageTransport";
 import type {
   AgentApprovalMode,
@@ -99,8 +101,11 @@ const messagesPanel = ref<HTMLElement | null>(null);
 const messagesStack = ref<HTMLElement | null>(null);
 const messagesEnd = ref<HTMLElement | null>(null);
 const composerFooter = ref<HTMLElement | null>(null);
+const composerInput = ref<{ focus: () => void } | null>(null);
 const executionSegmentOpen = ref<Record<string, boolean>>({});
 const failedMentionAvatars = ref<Set<string>>(new Set());
+const mentionActiveIndex = ref(0);
+const mentionDismissed = ref(false);
 const stickToBottom = ref(true);
 const { t } = useI18n();
 const previousMessageStatuses = new Map<string, ChatMessage["status"]>();
@@ -130,6 +135,25 @@ const mentionCandidates = computed(() => {
   return props.activeMembers
     .filter((member) => member.name.toLocaleLowerCase().includes(query))
     .slice(0, 8);
+});
+
+const mentionMenuOpen = computed(
+  () => mentionOpen.value && !mentionDismissed.value && mentionCandidates.value.length > 0,
+);
+
+watch(
+  () => props.composer,
+  () => {
+    mentionActiveIndex.value = 0;
+    mentionDismissed.value = false;
+  },
+);
+
+watch(mentionCandidates, (candidates) => {
+  mentionActiveIndex.value = Math.min(
+    mentionActiveIndex.value,
+    Math.max(0, candidates.length - 1),
+  );
 });
 
 function getMentionAvatarSrc(member: AgentModel) {
@@ -487,7 +511,69 @@ function insertMention(member: AgentModel) {
     return `${prefix}@${member.name} `;
   });
 
+  mentionDismissed.value = true;
   emit("update:composer", nextComposer);
+  void nextTick(() => composerInput.value?.focus());
+}
+
+function getMentionOptionId(member: AgentModel) {
+  return `mention-option-${member.id}`;
+}
+
+function scrollActiveMentionIntoView() {
+  void nextTick(() => {
+    const member = mentionCandidates.value[mentionActiveIndex.value];
+    if (member) {
+      document.getElementById(getMentionOptionId(member))?.scrollIntoView({ block: "nearest" });
+    }
+  });
+}
+
+function handleComposerKeydown(event: KeyboardEvent) {
+  if (event.isComposing) {
+    return;
+  }
+
+  if (mentionMenuOpen.value) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      mentionActiveIndex.value = (mentionActiveIndex.value + 1) % mentionCandidates.value.length;
+      scrollActiveMentionIntoView();
+      return;
+    }
+
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      mentionActiveIndex.value =
+        (mentionActiveIndex.value - 1 + mentionCandidates.value.length) %
+        mentionCandidates.value.length;
+      scrollActiveMentionIntoView();
+      return;
+    }
+
+    if (event.key === "Escape") {
+      event.preventDefault();
+      mentionDismissed.value = true;
+      return;
+    }
+
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      insertMention(mentionCandidates.value[mentionActiveIndex.value]);
+      return;
+    }
+  }
+
+  if (
+    event.key === "Enter" &&
+    !event.shiftKey &&
+    !event.altKey &&
+    !event.ctrlKey &&
+    !event.metaKey
+  ) {
+    event.preventDefault();
+    emit("sendMessage");
+  }
 }
 
 function getInitial(name: string) {
@@ -1234,6 +1320,14 @@ defineExpose({
   <main class="chat-workspace">
     <header class="chat-header">
       <div class="chat-header-main">
+        <div class="chat-header-info">
+          <h1 class="chat-group-name">
+            {{ activeGroup?.name || t("chat.empty.noGroupTitle") }}
+          </h1>
+          <p v-if="activeGroup?.description" class="chat-group-desc">
+            {{ activeGroup.description }}
+          </p>
+        </div>
         <div class="chat-header-meta">
           <el-tag type="info" size="small">
             {{ t("chat.onlineMembers", { count: activeMemberCount }) }}
@@ -1249,6 +1343,7 @@ defineExpose({
           class="workspace-input"
           :model-value="workspacePath"
           :placeholder="t('chat.workspace.placeholder')"
+          :aria-label="t('chat.workspace.label')"
           size="small"
           clearable
           @update:model-value="emit('update:workspacePath', String($event))"
@@ -1258,6 +1353,7 @@ defineExpose({
               :icon="FolderOpened"
               size="small"
               :title="t('chat.chooseWorkspaceTitle')"
+              :aria-label="t('chat.chooseWorkspaceTitle')"
               @click="chooseWorkspacePath"
             />
           </template>
@@ -1267,6 +1363,7 @@ defineExpose({
           :icon="RefreshLeft"
           size="small"
           plain
+          :title="t('chat.resetSession.label')"
           :disabled="messages.length === 0 && !sending"
           @click="emit('resetSession')"
         >
@@ -1275,7 +1372,12 @@ defineExpose({
       </div>
     </header>
 
-    <section v-if="speakerQueue.length > 0" class="speaker-queue">
+    <section
+      v-if="speakerQueue.length > 0"
+      class="speaker-queue"
+      :aria-label="t('chat.queue.title')"
+      aria-live="polite"
+    >
       <div class="speaker-queue-head">
         <span class="speaker-queue-title">{{ t("chat.queue.title") }}</span>
         <el-button
@@ -1317,17 +1419,42 @@ defineExpose({
       @remove-patch-proposal="(proposalId) => emit('removePatchProposal', proposalId)"
     />
 
-    <section ref="messagesPanel" class="messages-panel" @scroll="updateStickToBottom">
+    <section
+      ref="messagesPanel"
+      class="messages-panel"
+      role="log"
+      aria-live="polite"
+      aria-relevant="additions"
+      :aria-busy="sending"
+      :aria-label="t('chat.messageLog')"
+      @scroll="updateStickToBottom"
+    >
       <div ref="messagesStack" class="messages-stack">
+        <div v-if="messages.length === 0" class="chat-empty-state">
+          <MessagesSquare aria-hidden="true" />
+          <strong>
+            {{ activeGroup ? t("chat.empty.title") : t("chat.empty.noGroupTitle") }}
+          </strong>
+          <span>
+            {{ activeGroup ? t("chat.empty.description") : t("chat.empty.noGroupDescription") }}
+          </span>
+        </div>
         <article
           v-for="message in messages"
           :key="message.id"
           class="message-row"
           :class="[message.role, message.status]"
           :style="{ '--accent': message.color }"
+          :aria-label="`${message.modelName}: ${statusText[message.status]}`"
         >
           <div class="message-meta">
-            <span class="message-avatar" :style="{ '--avatar-accent': message.color }">
+            <span
+              class="message-avatar"
+              :style="{
+                '--avatar-accent': message.color,
+                color: getReadableTextColor(message.color),
+              }"
+            >
               <img v-if="getMessageAvatarSrc(message)" :src="getMessageAvatarSrc(message)" alt="" />
               <span v-else>{{ getInitial(message.modelName) }}</span>
             </span>
@@ -1509,7 +1636,16 @@ defineExpose({
                     </span>
                   </div>
                 </template>
-                <span class="context-meter" :style="getContextRingStyle(message)">
+                <span
+                  class="context-meter"
+                  :style="getContextRingStyle(message)"
+                  role="progressbar"
+                  tabindex="0"
+                  aria-valuemin="0"
+                  aria-valuemax="100"
+                  :aria-valuenow="Number(getContextPercent(message))"
+                  :aria-label="t('chat.context.percent', { percent: getContextPercent(message) })"
+                >
                   <span class="context-ring"></span>
                   <span class="context-token-label">{{ formatTokenCount(message.contextUsedTokens) }}</span>
                   <span v-if="hasCacheUsage(message)" class="context-cache-label">
@@ -1560,14 +1696,32 @@ defineExpose({
 
     <footer ref="composerFooter" class="composer">
       <div class="composer-input-wrap">
-        <div v-if="mentionOpen && mentionCandidates.length > 0" class="mention-menu">
+        <div
+          v-if="mentionMenuOpen"
+          id="mention-options"
+          class="mention-menu"
+          role="listbox"
+          :aria-label="t('chat.mentions.label')"
+        >
           <button
-            v-for="member in mentionCandidates"
+            v-for="(member, index) in mentionCandidates"
+            :id="getMentionOptionId(member)"
             :key="member.id"
+            :class="{ active: index === mentionActiveIndex }"
             type="button"
+            role="option"
+            tabindex="-1"
+            :aria-selected="index === mentionActiveIndex"
+            @mouseenter="mentionActiveIndex = index"
             @click="insertMention(member)"
           >
-            <span class="mention-avatar" :style="{ background: member.color }">
+            <span
+              class="mention-avatar"
+              :style="{
+                background: member.color,
+                color: getReadableTextColor(member.color),
+              }"
+            >
               <img
                 v-if="getMentionAvatarSrc(member)"
                 :src="getMentionAvatarSrc(member)"
@@ -1587,13 +1741,25 @@ defineExpose({
         </div>
 
         <el-input
+          ref="composerInput"
           :model-value="composer"
           type="textarea"
           :rows="4"
           resize="vertical"
           :placeholder="t('chat.composerPlaceholder')"
+          :aria-label="t('chat.composerLabel')"
+          role="combobox"
+          aria-autocomplete="list"
+          aria-haspopup="listbox"
+          aria-controls="mention-options"
+          :aria-expanded="mentionMenuOpen"
+          :aria-activedescendant="
+            mentionMenuOpen && mentionCandidates[mentionActiveIndex]
+              ? getMentionOptionId(mentionCandidates[mentionActiveIndex])
+              : undefined
+          "
           @update:model-value="emit('update:composer', String($event))"
-          @keydown.enter.exact.prevent="emit('sendMessage')"
+          @keydown="handleComposerKeydown"
         />
       </div>
 
@@ -1603,6 +1769,7 @@ defineExpose({
           <el-select
             :model-value="approvalMode"
             size="small"
+            :aria-label="t('rightPanel.approvalMode')"
             @update:model-value="updateApprovalMode"
           >
             <el-option
@@ -2696,5 +2863,435 @@ defineExpose({
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+</style>
+
+<style scoped>
+.chat-empty-state {
+  display: grid;
+  min-height: 100%;
+  flex: 1;
+  align-content: center;
+  justify-items: center;
+  gap: 8px;
+  padding: 40px 24px;
+  color: var(--text-secondary);
+  text-align: center;
+}
+
+.chat-empty-state svg {
+  width: 34px;
+  height: 34px;
+  margin-bottom: 4px;
+  color: var(--text-tertiary);
+  stroke-width: 1.6;
+}
+
+.chat-empty-state strong {
+  color: var(--text-primary);
+  font-size: 14px;
+}
+
+.chat-empty-state span {
+  max-width: 360px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.message-row.thinking {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--separator));
+}
+
+.message-row.thinking::before {
+  border-radius: 8px;
+  background: var(--accent);
+  animation: none;
+}
+
+.message-row.thinking::after {
+  display: none;
+}
+
+.message-status-bar {
+  border-color: var(--separator);
+}
+
+.message-copy-button,
+.message-stop-button,
+.execution-copy-button {
+  width: var(--hit-target-min);
+  height: var(--hit-target-min);
+  border-color: var(--separator-strong);
+  border-radius: 6px;
+  color: var(--text-secondary);
+  background: var(--surface);
+  box-shadow: none;
+}
+
+.message-copy-button:hover,
+.execution-copy-button:hover {
+  border-color: var(--accent);
+  color: var(--accent-text);
+  background: var(--accent-soft);
+  box-shadow: none;
+}
+
+.message-stop-button {
+  border-color: color-mix(in srgb, var(--danger) 45%, var(--separator));
+  color: var(--danger);
+}
+
+.message-stop-button:hover {
+  border-color: var(--danger);
+  color: var(--danger);
+  background: var(--danger-soft);
+  box-shadow: none;
+}
+
+.activity-empty {
+  color: var(--text-tertiary);
+}
+
+.activity-chip {
+  border-color: var(--separator);
+  color: var(--text-secondary);
+  background: var(--surface-secondary);
+}
+
+.activity-chip.tool,
+.activity-chip.done {
+  border-color: color-mix(in srgb, var(--success) 30%, var(--separator));
+  color: var(--success);
+  background: var(--success-soft);
+}
+
+.activity-chip.reasoning {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--separator));
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+
+.activity-chip.network {
+  border-color: color-mix(in srgb, var(--info) 32%, var(--separator));
+  color: var(--info);
+  background: var(--info-soft);
+}
+
+.activity-chip.status.running,
+.activity-chip.interrupted {
+  border-color: color-mix(in srgb, var(--warning) 34%, var(--separator));
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.activity-chip.error {
+  border-color: color-mix(in srgb, var(--danger) 34%, var(--separator));
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.activity-chip.network.running .el-icon,
+.activity-chip.network.running .el-icon::before {
+  animation: none;
+  filter: none;
+}
+
+.activity-chip.network.running .el-icon::before {
+  display: none;
+}
+
+.activity-detail {
+  border-color: var(--separator);
+  color: var(--text-primary);
+  background: var(--surface);
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+}
+
+.context-meter {
+  min-height: var(--hit-target-min);
+  border-color: var(--separator);
+  color: var(--text-secondary);
+  background: var(--surface);
+}
+
+.context-ring {
+  background: conic-gradient(var(--accent) var(--context-deg), var(--surface-tertiary) 0deg);
+}
+
+.context-ring::after {
+  background: var(--surface);
+}
+
+.context-cache-label {
+  border-color: var(--separator);
+  color: var(--accent-text);
+}
+
+.context-tooltip,
+.context-tooltip strong {
+  color: var(--text-primary);
+}
+
+.execution-panel {
+  border-color: var(--separator);
+  background: var(--surface-secondary);
+}
+
+.execution-segment,
+.execution-segment.collapsed {
+  border-color: var(--separator);
+  background: var(--surface);
+}
+
+.execution-segment-summary {
+  min-height: 36px;
+  color: var(--text-secondary);
+}
+
+.execution-segment-summary:hover {
+  background: var(--control-hover);
+}
+
+.execution-segment-title {
+  color: var(--text-primary);
+}
+
+.execution-segment-count {
+  border-color: var(--separator);
+  color: var(--text-secondary);
+  background: var(--surface-secondary);
+}
+
+.execution-segment-time,
+.execution-kind {
+  color: var(--text-tertiary);
+}
+
+.execution-segment-body {
+  border-color: var(--separator);
+}
+
+.execution-line,
+.execution-markdown {
+  color: var(--text-primary);
+}
+
+.execution-icon {
+  border-color: var(--separator);
+  color: var(--text-secondary);
+  background: var(--surface);
+}
+
+.execution-line.tool .execution-icon,
+.execution-segment.tool .execution-icon {
+  border-color: color-mix(in srgb, var(--success) 34%, var(--separator));
+  color: var(--success);
+  background: var(--success-soft);
+}
+
+.execution-line.reasoning .execution-icon,
+.execution-segment.reasoning .execution-icon {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--separator));
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+
+.execution-line.network .execution-icon,
+.execution-segment.network .execution-icon,
+.execution-line.network.running .execution-icon,
+.execution-segment.network.running .execution-icon,
+.execution-segment.mixed .execution-icon {
+  border-color: color-mix(in srgb, var(--info) 32%, var(--separator));
+  color: var(--info);
+  background: var(--info-soft);
+  box-shadow: none;
+  animation: none;
+}
+
+.execution-line.network.running .execution-icon::before,
+.execution-segment.network.running .execution-icon::before {
+  display: none;
+}
+
+.execution-line.error .execution-icon,
+.execution-segment.error .execution-icon {
+  border-color: color-mix(in srgb, var(--danger) 34%, var(--separator));
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.execution-line.interrupted .execution-icon,
+.execution-segment.interrupted .execution-icon {
+  border-color: color-mix(in srgb, var(--warning) 34%, var(--separator));
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.execution-markdown :deep(code) {
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+
+.execution-markdown :deep(pre) {
+  border-color: var(--separator);
+  background: var(--code-bg);
+}
+
+.execution-markdown :deep(pre code) {
+  color: var(--code-text);
+}
+
+.execution-code-block {
+  border-color: var(--separator);
+  background: var(--code-bg);
+  box-shadow: none;
+}
+
+.execution-code-header {
+  border-color: var(--separator);
+  color: var(--text-secondary);
+  background: var(--surface-tertiary);
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  text-transform: none;
+}
+
+.execution-code-pre {
+  color: var(--code-text);
+  background: var(--code-bg);
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+}
+
+.execution-code-pre :deep(.syntax-keyword) {
+  color: var(--syntax-keyword);
+}
+
+.execution-code-pre :deep(.syntax-string) {
+  color: var(--syntax-string);
+}
+
+.execution-code-pre :deep(.syntax-comment) {
+  color: var(--syntax-comment);
+}
+
+.execution-code-pre :deep(.syntax-number) {
+  color: var(--syntax-number);
+}
+
+.execution-code-pre :deep(.syntax-literal) {
+  color: var(--syntax-literal);
+}
+
+.execution-code-pre :deep(.syntax-function) {
+  color: var(--syntax-function);
+}
+
+.execution-code-pre :deep(.syntax-operator) {
+  color: var(--syntax-operator);
+}
+
+.execution-detail {
+  border-color: var(--separator);
+  background: var(--surface);
+}
+
+.execution-detail summary {
+  min-height: 32px;
+  color: var(--accent-text);
+}
+
+.execution-detail pre {
+  border-color: var(--separator);
+  color: var(--code-text);
+  background: var(--code-bg);
+}
+
+.speaker-queue {
+  border-color: var(--separator);
+  background: var(--surface-secondary);
+}
+
+.speaker-queue-title {
+  color: var(--text-secondary);
+}
+
+.speaker-queue-pill {
+  border-color: var(--separator);
+  background: var(--surface);
+}
+
+.speaker-queue-pill strong {
+  color: var(--text-primary);
+}
+
+.speaker-queue-pill .queue-dot {
+  animation: none;
+}
+
+.identity-badge.admin,
+.message-title .identity-badge {
+  color: var(--success);
+  background: var(--success-soft);
+}
+
+.identity-badge.owner,
+.message-title .identity-badge.owner {
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
+.composer {
+  border-color: var(--separator);
+  background: var(--surface);
+}
+
+.composer-approval-label {
+  color: var(--text-secondary);
+}
+
+.mention-menu {
+  border-color: var(--separator);
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-popover);
+}
+
+.mention-menu button {
+  min-height: 48px;
+  border-radius: 6px;
+  color: var(--text-primary);
+}
+
+.mention-menu button:hover,
+.mention-menu button.active {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--separator));
+  background: var(--accent-soft);
+}
+
+.mention-member-copy strong {
+  color: var(--text-primary);
+}
+
+.mention-member-copy small {
+  color: var(--text-secondary);
+}
+
+@media (max-width: 700px) {
+  .composer-actions,
+  .composer-approval {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .composer-approval {
+    width: 100%;
+    flex: 0 1 auto;
+  }
+
+  .composer-approval :deep(.el-select) {
+    width: 100%;
+  }
+
+  .composer-button-group {
+    justify-content: flex-end;
+  }
 }
 </style>

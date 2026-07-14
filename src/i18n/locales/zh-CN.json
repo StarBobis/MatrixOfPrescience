@@ -22,6 +22,16 @@
     "temperature": "温度",
     "yes": "是"
   },
+  "navigation": {
+    "chats": "Agent 群聊",
+    "primary": "主导航"
+  },
+  "windowControls": {
+    "close": "关闭窗口",
+    "group": "窗口控制",
+    "maximize": "最大化或还原窗口",
+    "minimize": "最小化窗口"
+  },
   "settings": {
     "title": "全局设置",
     "cache": {
@@ -55,12 +65,18 @@
     }
   },
   "friends": {
+    "add": "添加好友",
     "addDeepSeek": "新建 DeepSeek 好友",
     "addOpenAI": "新建 ChatGPT 好友",
+    "confirmRemove": {
+      "message": "从好友库中删除 {name}？",
+      "title": "删除好友？"
+    },
     "count": "{count} 位好友",
     "emptyDescription": "先在这里创建好友，再把它加入任意群聊。",
     "emptyTitle": "还没有好友",
     "eyebrow": "我的好友",
+    "friendSettings": "{name} 的设置",
     "remove": "删除好友",
     "title": "好友库",
     "usedInGroups": "已加入 {count} 个群"
@@ -68,6 +84,8 @@
   "groups": {
     "brandTitle": "Agent 群聊",
     "createTitle": "新建聊天群",
+    "emptyDescription": "新建一个群聊以开始协作。",
+    "emptyTitle": "暂无群聊",
     "listTitle": "聊天群",
     "meta": "{members} 个群友 · {messages} 条消息"
   },
@@ -87,6 +105,7 @@
     "title": "新建聊天群"
   },
   "members": {
+    "active": "启用",
     "addDeepSeekMember": "新建 DeepSeek 群友",
     "addFromFriends": "从我的好友里选",
     "addOpenAIMember": "新建 ChatGPT 群友",
@@ -98,8 +117,11 @@
     "writePermission": "写权限",
     "listTitle": "群友列表",
     "localAvatar": "本地头像",
+    "memberName": "群友名称",
     "muted": "已禁言",
     "muteQuestion": "是否禁言",
+    "openProfile": "打开 {name} 的设置",
+    "profileTitle": "{name} 的设置",
     "reasoningEffort": "推理强度",
     "reasoningEffortOptions": {
       "off": "关闭",
@@ -114,12 +136,14 @@
   "rightPanel": {
     "agentMode": "Agent 模式",
     "announcement": {
-      "editTitle": "双击编辑群公告",
-      "empty": "双击编辑群公告",
+      "editTitle": "编辑群公告",
+      "empty": "添加这个群聊的共享约定",
       "placeholder": "写给所有群友的基础约定提示词",
+      "saveTitle": "完成编辑群公告",
       "tag": "基础约定",
       "title": "群公告"
     },
+    "inspectorLabel": "群聊检查器",
     "approvalMode": "审批模式",
     "collaborationTitle": "Agent 协作",
     "safetyModel": "安全模型",
@@ -139,6 +163,7 @@
   "chat": {
     "agree": "同意 {count}",
     "chooseWorkspaceTitle": "选择工作文件夹",
+    "composerLabel": "消息",
     "composerPlaceholder": "输入消息，Enter 发送，Shift + Enter 换行",
     "disagree": "不同意 {count}",
     "allAgree": "全部同意",
@@ -158,6 +183,16 @@
       "generatedText": "生成文本",
       "success": "已复制"
     },
+    "empty": {
+      "description": "发送一条消息以开始群聊。",
+      "noGroupDescription": "请从侧栏选择或新建一个群聊。",
+      "noGroupTitle": "未选择群聊",
+      "title": "开始对话"
+    },
+    "mentions": {
+      "label": "提及群友"
+    },
+    "messageLog": "对话记录",
     "onlineMembers": "{count} 群友在线",
     "queue": {
       "status": {
@@ -224,9 +259,19 @@
       "message": "该补丁需要人工确认。确认后会在当前群工作文件夹内执行 git apply。",
       "title": "确认应用补丁"
     },
+    "confirmDiscard": {
+      "message": "丢弃“{title}”？此操作会将它从审批队列中移除。",
+      "title": "丢弃补丁？"
+    },
     "noFiles": "未识别具体文件",
     "panelTitle": "审批提示",
     "pendingCount": "{count} 待处理",
+    "preview": "补丁预览",
+    "risk": {
+      "high": "高风险",
+      "low": "低风险",
+      "medium": "中风险"
+    },
     "showPanel": "展开审批卡片",
     "hidePanel": "收起审批卡片",
     "generatedSummary": "准备修改 {count} 个文件，详情见补丁预览。",
@@ -435,7 +480,11 @@
     "stderr": "提示：{stderr}"
   },
   "resizable": {
+    "closePanels": "关闭侧边面板",
+    "controlsLabel": "工作区面板",
     "left": "调整左侧区域宽度",
-    "right": "调整右侧区域宽度"
+    "right": "调整右侧区域宽度",
+    "showGroups": "显示群聊列表",
+    "showInspector": "显示群聊检查器"
   }
 }

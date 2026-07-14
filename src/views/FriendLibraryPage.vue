@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed } from "vue";
-import { ElMessage } from "element-plus";
-import { CirclePlus, Delete, EditPen, UserFilled } from "@element-plus/icons-vue";
+import { computed, nextTick } from "vue";
+import { ElMessage, ElMessageBox } from "element-plus";
+import { ChevronDown, Pencil, Plus, Trash2, Users } from "@lucide/vue";
 import { storeToRefs } from "pinia";
 import { useI18n } from "vue-i18n";
 import {
@@ -11,6 +11,7 @@ import {
   useSettingsStore,
 } from "../stores/settings";
 import { chooseLocalAvatar, getAvatarSrc } from "../utils/avatar";
+import { getReadableTextColor } from "../utils/colorContrast";
 import { modelPresets } from "../utils/modelCatalog";
 
 const settingsStore = useSettingsStore();
@@ -78,48 +79,98 @@ function addFriend(provider: ProviderId) {
   settingsStore.addFriend(provider);
 }
 
+function addFriendFromMenu(command: unknown) {
+  if (command === "openai" || command === "deepseek") {
+    addFriend(command);
+  }
+}
+
 function renameFriend(friend: AgentModel) {
   settingsStore.renameFriend(friend.id, friend.name);
 }
 
-function removeFriend(friendId: string) {
-  if (!settingsStore.removeFriend(friendId)) {
+async function removeFriend(friend: AgentModel) {
+  if (getFriendUsage(friend) > 0) {
     ElMessage.warning(t("messages.friendInUse"));
+    return;
+  }
+
+  try {
+    const friendIndex = friends.value.findIndex((item) => item.id === friend.id);
+    await ElMessageBox.confirm(
+      t("friends.confirmRemove.message", { name: friend.name }),
+      t("friends.confirmRemove.title"),
+      {
+        confirmButtonText: t("friends.remove"),
+        cancelButtonText: t("common.cancel"),
+        confirmButtonClass: "el-button--danger",
+        type: "warning",
+      },
+    );
+    settingsStore.removeFriend(friend.id);
+    void nextTick(() => {
+      const nextFriend = friends.value[Math.min(friendIndex, friends.value.length - 1)];
+      const nextRow = Array.from(
+        document.querySelectorAll<HTMLElement>("[data-friend-id]"),
+      ).find((element) => element.dataset.friendId === nextFriend?.id);
+
+      (nextRow?.querySelector<HTMLElement>(".friend-name-block input") ??
+        document.getElementById("friend-add-button"))?.focus();
+    });
+  } catch {
+    // Canceling leaves the friend unchanged.
   }
 }
 </script>
 
 <template>
-  <main class="friend-library-page">
-    <section class="friend-library-head">
+  <main class="friend-library-page" aria-labelledby="friend-library-title">
+    <div class="friend-library-content">
+    <header class="friend-library-head">
       <div class="friend-library-title">
         <span class="friend-library-icon">
-          <el-icon>
-            <UserFilled />
-          </el-icon>
+          <Users aria-hidden="true" />
         </span>
         <div>
           <p>{{ t("friends.eyebrow") }}</p>
-          <h1>{{ t("friends.title") }}</h1>
+          <h1 id="friend-library-title">{{ t("friends.title") }}</h1>
         </div>
       </div>
 
       <div class="friend-library-actions">
-        <el-tag size="large" type="success">{{ t("friends.count", { count: friends.length }) }}</el-tag>
-        <el-button type="primary" :icon="CirclePlus" @click="addFriend('openai')">
-          {{ t("friends.addOpenAI") }}
-        </el-button>
-        <el-button :icon="CirclePlus" @click="addFriend('deepseek')">
-          {{ t("friends.addDeepSeek") }}
-        </el-button>
+        <el-tag type="info">{{ t("friends.count", { count: friends.length }) }}</el-tag>
+        <el-dropdown trigger="click" @command="addFriendFromMenu">
+          <el-button id="friend-add-button" type="primary" :icon="Plus">
+            {{ t("friends.add") }}
+            <ChevronDown class="dropdown-chevron" aria-hidden="true" />
+          </el-button>
+          <template #dropdown>
+            <el-dropdown-menu>
+              <el-dropdown-item command="openai">{{ t("friends.addOpenAI") }}</el-dropdown-item>
+              <el-dropdown-item command="deepseek">{{ t("friends.addDeepSeek") }}</el-dropdown-item>
+            </el-dropdown-menu>
+          </template>
+        </el-dropdown>
       </div>
-    </section>
+    </header>
 
     <section v-if="friends.length" class="friend-list">
-      <article v-for="friend in friends" :key="friend.id" class="friend-row">
+      <article
+        v-for="friend in friends"
+        :key="friend.id"
+        class="friend-row"
+        :data-friend-id="friend.id"
+        :aria-label="t('friends.friendSettings', { name: friend.name })"
+      >
         <div class="friend-summary">
           <span class="friend-avatar-shell">
-            <span class="friend-avatar" :style="{ background: friend.color }">
+            <span
+              class="friend-avatar"
+              :style="{
+                background: friend.color,
+                color: getReadableTextColor(friend.color),
+              }"
+            >
               <img v-if="friend.avatar" :src="getAvatarSrc(friend.avatar)" alt="" />
               <span v-else>{{ getInitial(friend.name) }}</span>
             </span>
@@ -130,7 +181,7 @@ function removeFriend(friendId: string) {
               :aria-label="t('members.changeAvatar')"
               @click="assignFriendAvatar(friend)"
             >
-              <el-icon><EditPen /></el-icon>
+              <Pencil aria-hidden="true" />
             </button>
           </span>
 
@@ -139,6 +190,7 @@ function removeFriend(friendId: string) {
               v-model="friend.name"
               size="small"
               :placeholder="t('common.memberFallback')"
+              :aria-label="t('members.memberName')"
               @blur="renameFriend(friend)"
               @keydown.enter.prevent="renameFriend(friend)"
             />
@@ -157,7 +209,12 @@ function removeFriend(friendId: string) {
         <div class="friend-fields">
           <label>
             <span>{{ t("common.api") }}</span>
-            <el-select v-model="friend.provider" size="small" @change="settingsStore.updateFriendProvider(friend)">
+            <el-select
+              v-model="friend.provider"
+              size="small"
+              :aria-label="t('common.api')"
+              @change="settingsStore.updateFriendProvider(friend)"
+            >
               <el-option
                 v-for="option in providerOptions"
                 :key="option.value"
@@ -175,6 +232,8 @@ function removeFriend(friendId: string) {
               filterable
               allow-create
               default-first-option
+              :title="friend.model"
+              :aria-label="`${t('common.model')}: ${friend.model}`"
               @change="settingsStore.updateFriendProfile(friend)"
             >
               <el-option
@@ -191,6 +250,7 @@ function removeFriend(friendId: string) {
             <el-select
               v-model="friend.reasoningEffort"
               size="small"
+              :aria-label="t('members.reasoningEffort')"
               @change="settingsStore.updateFriendProfile(friend)"
             >
               <el-option
@@ -211,6 +271,7 @@ function removeFriend(friendId: string) {
               :max="2"
               :step="0.1"
               :controls="false"
+              :aria-label="t('common.temperature')"
               @change="settingsStore.updateFriendProfile(friend)"
             />
           </label>
@@ -222,7 +283,7 @@ function removeFriend(friendId: string) {
             <el-switch
               v-model="friend.isAdmin"
               size="small"
-              active-color="#2f7a61"
+              :aria-label="t('members.adminQuestion')"
               @change="settingsStore.updateFriendProfile(friend)"
             />
           </span>
@@ -231,7 +292,7 @@ function removeFriend(friendId: string) {
             <el-switch
               v-model="friend.canWrite"
               size="small"
-              active-color="#2f7a61"
+              :aria-label="t('members.writePermission')"
               @change="settingsStore.updateFriendProfile(friend)"
             />
           </span>
@@ -242,7 +303,7 @@ function removeFriend(friendId: string) {
               size="small"
               :active-value="false"
               :inactive-value="true"
-              active-color="#c45656"
+              :aria-label="t('members.muteQuestion')"
               @change="settingsStore.updateFriendProfile(friend)"
             />
           </span>
@@ -251,7 +312,7 @@ function removeFriend(friendId: string) {
             <el-switch
               v-model="friend.deepSeekLongContext"
               size="small"
-              active-color="#2f7a61"
+              :aria-label="t('members.deepSeekLongContext')"
               @change="settingsStore.updateFriendProfile(friend)"
             />
           </span>
@@ -265,12 +326,13 @@ function removeFriend(friendId: string) {
             :autosize="{ minRows: 2, maxRows: 5 }"
             resize="none"
             :placeholder="t('members.rolePlaceholder')"
+            :aria-label="t('members.roleIdentity')"
             @change="settingsStore.updateFriendProfile(friend)"
           />
         </label>
 
         <div class="friend-actions">
-          <el-button type="danger" plain :icon="Delete" @click="removeFriend(friend.id)">
+          <el-button type="danger" plain :icon="Trash2" @click="removeFriend(friend)">
             {{ t("friends.remove") }}
           </el-button>
         </div>
@@ -278,12 +340,14 @@ function removeFriend(friendId: string) {
     </section>
 
     <section v-else class="friend-empty">
-      <el-icon>
-        <UserFilled />
-      </el-icon>
+      <Users aria-hidden="true" />
       <strong>{{ t("friends.emptyTitle") }}</strong>
       <span>{{ t("friends.emptyDescription") }}</span>
+      <el-button type="primary" :icon="Plus" @click="addFriend('openai')">
+        {{ t("friends.addOpenAI") }}
+      </el-button>
     </section>
+    </div>
   </main>
 </template>
 
@@ -556,6 +620,190 @@ function removeFriend(friendId: string) {
 
   .friend-library-actions {
     justify-content: flex-start;
+  }
+
+  .friend-fields {
+    grid-template-columns: 1fr;
+  }
+}
+</style>
+
+<style scoped>
+.friend-library-page {
+  padding: 0;
+  background: var(--app-bg);
+  scrollbar-gutter: stable;
+}
+
+.friend-library-content {
+  width: min(1320px, 100%);
+  min-width: 0;
+  margin: 0 auto;
+  padding: 26px 28px 40px;
+}
+
+.friend-library-head {
+  margin: 0 0 20px;
+  padding: 0 0 20px;
+  border: 0;
+  border-bottom: 1px solid var(--separator);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.friend-library-icon {
+  width: 38px;
+  height: 38px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
+  border-radius: 8px;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+
+.friend-library-icon svg {
+  width: 20px;
+  height: 20px;
+  stroke-width: 1.8;
+}
+
+.friend-library-title p {
+  color: var(--text-secondary);
+  font-size: 12px;
+  text-transform: none;
+}
+
+.friend-library-title h1 {
+  color: var(--text-primary);
+  font-size: 20px;
+  font-weight: 700;
+}
+
+.dropdown-chevron {
+  width: 14px;
+  height: 14px;
+  margin-left: 4px;
+}
+
+.friend-list {
+  gap: 8px;
+}
+
+.friend-row {
+  grid-template-columns: minmax(210px, 1fr) minmax(400px, 1.8fr) minmax(210px, 0.85fr) auto;
+  gap: 12px;
+  padding: 14px;
+  border-color: var(--separator);
+  background: var(--surface);
+}
+
+.friend-row:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--separator));
+}
+
+.friend-avatar {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--separator-strong) 70%, transparent);
+}
+
+.avatar-edit-button {
+  right: -6px;
+  bottom: -5px;
+  width: var(--control-height-small);
+  height: var(--control-height-small);
+  border-color: var(--surface);
+  color: #ffffff;
+  background: var(--accent);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  opacity: 0.86;
+  transform: none;
+}
+
+.avatar-edit-button svg {
+  width: 13px;
+  height: 13px;
+}
+
+.friend-summary:hover .avatar-edit-button,
+.avatar-edit-button:focus-visible {
+  opacity: 1;
+  transform: none;
+}
+
+.avatar-edit-button:hover {
+  background: var(--accent-hover);
+}
+
+.friend-fields label > span,
+.friend-role > span,
+.friend-switches span {
+  color: var(--text-secondary);
+}
+
+.friend-switches {
+  align-content: start;
+  padding: 8px 10px;
+  border-radius: 7px;
+  background: var(--surface-secondary);
+}
+
+.friend-switches > span {
+  width: 100%;
+  min-height: 28px;
+  justify-content: space-between;
+}
+
+.friend-role {
+  grid-column: 1 / 4;
+}
+
+.friend-actions {
+  grid-row: 1 / span 2;
+  grid-column: 4;
+  align-self: center;
+  padding-top: 0;
+}
+
+.friend-empty {
+  min-height: 360px;
+  border: 0;
+  border-radius: 0;
+  color: var(--text-secondary);
+  background: transparent;
+}
+
+.friend-empty > svg {
+  width: 34px;
+  height: 34px;
+  color: var(--text-tertiary);
+}
+
+.friend-empty strong {
+  color: var(--text-primary);
+}
+
+@media (max-width: 1180px) {
+  .friend-row {
+    grid-template-columns: 1fr;
+  }
+
+  .friend-role,
+  .friend-actions {
+    grid-row: auto;
+    grid-column: auto;
+  }
+
+  .friend-switches {
+    padding-top: 8px;
+  }
+
+  .friend-actions {
+    justify-content: flex-start;
+  }
+}
+
+@media (max-width: 760px) {
+  .friend-library-content {
+    padding: 20px 14px 32px;
   }
 
   .friend-fields {

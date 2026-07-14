@@ -1,5 +1,7 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, nextTick } from "vue";
+import { ElMessageBox } from "element-plus";
+import { Check, Trash2, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import type { AgentPatchProposal, PatchApprovalStatus } from "../stores/settings";
 
@@ -62,12 +64,42 @@ function hasPatchRuntime(proposal: AgentPatchProposal) {
       proposal.status === "approved",
   );
 }
+
+async function confirmDiscard(proposal: AgentPatchProposal) {
+  try {
+    const proposalIndex = props.patchProposals.findIndex((item) => item.id === proposal.id);
+    await ElMessageBox.confirm(
+      t("patch.confirmDiscard.message", { title: proposal.title }),
+      t("patch.confirmDiscard.title"),
+      {
+        confirmButtonText: t("common.discard"),
+        cancelButtonText: t("common.cancel"),
+        confirmButtonClass: "el-button--danger",
+        type: "warning",
+      },
+    );
+    emit("removePatchProposal", proposal.id);
+    void nextTick(() => {
+      const cards = document.querySelectorAll<HTMLElement>(".patch-card");
+      const nextCard = cards[Math.min(proposalIndex, cards.length - 1)];
+
+      (nextCard?.querySelector<HTMLElement>("button, summary, [tabindex='0']") ??
+        document.querySelector<HTMLElement>(".composer textarea"))?.focus();
+    });
+  } catch {
+    // Canceling keeps the proposal in the approval queue.
+  }
+}
 </script>
 
 <template>
-  <section v-if="patchProposals.length > 0" class="patch-panel">
+  <section
+    v-if="patchProposals.length > 0"
+    class="patch-panel"
+    aria-labelledby="patch-panel-title"
+  >
     <div class="patch-panel-head">
-      <strong>{{ t("patch.panelTitle") }}</strong>
+      <h2 id="patch-panel-title">{{ t("patch.panelTitle") }}</h2>
       <el-tag size="small" :type="pendingPatchCount > 0 ? 'warning' : 'info'">
         {{ t("patch.pendingCount", { count: pendingPatchCount }) }}
       </el-tag>
@@ -79,15 +111,16 @@ function hasPatchRuntime(proposal: AgentPatchProposal) {
         :key="proposal.id"
         class="patch-card"
         :class="proposal.status"
+        :aria-labelledby="`patch-title-${proposal.id}`"
       >
         <div class="patch-card-head">
           <div>
-            <strong>{{ proposal.title }}</strong>
+            <strong :id="`patch-title-${proposal.id}`">{{ proposal.title }}</strong>
             <span>{{ proposal.proposerName }} · {{ proposal.createdAt }}</span>
           </div>
           <div class="patch-tags">
             <el-tag size="small" :type="patchRiskType[proposal.riskLevel]">
-              {{ proposal.riskLevel }}
+              {{ t(`patch.risk.${proposal.riskLevel}`) }}
             </el-tag>
             <el-tag size="small" :type="patchStatusType[proposal.status]">
               {{ t(patchStatusTextKey[proposal.status]) }}
@@ -117,7 +150,10 @@ function hasPatchRuntime(proposal: AgentPatchProposal) {
         </div>
         <div v-else class="patch-files muted">{{ t("patch.noFiles") }}</div>
 
-        <pre v-if="proposal.patchText" class="patch-preview">{{ proposal.patchText }}</pre>
+        <details v-if="proposal.patchText" class="patch-disclosure">
+          <summary>{{ t("patch.preview") }}</summary>
+          <pre class="patch-preview">{{ proposal.patchText }}</pre>
+        </details>
 
         <div
           v-if="hasPatchRuntime(proposal)"
@@ -146,6 +182,7 @@ function hasPatchRuntime(proposal: AgentPatchProposal) {
             <el-button
               size="small"
               type="primary"
+              :icon="Check"
               :disabled="proposal.safetyCheck.verdict === 'blocked' || !proposal.patchText"
               @click="emit('updatePatchStatus', proposal.id, 'approved')"
             >
@@ -155,12 +192,18 @@ function hasPatchRuntime(proposal: AgentPatchProposal) {
               size="small"
               type="danger"
               plain
+              :icon="X"
               @click="emit('updatePatchStatus', proposal.id, 'rejected')"
             >
               {{ t("common.reject") }}
             </el-button>
           </template>
-          <el-button size="small" plain @click="emit('removePatchProposal', proposal.id)">
+          <el-button
+            size="small"
+            plain
+            :icon="Trash2"
+            @click="confirmDiscard(proposal)"
+          >
             {{ t("common.discard") }}
           </el-button>
         </div>
@@ -354,5 +397,142 @@ function hasPatchRuntime(proposal: AgentPatchProposal) {
   color: #26312b;
   background: rgba(255, 255, 255, 0.72);
   white-space: pre-wrap;
+}
+</style>
+
+<style scoped>
+.patch-panel {
+  display: flex;
+  width: 100%;
+  max-height: min(42vh, 420px);
+  flex: 0 1 auto;
+  flex-direction: column;
+  gap: 10px;
+  overflow: hidden;
+  margin: 0;
+  padding: 10px 14px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--separator);
+  border-radius: 0;
+  background: var(--warning-soft);
+}
+
+.patch-panel-head {
+  flex: 0 0 auto;
+}
+
+.patch-panel-head h2 {
+  margin: 0;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.patch-list {
+  min-height: 0;
+  overflow: auto;
+  padding-right: 2px;
+}
+
+.patch-card {
+  border-color: var(--separator);
+  background: var(--surface);
+}
+
+.patch-card.approved {
+  border-color: color-mix(in srgb, var(--success) 42%, var(--separator));
+}
+
+.patch-card.rejected {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--separator));
+}
+
+.patch-card-head strong {
+  color: var(--text-primary);
+}
+
+.patch-card-head span,
+.patch-summary {
+  color: var(--text-secondary);
+}
+
+.patch-safety {
+  border: 1px solid var(--separator);
+  background: var(--surface-secondary);
+}
+
+.patch-safety strong,
+.patch-safety ul {
+  color: var(--text-secondary);
+}
+
+.patch-safety li.warning {
+  color: var(--warning);
+}
+
+.patch-files span,
+.patch-files.muted {
+  color: var(--text-secondary);
+  background: var(--surface-tertiary);
+}
+
+.patch-files.muted {
+  color: var(--text-tertiary);
+}
+
+.patch-disclosure {
+  overflow: hidden;
+  border: 1px solid var(--separator);
+  border-radius: 8px;
+  background: var(--surface-secondary);
+}
+
+.patch-disclosure summary {
+  min-height: 32px;
+  padding: 7px 10px;
+  color: var(--accent-text);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.patch-disclosure[open] summary {
+  border-bottom: 1px solid var(--separator);
+}
+
+.patch-preview {
+  max-height: 240px;
+  border-radius: 0;
+  color: var(--code-text);
+  background: var(--code-bg);
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+}
+
+.patch-runtime {
+  border-color: color-mix(in srgb, var(--success) 34%, var(--separator));
+  color: var(--success);
+  background: var(--success-soft);
+}
+
+.patch-runtime.error {
+  border-color: color-mix(in srgb, var(--danger) 36%, var(--separator));
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.patch-runtime pre {
+  color: var(--code-text);
+  background: var(--code-bg);
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+}
+
+.patch-actions :deep(.el-button) {
+  margin-left: 0;
+}
+
+@media (max-height: 720px) {
+  .patch-panel {
+    max-height: 34vh;
+  }
 }
 </style>

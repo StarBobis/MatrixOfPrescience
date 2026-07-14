@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { onBeforeUnmount, onMounted, ref } from "vue";
 import TitleBar from "./views/TitleBar.vue";
 import ChatGroupPage from "./views/ChatGroupPage.vue";
 import SettingsPage from "./views/SettingsPage.vue";
@@ -41,63 +41,50 @@ function toggleFriendsPage() {
   previousPage.value = currentPage.value;
   currentPage.value = "friends";
 }
+
+function handleAppShortcut(event: KeyboardEvent) {
+  const modalOpen = Array.from(
+    document.querySelectorAll<HTMLElement>('[aria-modal="true"]'),
+  ).some((element) => element.getClientRects().length > 0);
+
+  if (
+    !event.defaultPrevented &&
+    !modalOpen &&
+    (event.metaKey || event.ctrlKey) &&
+    event.key === ","
+  ) {
+    event.preventDefault();
+    openSettingsPage();
+  }
+}
+
+onMounted(() => window.addEventListener("keydown", handleAppShortcut));
+onBeforeUnmount(() => window.removeEventListener("keydown", handleAppShortcut));
 </script>
 
 <template>
-  <div class="app-frame" @contextmenu.prevent>
+  <div class="app-frame">
     <TitleBar
+      :chat-active="currentPage === 'chat'"
       :settings-active="currentPage === 'settings'"
       :friends-active="currentPage === 'friends'"
       @home="openChatPage"
       @toggle-friends="toggleFriendsPage"
       @toggle-settings="toggleSettingsPage"
     />
-    <ChatGroupPage v-if="currentPage === 'chat'" @open-settings="openSettingsPage" />
-    <SettingsPage v-else-if="currentPage === 'settings'" />
-    <FriendLibraryPage v-else />
+    <ChatGroupPage v-show="currentPage === 'chat'" @open-settings="openSettingsPage" />
+    <SettingsPage v-if="currentPage === 'settings'" />
+    <FriendLibraryPage v-else-if="currentPage === 'friends'" />
   </div>
 </template>
 
 <style>
-:root {
-  font-family:
-    Inter, "Microsoft YaHei", "PingFang SC", "Helvetica Neue", Arial, sans-serif;
-  color: #1d2521;
-  background: #eef1ed;
-  font-synthesis: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
-  -webkit-text-size-adjust: 100%;
-}
-
-* {
-  box-sizing: border-box;
-}
-
-html,
-body,
-#app {
-  min-width: 320px;
-  height: 100vh;
-  min-height: 100vh;
-  margin: 0;
-  overflow: hidden;
-}
-
-button,
-textarea,
-input {
-  font: inherit;
-}
-
 .app-frame {
   display: flex;
   height: 100vh;
   min-height: 0;
   flex-direction: column;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.78), rgba(255, 255, 255, 0)),
-    #eef1ed;
+  color: var(--text-primary);
+  background: var(--app-bg);
 }
 </style>

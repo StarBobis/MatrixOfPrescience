@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ChatDotRound, CirclePlus, MagicStick } from "@element-plus/icons-vue";
+import { BrainCircuit, MessageSquare, Plus } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import type { ChatGroup } from "../stores/settings";
 
@@ -20,9 +20,7 @@ const { t } = useI18n();
   <aside class="side-panel">
     <div class="brand-block">
       <div class="brand-mark">
-        <el-icon>
-          <MagicStick />
-        </el-icon>
+        <BrainCircuit aria-hidden="true" />
       </div>
       <div>
         <p class="eyebrow">{{ t("common.appName") }}</p>
@@ -32,32 +30,33 @@ const { t } = useI18n();
             class="group-create-icon"
             circle
             type="primary"
-            :icon="CirclePlus"
+            :icon="Plus"
             :title="t('groups.createTitle')"
+            :aria-label="t('groups.createTitle')"
             @click="emit('createGroup')"
           />
         </div>
       </div>
     </div>
 
-    <section class="section-block">
+    <section class="section-block" aria-labelledby="group-list-heading">
       <div class="section-heading">
-        <span>{{ t("groups.listTitle") }}</span>
+        <span id="group-list-heading">{{ t("groups.listTitle") }}</span>
         <el-tag size="small" type="success">{{ groups.length }}</el-tag>
       </div>
 
-      <div class="group-list">
+      <div v-if="groups.length" class="group-list">
         <button
           v-for="group in groups"
           :key="group.id"
           class="group-card"
           :class="{ active: group.id === activeGroupId }"
+          type="button"
+          :aria-current="group.id === activeGroupId ? 'page' : undefined"
           @click="emit('selectGroup', group.id)"
         >
           <div class="group-avatar">
-            <el-icon>
-              <ChatDotRound />
-            </el-icon>
+            <MessageSquare aria-hidden="true" />
           </div>
           <div class="group-main">
             <strong>{{ group.name }}</strong>
@@ -67,7 +66,14 @@ const { t } = useI18n();
           </div>
         </button>
       </div>
+      <div v-else class="group-list-empty">
+        <MessageSquare aria-hidden="true" />
+        <strong>{{ t("groups.emptyTitle") }}</strong>
+        <span>{{ t("groups.emptyDescription") }}</span>
+        <el-button type="primary" :icon="Plus" @click="emit('createGroup')">
+          {{ t("groups.createTitle") }}
+        </el-button>
+      </div>
     </section>
-
   </aside>
 </template>

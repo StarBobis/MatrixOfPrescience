@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { CirclePlus, EditPen } from "@element-plus/icons-vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { Pencil, Plus, Trash2 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { chooseLocalAvatar, getAvatarSrc } from "../utils/avatar";
+import { getReadableTextColor } from "../utils/colorContrast";
 import type { AgentModel, AgentReasoningEffort, OwnerProfile, ProviderId } from "../stores/settings";
 
 const props = defineProps<{
@@ -106,7 +107,12 @@ function isPointerInsideActiveMemberCard() {
 function hideActiveMemberCardIfPointerAway() {
   const activeId = activeMemberCardId.value;
 
-  if (!activeId || editingMemberCardId.value === activeId || isPointerInsideActiveMemberCard()) {
+  if (
+    !activeId ||
+    editingMemberCardId.value === activeId ||
+    isPointerInsideActiveMemberCard() ||
+    isInsideActiveMemberCardTarget(document.activeElement)
+  ) {
     return;
   }
 
@@ -142,7 +148,11 @@ function scheduleHideMemberCard(memberId: string) {
   }
 
   memberCardCloseTimer = window.setTimeout(() => {
-    if (activeMemberCardId.value === memberId && editingMemberCardId.value !== memberId) {
+    if (
+      activeMemberCardId.value === memberId &&
+      editingMemberCardId.value !== memberId &&
+      !isInsideActiveMemberCardTarget(document.activeElement)
+    ) {
       hideMemberCard(memberId);
     }
   }, memberCardHideDelayMs);
@@ -157,6 +167,37 @@ function startMemberCardEdit(memberId: string) {
   }
 
   showMemberCard(memberId);
+}
+
+function openMemberCardFromKeyboard(memberId: string) {
+  startMemberCardEdit(memberId);
+  void nextTick(() => {
+    const popover = Array.from(
+      document.querySelectorAll<HTMLElement>("[data-member-popover-id]"),
+    ).find((element) => element.dataset.memberPopoverId === memberId);
+    popover?.querySelector<HTMLElement>("input, textarea, button, [tabindex='0']")?.focus();
+  });
+}
+
+function closeMemberCardAndRestoreFocus(memberId: string) {
+  hideMemberCard(memberId, true);
+  void nextTick(() => {
+    const trigger = Array.from(
+      document.querySelectorAll<HTMLElement>("[data-member-card-id]"),
+    ).find((element) => element.dataset.memberCardId === memberId);
+    trigger?.focus();
+  });
+}
+
+function removeMemberAndRestoreFocus(memberId: string) {
+  const memberIndex = sortedMembers.value.findIndex((member) => member.id === memberId);
+  hideMemberCard(memberId, true);
+  emit("removeMember", memberId);
+  void nextTick(() => {
+    const triggers = document.querySelectorAll<HTMLElement>("[data-member-card-id]");
+    (triggers[Math.min(memberIndex, triggers.length - 1)] ??
+      document.querySelector<HTMLElement>(".member-add-btn"))?.focus();
+  });
 }
 
 function finishMemberCardEdit(memberId: string) {
@@ -223,7 +264,9 @@ function handleGlobalPointerMove(event: PointerEvent) {
 }
 
 function handleGlobalPointerLeave() {
-  hideMemberCard(activeMemberCardId.value, true);
+  if (!isInsideActiveMemberCardTarget(document.activeElement)) {
+    hideMemberCard(activeMemberCardId.value, true);
+  }
 }
 
 function handleGlobalVisibilityChange() {
@@ -281,13 +324,21 @@ onBeforeUnmount(() => {
         <el-tag size="small" type="success">{{ members.length + 1 }}</el-tag>
         <el-popover trigger="click" placement="left-start" :width="220">
           <template #reference>
-            <el-button class="member-add-btn" circle type="primary" :icon="CirclePlus" />
+            <el-button
+              class="member-add-btn"
+              circle
+              type="primary"
+              :icon="Plus"
+              :title="t('members.addTitle')"
+              :aria-label="t('members.addTitle')"
+            />
           </template>
 
           <div class="add-member-card">
             <strong>{{ t("members.addTitle") }}</strong>
             <el-select
               :placeholder="t('members.addFromFriends')"
+              :aria-label="t('members.addFromFriends')"
               filterable
               clearable
               @change="(friendId: string) => friendId && emit('addFriendMember', friendId)"
@@ -319,7 +370,13 @@ onBeforeUnmount(() => {
     <div class="right-member-list">
       <article class="owner-card">
         <span class="member-avatar-shell">
-          <span class="member-avatar owner-avatar" :style="{ background: ownerProfile.color }">
+          <span
+            class="member-avatar owner-avatar"
+            :style="{
+              background: ownerProfile.color,
+              color: getReadableTextColor(ownerProfile.color),
+            }"
+          >
             <img v-if="ownerProfile.avatar" :src="getAvatarSrc(ownerProfile.avatar)" alt="" />
             <span v-else>{{ getInitial(ownerProfile.name) }}</span>
           </span>
@@ -330,7 +387,7 @@ onBeforeUnmount(() => {
             :aria-label="t('members.changeAvatar')"
             @click.stop="assignOwnerAvatar"
           >
-            <el-icon><EditPen /></el-icon>
+            <Pencil aria-hidden="true" />
           </button>
         </span>
         <div class="member-card-copy">
@@ -352,28 +409,34 @@ onBeforeUnmount(() => {
         popper-class="member-popover"
       >
         <template #reference>
-          <div
+          <button
             class="right-member-card"
             :class="{ admin: member.isAdmin, muted: !member.enabled }"
             :style="{ '--member-accent': member.color }"
             :data-member-card-id="member.id"
+            type="button"
+            aria-haspopup="dialog"
+            :aria-expanded="activeMemberCardId === member.id"
+            :aria-label="t('members.openProfile', { name: member.name })"
+            @click="showMemberCard(member.id)"
+            @focus="showMemberCard(member.id)"
+            @keydown.enter.prevent="openMemberCardFromKeyboard(member.id)"
+            @keydown.space.prevent="openMemberCardFromKeyboard(member.id)"
+            @keydown.esc.stop="hideMemberCard(member.id, true)"
             @mouseenter="showMemberCard(member.id)"
             @mouseleave="scheduleHideMemberCard(member.id)"
           >
             <span class="member-avatar-shell">
-              <span class="member-avatar" :style="{ background: member.color }">
+              <span
+                class="member-avatar"
+                :style="{
+                  background: member.color,
+                  color: getReadableTextColor(member.color),
+                }"
+              >
                 <img v-if="member.avatar" :src="getAvatarSrc(member.avatar)" alt="" />
                 <span v-else>{{ getInitial(member.name) }}</span>
               </span>
-              <button
-                class="avatar-edit-button"
-                type="button"
-                :title="t('members.changeAvatar')"
-                :aria-label="t('members.changeAvatar')"
-                @click.stop="assignLocalAvatar(member)"
-              >
-                <el-icon><EditPen /></el-icon>
-              </button>
             </span>
             <div class="member-card-copy">
               <div class="member-name-row">
@@ -385,17 +448,26 @@ onBeforeUnmount(() => {
               <span v-if="!member.enabled" class="member-sub">{{ t("members.muted") }}</span>
               <span v-else class="member-sub">· {{ member.model }}</span>
             </div>
-          </div>
+          </button>
         </template>
 
         <div
           class="member-profile-card"
           :data-member-popover-id="member.id"
+          role="dialog"
+          :aria-label="t('members.profileTitle', { name: member.name })"
+          @keydown.esc.stop.prevent="closeMemberCardAndRestoreFocus(member.id)"
           @mouseenter="showMemberCard(member.id)"
           @mouseleave="scheduleHideMemberCard(member.id)"
         >
           <div class="profile-head">
-            <span class="profile-avatar" :style="{ background: member.color }">
+            <span
+              class="profile-avatar"
+              :style="{
+                background: member.color,
+                color: getReadableTextColor(member.color),
+              }"
+            >
               <img v-if="member.avatar" :src="getAvatarSrc(member.avatar)" alt="" />
               <span v-else>{{ getInitial(member.name) }}</span>
             </span>
@@ -403,6 +475,7 @@ onBeforeUnmount(() => {
             <el-input
               :model-value="getMemberNameDraft(member)"
               size="small"
+              :aria-label="t('members.memberName')"
               @focus="startMemberCardEdit(member.id)"
               @update:model-value="updateMemberNameDraft(member.id, $event)"
               @blur="finishMemberCardEdit(member.id)"
@@ -430,6 +503,7 @@ onBeforeUnmount(() => {
               <el-select
                 v-model="member.provider"
                 size="small"
+                :aria-label="t('common.api')"
                 @focus="startMemberCardEdit(member.id)"
                 @change="emit('updateMemberProvider', member)"
                 @blur="finishMemberCardEdit(member.id)"
@@ -448,6 +522,7 @@ onBeforeUnmount(() => {
               <el-select
                 v-model="member.model"
                 size="small"
+                :aria-label="`${t('common.model')}: ${member.model}`"
                 filterable
                 allow-create
                 default-first-option
@@ -469,6 +544,7 @@ onBeforeUnmount(() => {
               <el-select
                 v-model="member.reasoningEffort"
                 size="small"
+                :aria-label="t('members.reasoningEffort')"
                 @focus="startMemberCardEdit(member.id)"
                 @change="updateMemberSetting(member)"
                 @blur="finishMemberCardEdit(member.id)"
@@ -492,7 +568,7 @@ onBeforeUnmount(() => {
                 :inactive-text="t('common.no')"
                 :active-value="true"
                 :inactive-value="false"
-                active-color="#2f7a61"
+                :aria-label="t('members.deepSeekLongContext')"
                 @change="emit('updateMemberProfile', member)"
               />
             </div>
@@ -505,6 +581,7 @@ onBeforeUnmount(() => {
                   :min="0"
                   :max="2"
                   :step="0.1"
+                  :aria-label="t('common.temperature')"
                   @change="updateMemberSetting(member)"
                 />
                 <el-input-number
@@ -514,6 +591,7 @@ onBeforeUnmount(() => {
                   :max="2"
                   :step="0.1"
                   :controls="false"
+                  :aria-label="t('common.temperature')"
                   @focus="startMemberCardEdit(member.id)"
                   @change="updateMemberSetting(member)"
                   @blur="finishMemberCardEdit(member.id)"
@@ -530,9 +608,9 @@ onBeforeUnmount(() => {
               inline-prompt
               :active-text="t('common.yes')"
               :inactive-text="t('common.no')"
-              active-color="#c45656"
               :active-value="false"
               :inactive-value="true"
+              :aria-label="t('members.muteQuestion')"
               @change="emit('updateMemberProfile', member)"
             />
           </div>
@@ -545,7 +623,7 @@ onBeforeUnmount(() => {
               inline-prompt
               :active-text="t('common.yes')"
               :inactive-text="t('common.no')"
-              active-color="#2f7a61"
+              :aria-label="t('members.adminQuestion')"
               @change="emit('updateMemberProfile', member)"
             />
           </div>
@@ -558,7 +636,7 @@ onBeforeUnmount(() => {
               inline-prompt
               :active-text="t('common.yes')"
               :inactive-text="t('common.no')"
-              active-color="#2f7a61"
+              :aria-label="t('members.writePermission')"
               @change="emit('updateMemberProfile', member)"
             />
           </div>
@@ -571,6 +649,7 @@ onBeforeUnmount(() => {
               :autosize="{ minRows: 4, maxRows: 10 }"
               resize="none"
               :placeholder="t('members.rolePlaceholder')"
+              :aria-label="t('members.roleIdentity')"
               @focus="startMemberCardEdit(member.id)"
               @input="emit('updateMemberProfile', member)"
               @blur="finishMemberCardEdit(member.id)"
@@ -578,7 +657,21 @@ onBeforeUnmount(() => {
           </div>
 
           <div class="profile-actions">
-            <el-button size="small" type="danger" plain @click="emit('removeMember', member.id)">
+            <el-button
+              size="small"
+              plain
+              :icon="Pencil"
+              @click="assignLocalAvatar(member)"
+            >
+              {{ t("members.changeAvatar") }}
+            </el-button>
+            <el-button
+              size="small"
+              type="danger"
+              plain
+              :icon="Trash2"
+              @click="removeMemberAndRestoreFocus(member.id)"
+            >
               {{ t("members.removeTitle") }}
             </el-button>
           </div>
@@ -1009,5 +1102,192 @@ onBeforeUnmount(() => {
   flex-wrap: wrap;
   gap: 8px;
   min-width: 0;
+}
+</style>
+
+<style scoped>
+.member-panel {
+  gap: 8px;
+  color: var(--text-primary);
+}
+
+.section-heading {
+  min-height: 28px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.member-add-btn {
+  width: var(--control-height-small);
+  height: var(--control-height-small);
+  box-shadow: none;
+}
+
+.add-member-card strong {
+  color: var(--text-primary);
+}
+
+.right-member-list {
+  gap: 4px;
+}
+
+.owner-card,
+.right-member-card {
+  min-height: 54px;
+  padding: 8px;
+  border-color: transparent;
+  border-radius: 7px;
+  color: var(--text-primary);
+  background: transparent;
+  box-shadow: none;
+}
+
+.owner-card {
+  border-color: color-mix(in srgb, var(--warning) 26%, transparent);
+  background: var(--warning-soft);
+}
+
+.right-member-card {
+  font: inherit;
+  text-align: left;
+}
+
+.right-member-card:hover,
+.right-member-card:focus-visible {
+  border-color: var(--separator);
+  background: var(--control-hover);
+  box-shadow: none;
+}
+
+.right-member-card.admin,
+.right-member-card.admin:hover,
+.right-member-card.admin:focus-visible {
+  border-color: color-mix(in srgb, var(--success) 30%, transparent);
+  background: var(--success-soft);
+}
+
+.right-member-card.muted,
+.right-member-card.muted:hover {
+  border-color: transparent;
+  background: var(--control-bg);
+}
+
+.right-member-card.muted .member-avatar {
+  filter: grayscale(0.6);
+  opacity: 0.72;
+}
+
+.right-member-card.muted .member-card-copy strong,
+.right-member-card.muted .member-card-copy .member-sub {
+  color: var(--text-secondary);
+}
+
+.member-avatar {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--separator-strong) 70%, transparent);
+}
+
+.owner-avatar {
+  box-shadow:
+    0 0 0 2px var(--surface),
+    0 0 0 3px color-mix(in srgb, var(--warning) 58%, transparent);
+}
+
+.avatar-edit-button {
+  right: -6px;
+  bottom: -5px;
+  width: var(--control-height-small);
+  height: var(--control-height-small);
+  border-color: var(--surface);
+  color: #ffffff;
+  background: var(--accent);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  opacity: 0.86;
+  transform: none;
+}
+
+.avatar-edit-button svg {
+  width: 13px;
+  height: 13px;
+}
+
+.owner-card:hover .avatar-edit-button,
+.avatar-edit-button:focus-visible {
+  opacity: 1;
+  transform: none;
+}
+
+.avatar-edit-button:hover {
+  background: var(--accent-hover);
+}
+
+.member-card-copy strong {
+  color: var(--text-primary);
+  font-size: 13px;
+}
+
+.member-card-copy .member-sub {
+  color: var(--text-secondary);
+}
+
+.identity-badge.admin {
+  color: var(--success);
+  background: var(--success-soft);
+}
+
+.identity-badge.owner {
+  color: var(--warning);
+  background: var(--warning-soft);
+}
+
+:global(.member-popover.el-popover) {
+  border-color: var(--separator);
+  background: var(--surface-elevated);
+  box-shadow: var(--shadow-popover);
+}
+
+.member-profile-card {
+  gap: 14px;
+  color: var(--text-primary);
+  background: var(--surface-elevated);
+}
+
+.profile-title > span,
+.profile-badges > span:not(.identity-badge),
+.profile-details dt,
+.profile-muted-row span,
+.profile-admin-row span,
+.profile-write-row span,
+.profile-switch-row span,
+.profile-prompt span,
+.profile-settings label > span {
+  color: var(--text-secondary);
+}
+
+.profile-details dd {
+  color: var(--text-primary);
+}
+
+.temperature-control :deep(.el-slider) {
+  --el-slider-main-bg-color: var(--accent);
+}
+
+.profile-prompt :deep(.el-textarea__inner),
+.profile-title :deep(.el-input__wrapper) {
+  border-radius: var(--radius-small);
+}
+
+.profile-prompt :deep(.el-textarea__inner:focus),
+.profile-title :deep(.el-input__wrapper.is-focus) {
+  box-shadow: 0 0 0 1px var(--accent) inset, 0 0 0 3px var(--focus-ring);
+}
+
+.profile-actions {
+  justify-content: space-between;
+  padding-top: 2px;
+  border-top: 1px solid var(--separator);
+}
+
+.profile-actions :deep(.el-button) {
+  margin-left: 0;
 }
 </style>

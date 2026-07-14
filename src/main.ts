@@ -2,6 +2,7 @@ import { createApp } from "vue";
 import { createPinia } from "pinia";
 import ElementPlus from "element-plus";
 import "element-plus/dist/index.css";
+import "./styles/design-system.css";
 import App from "./App.vue";
 import { bindI18nLocaleToSettings, i18n } from "./i18n";
 import { useSettingsStore } from "./stores/settings";

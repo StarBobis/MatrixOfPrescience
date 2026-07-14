@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, nextTick, ref } from "vue";
+import { Check, Pencil } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import GroupMemberPanel from "./GroupMemberPanel.vue";
 import type {
@@ -11,6 +12,8 @@ import type {
 
 const announcement = defineModel<string>("announcement", { default: "" });
 const editingAnnouncement = ref(false);
+const announcementInput = ref<{ focus: () => void } | null>(null);
+const announcementView = ref<HTMLButtonElement | null>(null);
 const { t } = useI18n();
 
 const reasoningEffortOptions = computed<Array<{ label: string; value: AgentReasoningEffort }>>(
@@ -41,35 +44,65 @@ const emit = defineEmits<{
   updateMemberProvider: [member: AgentModel];
 }>();
 
+function startAnnouncementEdit() {
+  editingAnnouncement.value = true;
+  void nextTick(() => announcementInput.value?.focus());
+}
+
 function finishAnnouncementEdit() {
   editingAnnouncement.value = false;
+  void nextTick(() => announcementView.value?.focus());
 }
 </script>
 
 <template>
-  <aside class="right-panel">
-    <section class="announcement-panel">
+  <aside class="right-panel" :aria-label="t('rightPanel.inspectorLabel')">
+    <section class="announcement-panel" aria-labelledby="announcement-heading">
       <div class="section-heading">
-        <span>{{ t("rightPanel.announcement.title") }}</span>
-        <el-tag size="small" type="warning">{{ t("rightPanel.announcement.tag") }}</el-tag>
+        <span id="announcement-heading">{{ t("rightPanel.announcement.title") }}</span>
+        <div class="announcement-actions">
+          <el-tag size="small" type="warning">{{ t("rightPanel.announcement.tag") }}</el-tag>
+          <el-button
+            circle
+            plain
+            :icon="editingAnnouncement ? Check : Pencil"
+            :title="
+              editingAnnouncement
+                ? t('rightPanel.announcement.saveTitle')
+                : t('rightPanel.announcement.editTitle')
+            "
+            :aria-label="
+              editingAnnouncement
+                ? t('rightPanel.announcement.saveTitle')
+                : t('rightPanel.announcement.editTitle')
+            "
+            @click="editingAnnouncement ? finishAnnouncementEdit() : startAnnouncementEdit()"
+          />
+        </div>
       </div>
-      <div
+      <button
         v-if="!editingAnnouncement"
+        ref="announcementView"
         class="announcement-view"
+        type="button"
         :title="t('rightPanel.announcement.editTitle')"
-        @dblclick="editingAnnouncement = true"
+        :aria-label="t('rightPanel.announcement.editTitle')"
+        @click="startAnnouncementEdit"
       >
         {{ announcement || t("rightPanel.announcement.empty") }}
-      </div>
+      </button>
       <el-input
         v-else
+        ref="announcementInput"
         v-model="announcement"
         type="textarea"
-        :autosize="{ minRows: 7, maxRows: 12 }"
+        :autosize="{ minRows: 5, maxRows: 10 }"
         resize="none"
+        :aria-label="t('rightPanel.announcement.title')"
         :placeholder="t('rightPanel.announcement.placeholder')"
-        @blur="finishAnnouncementEdit"
         @keydown.ctrl.enter.prevent="finishAnnouncementEdit"
+        @keydown.meta.enter.prevent="finishAnnouncementEdit"
+        @keydown.esc.prevent="finishAnnouncementEdit"
       />
     </section>
 
@@ -95,266 +128,83 @@ function finishAnnouncementEdit() {
 <style scoped>
 .right-panel {
   display: flex;
-  min-width: 0;
+  width: 100%;
   height: 100%;
+  min-width: 0;
   min-height: 0;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
   overflow: hidden;
-  padding: 18px;
-  border: 1px solid #d9ded8;
-  border-radius: 8px;
-  background: #fbfcfb;
-  box-shadow: 0 14px 34px rgba(31, 43, 36, 0.08);
+  padding: 16px 14px;
+  background: var(--inspector-bg);
 }
 
-.announcement-panel,
-.agent-panel {
+.announcement-panel {
   display: grid;
-  gap: 12px;
+  flex: 0 0 auto;
+  gap: 9px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--separator);
+}
+
+.section-heading,
+.announcement-actions {
+  display: flex;
+  align-items: center;
 }
 
 .section-heading {
-  display: flex;
-  align-items: center;
+  min-height: 28px;
   justify-content: space-between;
   gap: 10px;
-  color: #2f3833;
-  font-size: 14px;
+  color: var(--text-secondary);
+  font-size: 12px;
   font-weight: 700;
 }
 
-.member-heading-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+.announcement-actions {
+  flex: 0 0 auto;
+  gap: 6px;
 }
 
-.member-add-btn {
-  width: 28px;
-  height: 28px;
-  padding: 0;
-}
-
-.add-member-card {
-  display: grid;
-  gap: 10px;
-}
-
-.add-member-card strong {
-  color: #202b25;
-  font-size: 14px;
-}
-
-.add-member-card .el-button {
-  width: 100%;
-  margin-left: 0;
-}
-
-.announcement-panel :deep(.el-textarea__inner) {
-  border-radius: 8px;
-  box-shadow: none;
-  line-height: 1.55;
+.announcement-actions :deep(.el-button) {
+  width: var(--control-height-small);
+  min-width: var(--control-height-small);
+  height: var(--control-height-small);
 }
 
 .announcement-view {
-  min-height: 132px;
+  display: block;
+  width: 100%;
+  min-height: 96px;
+  max-height: 160px;
   overflow: auto;
   padding: 10px 11px;
-  border: 1px solid #dcdfe6;
-  border-radius: 8px;
-  color: #303a34;
-  background: #ffffff;
+  border: 1px solid var(--separator-strong);
+  border-radius: 7px;
+  color: var(--text-primary);
+  background: var(--surface);
   cursor: text;
   font-size: 13px;
   line-height: 1.55;
+  text-align: left;
   white-space: pre-wrap;
 }
 
 .announcement-view:hover {
-  border-color: #a8c7b8;
-  background: #f8fbf9;
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent-soft) 36%, var(--surface));
 }
 
-.agent-panel {
-  padding-bottom: 2px;
-}
-
-.agent-settings-form {
-  display: grid;
-  gap: 10px;
-}
-
-.agent-settings-form :deep(.el-form-item) {
-  margin-bottom: 0;
-}
-
-.agent-settings-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.agent-mode-toggles {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 12px;
-}
-
-.patch-empty {
-  padding: 12px;
-  border: 1px dashed #d8dfd7;
-  border-radius: 8px;
-  color: #7b857e;
-  background: #ffffff;
-  font-size: 13px;
-  text-align: center;
-}
-
-.patch-list {
-  display: grid;
-  max-height: 340px;
-  gap: 10px;
-  overflow: auto;
-}
-
-.patch-card {
-  display: grid;
-  gap: 10px;
-  padding: 12px;
-  border: 1px solid #e0e5df;
-  border-radius: 8px;
-  background: #ffffff;
-}
-
-.patch-card.approved {
-  border-color: #b8d3c5;
-}
-
-.patch-card.rejected {
-  border-color: #efc4c4;
-}
-
-.patch-card-head {
-  display: grid;
-  gap: 8px;
-}
-
-.patch-card-head strong,
-.patch-card-head span {
-  display: block;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.patch-card-head strong {
-  color: #202b25;
-  font-size: 13px;
-}
-
-.patch-card-head span {
-  margin-top: 3px;
-  color: #7a837d;
-  font-size: 12px;
-}
-
-.patch-tags,
-.patch-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.patch-summary {
-  display: -webkit-box;
-  margin: 0;
-  overflow: hidden;
-  color: #37423b;
-  font-size: 12px;
-  line-height: 1.55;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-}
-
-.patch-safety {
-  display: grid;
-  gap: 6px;
-  padding: 8px;
-  border-radius: 8px;
-  background: #f8faf8;
-}
-
-.patch-safety strong {
-  color: #526057;
-  font-size: 12px;
-}
-
-.patch-safety ul {
-  display: grid;
-  gap: 4px;
-  margin: 0;
-  padding-left: 16px;
-  color: #435047;
-  font-size: 12px;
-  line-height: 1.45;
-}
-
-.patch-safety li.warning {
-  color: #9a6a12;
-}
-
-.patch-files {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.patch-files span,
-.patch-files.muted {
-  max-width: 100%;
-  overflow: hidden;
-  padding: 3px 7px;
-  border-radius: 6px;
-  color: #526057;
-  background: #eef4ef;
-  font-size: 12px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.patch-files.muted {
-  display: block;
-  color: #879089;
-}
-
-.patch-preview {
-  max-height: 160px;
-  margin: 0;
-  overflow: auto;
-  padding: 10px;
-  border-radius: 8px;
-  color: #26312b;
-  background: #f3f6f3;
-  font-size: 11px;
-  line-height: 1.5;
-  white-space: pre-wrap;
-}
-
-.patch-actions {
-  padding-top: 2px;
-}
-
-.member-panel :deep(.el-textarea__inner) {
-  border-radius: 8px;
-  box-shadow: none;
+.announcement-panel :deep(.el-textarea__inner) {
   line-height: 1.55;
 }
 
 @media (max-width: 980px) {
   .right-panel {
-    min-height: auto;
+    height: auto;
+    min-height: 320px;
+    overflow: visible;
   }
 }
 </style>
