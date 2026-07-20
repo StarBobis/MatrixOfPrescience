@@ -147,15 +147,20 @@ function scheduleHideMemberCard(memberId: string) {
     return;
   }
 
+  // Never postpone a pending hide: while messages stream, scroll events and
+  // the watchdog re-arm this timer many times per second, starving it and
+  // pinning the card open for the whole stream.
   if (memberCardCloseTimer) {
-    window.clearTimeout(memberCardCloseTimer);
-    memberCardCloseTimer = undefined;
+    return;
   }
 
   memberCardCloseTimer = window.setTimeout(() => {
+    memberCardCloseTimer = undefined;
+
     if (
       activeMemberCardId.value === memberId &&
       editingMemberCardId.value !== memberId &&
+      !isPointerInsideActiveMemberCard() &&
       !isInsideActiveMemberCardTarget(document.activeElement)
     ) {
       hideMemberCard(memberId);
