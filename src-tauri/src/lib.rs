@@ -1058,10 +1058,13 @@ async fn chat_completion(
             }
             _ => None,
         };
-        // DeepSeek thinking mode requires every assistant message that made
-        // tool calls to carry reasoning_content in all subsequent requests
-        // (HTTP 400 otherwise); streamed turns with empty reasoning miss the
-        // field, so backfill a placeholder at the payload boundary.
+        // Kun's model-history repair first: the payload sent upstream must be
+        // structurally legal (no orphan tool results, no unanswered tool
+        // calls, no split assistant tool_call messages) for every provider.
+        repair_model_history(&mut messages);
+        // DeepSeek thinking mode additionally requires every assistant
+        // message that made tool calls to carry reasoning_content in all
+        // subsequent requests (HTTP 400 otherwise).
         if is_deepseek && deepseek_reasoning_requested {
             backfill_deepseek_reasoning(&mut messages);
         }
@@ -2277,6 +2280,149 @@ fn content_signals_continuation_intent(content: &str) -> bool {
                     .iter()
                     .any(|marker| clause.to_ascii_lowercase().starts_with(marker))
         })
+}
+
+/// Port of Kun's model-history repair: the payload sent upstream must be
+/// structurally legal no matter which loop path produced the history.
+/// Consecutive assistant tool_call messages (one model response split by
+/// loop bookkeeping) merge back into a single legal tool_calls message;
+/// orphan `tool` results (no matching assistant tool_call) are dropped; and
+/// assistant tool_calls without a following `tool` result are removed (the
+/// message itself is dropped when nothing else remains).
+fn repair_model_history(messages: &mut Vec<Value>) {
+    // Pass 1: merge consecutive assistant tool_call messages.
+    let mut merged: Vec<Value> = Vec::with_capacity(messages.len());
+
+    for message in messages.drain(..) {
+        let is_assistant_with_tool_calls = message.get("role").and_then(Value::as_str)
+            == Some("assistant")
+            && message
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_some_and(|tool_calls| !tool_calls.is_empty());
+
+        if is_assistant_with_tool_calls {
+            if let Some(previous) = merged.last_mut() {
+                let previous_is_assistant_with_tool_calls =
+                    previous.get("role").and_then(Value::as_str) == Some("assistant")
+                        && previous
+                            .get("tool_calls")
+                            .and_then(Value::as_array)
+                            .is_some_and(|tool_calls| !tool_calls.is_empty());
+
+                if previous_is_assistant_with_tool_calls {
+                    let mut previous_tool_calls = previous
+                        .get("tool_calls")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    let mut next_tool_calls = message
+                        .get("tool_calls")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    previous_tool_calls.append(&mut next_tool_calls);
+                    previous["tool_calls"] = Value::Array(previous_tool_calls);
+
+                    let next_content = StrUtils::message_content_text(&message);
+                    if !next_content.is_empty() {
+                        let previous_content = StrUtils::message_content_text(previous);
+                        previous["content"] = json!(if previous_content.is_empty() {
+                            next_content
+                        } else {
+                            format!("{previous_content}\n{next_content}")
+                        });
+                    }
+
+                    if previous.get("reasoning_content").is_none() {
+                        if let Some(reasoning) = message.get("reasoning_content").cloned() {
+                            previous["reasoning_content"] = reasoning;
+                        }
+                    }
+                    continue;
+                }
+            }
+        }
+
+        merged.push(message);
+    }
+
+    // Pass 2: drop orphan tool results and unanswered tool calls.
+    let mut call_ids = std::collections::HashSet::new();
+    for message in &merged {
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+            for tool_call in tool_calls {
+                if let Some(id) = tool_call.get("id").and_then(Value::as_str) {
+                    call_ids.insert(id.to_string());
+                }
+            }
+        }
+    }
+
+    let mut result_ids = std::collections::HashSet::new();
+    for message in &merged {
+        if message.get("role").and_then(Value::as_str) != Some("tool") {
+            continue;
+        }
+        if let Some(id) = message.get("tool_call_id").and_then(Value::as_str) {
+            result_ids.insert(id.to_string());
+        }
+    }
+
+    merged.retain_mut(|message| {
+        let role = message.get("role").and_then(Value::as_str).unwrap_or_default();
+
+        if role == "tool" {
+            let id = message
+                .get("tool_call_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            return call_ids.contains(id);
+        }
+
+        if role == "assistant" {
+            if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+                let answered: Vec<Value> = tool_calls
+                    .iter()
+                    .filter(|tool_call| {
+                        tool_call
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .is_some_and(|id| result_ids.contains(id))
+                    })
+                    .cloned()
+                    .collect();
+
+                if answered.len() != tool_calls.len() {
+                    if answered.is_empty() {
+                        if let Some(object) = message.as_object_mut() {
+                            object.remove("tool_calls");
+                        }
+                    } else {
+                        message["tool_calls"] = Value::Array(answered);
+                    }
+                }
+            }
+
+            let has_tool_calls = message
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .is_some_and(|tool_calls| !tool_calls.is_empty());
+            let has_content = !StrUtils::message_content_text(message).is_empty();
+            let has_reasoning = message
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+                .is_some_and(|reasoning| !reasoning.trim().is_empty());
+            return has_tool_calls || has_content || has_reasoning;
+        }
+
+        true
+    });
+
+    *messages = merged;
 }
 
 fn is_deepseek_provider(provider_name: &str, base_url: &str) -> bool {
@@ -4008,6 +4154,102 @@ mod tests {
             "任务已完成：他让我帮忙的部分也做完了。"
         ));
         assert!(!content_signals_continuation_intent(""));
+    }
+
+    #[test]
+    fn repair_model_history_keeps_legal_history_untouched() {
+        let mut messages = vec![
+            json!({ "role": "user", "content": "hi" }),
+            json!({
+                "role": "assistant",
+                "content": "checking",
+                "tool_calls": [
+                    { "id": "c1", "type": "function", "function": { "name": "read_file", "arguments": "{}" } }
+                ],
+            }),
+            json!({ "role": "tool", "tool_call_id": "c1", "content": "ok" }),
+        ];
+        let before = messages.clone();
+
+        repair_model_history(&mut messages);
+
+        assert_eq!(messages, before);
+    }
+
+    #[test]
+    fn repair_model_history_drops_orphan_tool_results() {
+        let mut messages = vec![
+            json!({ "role": "user", "content": "hi" }),
+            json!({ "role": "tool", "tool_call_id": "ghost", "content": "stale" }),
+        ];
+
+        repair_model_history(&mut messages);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], json!("user"));
+    }
+
+    #[test]
+    fn repair_model_history_removes_unanswered_tool_calls_and_empty_assistants() {
+        let mut messages = vec![
+            json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    { "id": "c1", "type": "function", "function": { "name": "read_file", "arguments": "{}" } }
+                ],
+            }),
+            json!({ "role": "user", "content": "next" }),
+            json!({
+                "role": "assistant",
+                "content": "partial",
+                "tool_calls": [
+                    { "id": "c2", "type": "function", "function": { "name": "read_file", "arguments": "{}" } },
+                    { "id": "c3", "type": "function", "function": { "name": "write_file", "arguments": "{}" } },
+                ],
+            }),
+            json!({ "role": "tool", "tool_call_id": "c2", "content": "ok" }),
+        ];
+
+        repair_model_history(&mut messages);
+
+        // The empty-content assistant whose only call went unanswered is gone;
+        // the answered call survives and the unanswered one is trimmed.
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1]["tool_calls"].as_array().unwrap().len(), 1);
+        assert_eq!(messages[1]["tool_calls"][0]["id"], json!("c2"));
+        assert_eq!(messages[2]["tool_call_id"], json!("c2"));
+    }
+
+    #[test]
+    fn repair_model_history_merges_split_assistant_tool_call_messages() {
+        let mut messages = vec![
+            json!({
+                "role": "assistant",
+                "content": "first",
+                "tool_calls": [
+                    { "id": "c1", "type": "function", "function": { "name": "read_file", "arguments": "{}" } }
+                ],
+            }),
+            json!({
+                "role": "assistant",
+                "content": "second",
+                "reasoning_content": "kept",
+                "tool_calls": [
+                    { "id": "c2", "type": "function", "function": { "name": "write_file", "arguments": "{}" } }
+                ],
+            }),
+            json!({ "role": "tool", "tool_call_id": "c1", "content": "one" }),
+            json!({ "role": "tool", "tool_call_id": "c2", "content": "two" }),
+        ];
+
+        repair_model_history(&mut messages);
+
+        assert_eq!(messages.len(), 3);
+        let merged = &messages[0];
+        assert_eq!(merged["tool_calls"].as_array().unwrap().len(), 2);
+        assert_eq!(merged["content"], json!("first\nsecond"));
+        assert_eq!(merged["reasoning_content"], json!("kept"));
     }
 
     #[test]
