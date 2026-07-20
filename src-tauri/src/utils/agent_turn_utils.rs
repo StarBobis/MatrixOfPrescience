@@ -30,11 +30,15 @@ pub(crate) struct AgentTurnState {
     deepseek_reasoning_requested: bool,
     deepseek_tool_workflow: bool,
     reflection_pending: bool,
+    tools_executed: bool,
+    unresolved_reflections: usize,
 }
 
 impl AgentTurnState {
     pub(crate) const DEEPSEEK_REFLECTION_MAX_TOKENS: usize = 768;
-    pub(crate) const DEEPSEEK_REFLECTION_INSTRUCTION: &'static str = "Reflection step after a tool result. Do not call tools on this turn. Decide whether the user's task is complete. Reply with exactly one control line followed by concise content: `FINAL` then the user-facing final answer when the task is complete and validated, or `CONTINUE` then the single best next tool action when more work is needed. Do not write patches or tool arguments in this reflection.";
+    pub(crate) const MAX_UNRESOLVED_REFLECTIONS: usize = 2;
+    const REFLECTION_CONTROL_SCAN_LINES: usize = 8;
+    pub(crate) const DEEPSEEK_REFLECTION_INSTRUCTION: &'static str = "Reflection step after a tool result. Do not call tools on this turn. Decide whether the user's task is complete. Start the reply with exactly one control line, then concise content: `FINAL` then the user-facing final answer when the task is complete and validated, or `CONTINUE` then the single best next tool action when more work is needed. Do not write patches or tool arguments in this reflection.";
 
     pub(crate) fn new(
         is_deepseek: bool,
@@ -46,6 +50,8 @@ impl AgentTurnState {
             deepseek_reasoning_requested,
             deepseek_tool_workflow,
             reflection_pending: false,
+            tools_executed: false,
+            unresolved_reflections: 0,
         }
     }
 
@@ -72,7 +78,10 @@ impl AgentTurnState {
             return AgentTurnPhase::BudgetCheckpoint;
         }
 
-        if self.deepseek_tool_workflow {
+        // Only push the model into the action phase after it actually called a
+        // tool. The first turn stays a free conversation turn so the model can
+        // answer directly (or stop) whenever the task needs no tool work.
+        if self.deepseek_tool_workflow && self.tools_executed {
             AgentTurnPhase::ToolAction
         } else {
             AgentTurnPhase::Conversation
@@ -91,28 +100,24 @@ impl AgentTurnState {
         if self.deepseek_tool_workflow {
             self.reflection_pending = true;
         }
+        self.tools_executed = true;
+        self.unresolved_reflections = 0;
     }
 
     pub(crate) fn complete_reflection(&mut self) {
         self.reflection_pending = false;
     }
 
-    pub(crate) fn thinking_enabled(&self, phase: AgentTurnPhase) -> bool {
-        if !self.deepseek_reasoning_requested {
-            return false;
-        }
+    /// Counts a reflection that ended without a FINAL decision. Returns true
+    /// once the unresolved streak hits the limit, so the caller can ask for a
+    /// direct final answer instead of letting the action/reflection loop spin.
+    pub(crate) fn record_unresolved_reflection(&mut self) -> bool {
+        self.unresolved_reflections += 1;
+        self.unresolved_reflections >= Self::MAX_UNRESOLVED_REFLECTIONS
+    }
 
-        if !self.deepseek_tool_workflow {
-            return true;
-        }
-
-        matches!(
-            phase,
-            AgentTurnPhase::ToolAction
-                | AgentTurnPhase::ToolReflection
-                | AgentTurnPhase::BudgetCheckpoint
-                | AgentTurnPhase::FinalAnswer
-        )
+    pub(crate) fn thinking_enabled(&self, _phase: AgentTurnPhase) -> bool {
+        self.deepseek_reasoning_requested
     }
 
     pub(crate) fn reasoning_effort<'a>(
@@ -155,40 +160,33 @@ impl AgentTurnState {
         Some(json!("auto"))
     }
 
+    /// Extracts the reflection decision. The control line may carry markdown
+    /// decoration (`**FINAL:**`, `- FINAL:`, `1. FINAL:`) and may appear after
+    /// a few lead-in lines; anything without a FINAL control line keeps the
+    /// loop going with Continue.
     pub(crate) fn parse_reflection(content: &str) -> AgentReflectionDecision {
         let trimmed = content.trim();
-        let (control, following_lines) = trimmed.split_once('\n').unwrap_or((trimmed, ""));
-        let control = control.trim().trim_matches('*').trim();
+        let lines: Vec<&str> = trimmed.lines().collect();
+        let mut control_index = None;
 
-        let ascii_final_prefix_len = "FINAL:".len();
-        let inline_answer = if control
-            .get(..ascii_final_prefix_len)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("FINAL:"))
+        for (index, line) in lines
+            .iter()
+            .take(Self::REFLECTION_CONTROL_SCAN_LINES)
+            .enumerate()
         {
-            Some(
-                control
-                    .get(ascii_final_prefix_len..)
-                    .unwrap_or("")
-                    .trim()
-                    .trim_start_matches('*')
-                    .trim(),
-            )
-        } else if control.starts_with("FINAL：") {
-            Some(
-                control
-                    .get("FINAL：".len()..)
-                    .unwrap_or("")
-                    .trim()
-                    .trim_start_matches('*')
-                    .trim(),
-            )
-        } else {
-            None
+            if final_control_line(strip_control_line_decoration(line)).is_some() {
+                control_index = Some(index);
+                break;
+            }
+        }
+
+        let Some(control_index) = control_index else {
+            return AgentReflectionDecision::Continue;
         };
 
-        if !control.eq_ignore_ascii_case("FINAL") && inline_answer.is_none() {
-            return AgentReflectionDecision::Continue;
-        }
+        let inline_answer =
+            final_control_line(strip_control_line_decoration(lines[control_index])).flatten();
+        let following_lines = lines[control_index + 1..].join("\n");
 
         let answer = match inline_answer {
             Some(inline_answer) if !inline_answer.is_empty() => inline_answer,
@@ -202,9 +200,75 @@ impl AgentTurnState {
     }
 }
 
+/// Removes markdown list/emphasis decoration (`**`, `- `, `1. `, `2) `) from
+/// the start of a candidate control line.
+fn strip_control_line_decoration(line: &str) -> &str {
+    let mut text = line.trim();
+
+    loop {
+        let stripped = text
+            .trim_start_matches(['*', '-', '+', '#', '>'])
+            .trim_start();
+        if stripped.len() == text.len() {
+            break;
+        }
+        text = stripped;
+    }
+
+    let digit_len = text.len() - text.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    if digit_len > 0 {
+        if let Some(rest) = text[digit_len..].trim_start().strip_prefix(['.', ')']) {
+            text = rest.trim_start();
+        }
+    }
+
+    text.trim_matches('*').trim()
+}
+
+/// Returns `Some(None)` for a bare `FINAL` line and `Some(Some(answer))` for
+/// `FINAL: answer` / `FINAL：answer`; `None` when the line is not a FINAL control.
+fn final_control_line(candidate: &str) -> Option<Option<&str>> {
+    const ASCII_FINAL_PREFIX: &str = "FINAL:";
+
+    if candidate.eq_ignore_ascii_case("FINAL") {
+        return Some(None);
+    }
+
+    if candidate
+        .get(..ASCII_FINAL_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(ASCII_FINAL_PREFIX))
+    {
+        return Some(Some(
+            candidate
+                .get(ASCII_FINAL_PREFIX.len()..)
+                .unwrap_or("")
+                .trim()
+                .trim_start_matches('*')
+                .trim(),
+        ));
+    }
+
+    if let Some(rest) = candidate.strip_prefix("FINAL：") {
+        return Some(Some(rest.trim().trim_start_matches('*').trim()));
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deepseek_first_turn_is_a_free_conversation_turn() {
+        let state = AgentTurnState::new(true, true, true);
+
+        assert_eq!(
+            state.phase(false, false, false, false),
+            AgentTurnPhase::Conversation
+        );
+        assert!(state.thinking_enabled(AgentTurnPhase::Conversation));
+    }
 
     #[test]
     fn deepseek_cycles_from_action_to_reflection_and_back() {
@@ -212,13 +276,8 @@ mod tests {
 
         assert_eq!(
             state.phase(false, false, false, false),
-            AgentTurnPhase::ToolAction
+            AgentTurnPhase::Conversation
         );
-        assert_eq!(
-            state.tool_choice(AgentTurnPhase::ToolAction, false, false, false),
-            None
-        );
-        assert!(state.thinking_enabled(AgentTurnPhase::ToolAction));
 
         state.mark_tools_executed();
         assert_eq!(
@@ -236,6 +295,18 @@ mod tests {
             state.tool_choice(AgentTurnPhase::ToolAction, false, false, false),
             None
         );
+        assert!(state.thinking_enabled(AgentTurnPhase::ToolAction));
+    }
+
+    #[test]
+    fn unresolved_reflections_eventually_request_a_direct_answer() {
+        let mut state = AgentTurnState::new(true, true, true);
+
+        assert!(!state.record_unresolved_reflection());
+        assert!(state.record_unresolved_reflection());
+
+        state.mark_tools_executed();
+        assert!(!state.record_unresolved_reflection());
     }
 
     #[test]
@@ -255,6 +326,32 @@ mod tests {
         assert_eq!(
             AgentTurnState::parse_reflection("FINAL"),
             AgentReflectionDecision::RequestFinalAnswer
+        );
+    }
+
+    #[test]
+    fn reflection_control_line_tolerates_markdown_and_lead_in_lines() {
+        assert_eq!(
+            AgentTurnState::parse_reflection("- FINAL: done"),
+            AgentReflectionDecision::Finish("done".to_string())
+        );
+        assert_eq!(
+            AgentTurnState::parse_reflection("1. FINAL: done"),
+            AgentReflectionDecision::Finish("done".to_string())
+        );
+        assert_eq!(
+            AgentTurnState::parse_reflection("思考结论如下：\nFINAL：准备好了"),
+            AgentReflectionDecision::Finish("准备好了".to_string())
+        );
+        assert_eq!(
+            AgentTurnState::parse_reflection("FINAL:\n多行\n答案"),
+            AgentReflectionDecision::Finish("多行\n答案".to_string())
+        );
+        assert_eq!(
+            AgentTurnState::parse_reflection(
+                "I should output FINAL with a very concise answer. The user wants a tool."
+            ),
+            AgentReflectionDecision::Continue
         );
     }
 

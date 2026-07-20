@@ -208,7 +208,7 @@ const MAX_DEEPSEEK_TOOL_CALLS_PER_TURN: usize = 1;
 const TOOL_CALL_CHECKPOINT_INTERVAL: usize = 8;
 const TOOL_CALL_CHECKPOINT_REASONING_EFFORT: &str = "high";
 const TOOL_CALL_CHECKPOINT_INSTRUCTION: &str = "Checkpoint: the tool-call budget for this step has been reached. On this turn, do not call any tools. Briefly summarize what you have learned, what remains uncertain, and the single best next step. Keep it concise. After this checkpoint, continue the task on the following turn without waiting for user input if more work is needed.";
-const DEEPSEEK_TOOL_ACTION_INSTRUCTION: &str = "This is a tool action turn. Do not answer with prose. Call exactly one available tool now, using the latest reflection and tool results to choose it.";
+const DEEPSEEK_TOOL_ACTION_INSTRUCTION: &str = "This is a tool action turn. If more work is needed, call the single most useful tool now, guided by the latest reflection and tool results. If the task is already complete or no tool is needed, do not call a tool — write the final answer now, starting it with `FINAL:` when you can.";
 const CACHE_LOCATION_FILE: &str = "cache-location.json";
 const SETTINGS_FILE: &str = "settings.json";
 const MEMBER_LIBRARY_FILE: &str = "member-library.json";
@@ -1264,7 +1264,9 @@ async fn chat_completion(
                 };
                 match AgentTurnState::parse_reflection(effective_content) {
                     AgentReflectionDecision::Continue => {
-                        final_answer_requested = false;
+                        // After repeated undecided reflections, ask for the final
+                        // answer directly instead of looping action/reflection.
+                        final_answer_requested = agent_turn_state.record_unresolved_reflection();
                     }
                     AgentReflectionDecision::Finish(content) => {
                         if finish_reason_indicates_truncated_output(last_finish_reason.as_deref()) {
@@ -1340,6 +1342,39 @@ async fn chat_completion(
                 continue;
             }
             if turn_phase == AgentTurnPhase::ToolAction && deepseek_tool_workflow {
+                // The model declined to call a tool on an action turn — let it
+                // stop on its own instead of forcing another tool round.
+                messages.push(ToolCallUtils::trim_chat_tool_calls(&message, 0));
+                if !content.is_empty() {
+                    let action_answer = match AgentTurnState::parse_reflection(&content) {
+                        AgentReflectionDecision::Finish(answer) => answer,
+                        AgentReflectionDecision::RequestFinalAnswer => {
+                            final_answer_requested = true;
+                            continue;
+                        }
+                        // Plain prose without a control line is also a stop
+                        // decision: accept it as the final answer.
+                        AgentReflectionDecision::Continue => content.clone(),
+                    };
+                    if finish_reason_indicates_truncated_output(last_finish_reason.as_deref()) {
+                        append_continued_output(&mut accumulated_display_content, &action_answer);
+                        messages.push(json!({
+                            "role": "user",
+                            "content": CONTINUE_OUTPUT_INSTRUCTION,
+                        }));
+                        final_answer_requested = true;
+                        continue;
+                    }
+                    return Ok(ChatCompletionResponse {
+                        content: combined_output_text(&accumulated_display_content, &action_answer),
+                        trace_steps,
+                        usage: last_usage,
+                        dispatched_tasks: dispatched_tasks.take(),
+                    });
+                }
+                // Thinking-only output with no tool call: ask for the answer
+                // directly instead of spinning on more action turns.
+                final_answer_requested = true;
                 continue;
             }
 
@@ -1369,7 +1404,9 @@ async fn chat_completion(
                 messages.push(ToolCallUtils::trim_chat_tool_calls(&message, 0));
                 match AgentTurnState::parse_reflection(&reasoning) {
                     AgentReflectionDecision::Continue => {
-                        final_answer_requested = false;
+                        // After repeated undecided reflections, ask for the final
+                        // answer directly instead of looping action/reflection.
+                        final_answer_requested = agent_turn_state.record_unresolved_reflection();
                     }
                     AgentReflectionDecision::Finish(finish_content) => {
                         if finish_reason_indicates_truncated_output(last_finish_reason.as_deref()) {
@@ -1433,6 +1470,9 @@ async fn chat_completion(
         }
 
         if turn_phase == AgentTurnPhase::ToolAction && deepseek_tool_workflow {
+            // Empty action-turn output: ask for the answer directly instead of
+            // spinning on more action turns.
+            final_answer_requested = true;
             continue;
         }
 
