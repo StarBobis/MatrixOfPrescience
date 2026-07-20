@@ -69,7 +69,7 @@ interface ApiChatMessage {
 }
 
 interface ChatTraceStep {
-  kind: "reasoning" | "tool";
+  kind: "reasoning" | "tool" | "instruction";
   text: string;
   detail?: string;
 }
@@ -1624,7 +1624,11 @@ function flushStreamingTraceLine(messageId: string) {
 }
 
 function traceKindToExecutionKind(kind: ChatTraceStep["kind"]): ChatMessageExecutionKind {
-  return kind === "tool" ? "tool" : "reasoning";
+  if (kind === "tool" || kind === "instruction") {
+    return kind;
+  }
+
+  return "reasoning";
 }
 
 function appendStreamingTraceText(

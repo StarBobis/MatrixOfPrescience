@@ -21,8 +21,28 @@ fn hash_content(content: &str) -> u64 {
     hasher.finish()
 }
 
+/// Normalizes a path so every tool resolves to the same read-log key:
+/// strips the Windows verbatim prefix (`\\?\`) produced by fs::canonicalize,
+/// unifies separators, and folds case on Windows. Without this, paths from
+/// `resolve_workspace_relative_path` (canonicalized) and
+/// `resolve_workspace_target_path` (plain join) never map to the same entry
+/// and write_file stays blocked by read_before_edit_required forever.
 fn key(path: &Path) -> String {
-    path.to_string_lossy().to_string()
+    // Canonicalize through the OS first: this bridges every spelling
+    // difference at once (verbatim prefix, 8.3 short vs long names, casing,
+    // separators, symlinks). Non-existent paths fall back to the raw path.
+    let resolved = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let mut text = resolved.to_string_lossy().replace('\\', "/");
+
+    if let Some(stripped) = text.strip_prefix("//?/") {
+        text = stripped.to_string();
+    }
+
+    if cfg!(windows) {
+        text = text.to_ascii_lowercase();
+    }
+
+    text
 }
 
 pub(crate) fn record_read(path: &Path, content: &str) {
@@ -54,7 +74,7 @@ pub(crate) fn check_before_edit(path: &Path, display: &str) -> Result<(), String
 
     match recorded {
         None => Err(format!(
-            "read_before_edit_required: read {} with read_file before editing it.",
+            "read_before_edit_required: read {} with the read_file tool immediately before editing it (search_files/codegraph results do not count as a read).",
             display
         )),
         Some(hash) if hash != hash_content(&current) => Err(format!(
@@ -77,6 +97,31 @@ mod tests {
         ));
         fs::write(&path, content).unwrap();
         path
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn key_normalizes_verbatim_prefix_slashes_and_case() {
+        let verbatim = Path::new(r"\\?\D:\Dev\Proj\src\Main.rs");
+        let plain = Path::new("d:/dev/proj/src/main.rs");
+        assert_eq!(key(verbatim), key(plain));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn read_recorded_under_canonical_path_satisfies_plain_write_path() {
+        // Reproduces the write_file deadlock: read_file records under the
+        // canonicalized (\\?\-prefixed) path while write_file's resolver
+        // checks the plain joined path.
+        let path = temp_file("verbatim.txt", "seed");
+        let canonical = fs::canonicalize(&path).unwrap();
+        let content = fs::read_to_string(&path).unwrap();
+        record_read(&canonical, &content);
+
+        let plain = std::path::PathBuf::from(path.display().to_string().to_uppercase());
+        assert!(check_before_edit(&plain, "VERBATIM.TXT").is_ok());
+
+        let _ = fs::remove_file(&path);
     }
 
     #[test]

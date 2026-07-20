@@ -6,6 +6,8 @@ import {
   ChevronDown,
   FolderOpen,
   Image,
+  ListPlus,
+  PlugZap,
   Plus,
   RefreshCcw,
   Settings as SettingsIcon,
@@ -61,6 +63,67 @@ function ensureDefaultModelListed(provider: ProviderConfig) {
   if (model && !provider.models.includes(model)) {
     provider.models.push(model);
   }
+}
+
+interface ProviderProbeState {
+  status: "busy" | "ok" | "error";
+  latencyMs?: number;
+  modelCount?: number;
+  modelIds?: string[];
+  message?: string;
+}
+
+const probeStates = ref<Record<string, ProviderProbeState>>({});
+
+async function probeProvider(provider: ProviderConfig) {
+  probeStates.value[provider.id] = { status: "busy" };
+
+  try {
+    const result = await invoke<{
+      ok: boolean;
+      latencyMs: number;
+      modelIds: string[];
+      error?: string;
+    }>("probe_model_provider", {
+      request: { baseUrl: provider.baseUrl, apiKey: provider.apiKey },
+    });
+
+    if (result.ok) {
+      probeStates.value[provider.id] = {
+        status: "ok",
+        latencyMs: result.latencyMs,
+        modelCount: result.modelIds.length,
+        modelIds: result.modelIds,
+      };
+      return;
+    }
+
+    probeStates.value[provider.id] = {
+      status: "error",
+      message: result.error || t("settings.providers.probeError"),
+    };
+  } catch (error) {
+    probeStates.value[provider.id] = { status: "error", message: String(error) };
+  }
+}
+
+function importProbeModels(provider: ProviderConfig) {
+  const probe = probeStates.value[provider.id];
+  const ids = probe?.modelIds ?? [];
+
+  if (ids.length === 0) {
+    return;
+  }
+
+  const merged = new Set([...provider.models, ...ids]);
+  const added = merged.size - provider.models.length;
+  provider.models = [...merged];
+
+  if (!provider.defaultModel.trim() && provider.models.length > 0) {
+    provider.defaultModel = provider.models[0];
+  }
+
+  ElMessage.success(t("settings.providers.importOk", { count: added }));
 }
 
 async function confirmRemoveProvider(provider: ProviderConfig) {
@@ -274,6 +337,30 @@ async function syncOpenAIFromCcSwitch() {
               <h3 :id="`provider-${provider.id}-heading`">{{ provider.name || provider.id }}</h3>
               <div class="provider-card-actions">
                 <el-button
+                  size="small"
+                  plain
+                  :icon="PlugZap"
+                  :loading="probeStates[provider.id]?.status === 'busy'"
+                  :disabled="!provider.baseUrl.trim()"
+                  @click="probeProvider(provider)"
+                >
+                  {{ t("settings.providers.probeTest") }}
+                </el-button>
+                <el-button
+                  v-if="(probeStates[provider.id]?.modelIds?.length ?? 0) > 0"
+                  size="small"
+                  type="primary"
+                  plain
+                  :icon="ListPlus"
+                  @click="importProbeModels(provider)"
+                >
+                  {{
+                    t("settings.providers.importModels", {
+                      count: probeStates[provider.id]?.modelIds?.length ?? 0,
+                    })
+                  }}
+                </el-button>
+                <el-button
                   v-if="provider.id === 'openai' && canSyncCcSwitch"
                   size="small"
                   type="primary"
@@ -299,6 +386,28 @@ async function syncOpenAIFromCcSwitch() {
                   @click="confirmRemoveProvider(provider)"
                 />
               </div>
+            </div>
+
+            <div
+              v-if="probeStates[provider.id] && probeStates[provider.id].status !== 'busy'"
+              class="provider-probe-result"
+            >
+              <el-tag
+                v-if="probeStates[provider.id].status === 'ok'"
+                size="small"
+                type="success"
+                effect="plain"
+              >
+                {{
+                  t("settings.providers.probeOk", {
+                    latency: probeStates[provider.id].latencyMs ?? 0,
+                    count: probeStates[provider.id].modelCount ?? 0,
+                  })
+                }}
+              </el-tag>
+              <el-tag v-else size="small" type="danger" effect="plain">
+                {{ probeStates[provider.id].message || t("settings.providers.probeError") }}
+              </el-tag>
             </div>
 
             <el-form label-position="top">
@@ -624,6 +733,19 @@ h1 {
   flex: 0 0 auto;
   align-items: center;
   gap: 8px;
+}
+
+.provider-probe-result {
+  margin-top: 10px;
+}
+
+.provider-probe-result .el-tag {
+  max-width: 100%;
+  white-space: normal;
+  height: auto;
+  line-height: 1.4;
+  padding-top: 4px;
+  padding-bottom: 4px;
 }
 
 .provider-card-head strong {

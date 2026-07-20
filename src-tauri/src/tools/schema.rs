@@ -252,6 +252,34 @@ pub(crate) fn code_tools_schema(strict: bool, allow_writes: bool) -> Value {
             }),
             strict,
         ),
+        finalize_tool_function(
+            json!({
+                "name": "web_search",
+                "description": "Search the web and official documentation for current API references, guides, and examples that may not exist in the workspace. Default sources: web (DuckDuckGo, supports site: filters such as site:docs.github.com), mslearn (Microsoft Learn official docs), github (GitHub repositories).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query. Add site:example.com to scope results to one site."
+                        },
+                        "sources": {
+                            "type": "array",
+                            "items": { "type": "string", "enum": ["web", "mslearn", "github"] },
+                            "description": "Optional subset of sources to search. Defaults to web, mslearn, and github."
+                        },
+                        "maxResults": {
+                            "type": "integer",
+                            "description": "Results per source. Defaults to 5 and is capped at 10.",
+                            "minimum": 1,
+                            "maximum": 10
+                        }
+                    },
+                    "required": ["query"]
+                }
+            }),
+            strict,
+        ),
     ];
 
     if allow_writes {

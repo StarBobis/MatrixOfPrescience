@@ -57,13 +57,15 @@ impl StrUtils {
         }
     }
 
-    pub(crate) fn truncate_text(text: String, max_chars: usize) -> String {
+    /// Short preview for UI traces and inline snippets: cuts at `max_chars`
+    /// and appends an ellipsis instead of a "[Content truncated]" banner.
+    pub(crate) fn ellipsis_text(text: String, max_chars: usize) -> String {
         if text.chars().count() <= max_chars {
             return text;
         }
 
         let mut truncated: String = text.chars().take(max_chars).collect();
-        truncated.push_str("\n\n[Content truncated]");
+        truncated.push('…');
         truncated
     }
 

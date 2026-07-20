@@ -16,7 +16,12 @@ export type ChatRole = "user" | "assistant";
 export type MessageStatus = "done" | "thinking" | "error" | "interrupted";
 export type ChatMessageActivityKind = "status" | "tool";
 export type ChatMessageActivityStatus = "running" | "done" | "error" | "info" | "interrupted";
-export type ChatMessageExecutionKind = "status" | "reasoning" | "tool" | "network";
+export type ChatMessageExecutionKind =
+  | "status"
+  | "reasoning"
+  | "tool"
+  | "network"
+  | "instruction";
 export type ChatMessageExecutionStatus = ChatMessageActivityStatus;
 export type AgentMode = "chat" | "local-agent" | "architect";
 export type AgentWorkflowMode = "ask" | "edit-before-ask" | "code" | "yolo";

@@ -4,6 +4,7 @@ pub mod execution;
 pub mod patch;
 pub mod read_guard;
 pub mod schema;
+pub mod web_search;
 
 // Re-exports used by crate-level code
 pub(crate) use execution::{

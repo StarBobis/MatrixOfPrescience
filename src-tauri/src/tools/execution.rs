@@ -57,7 +57,7 @@ pub(crate) fn trace_step_with_detail_limit(
     ChatTraceStep {
         kind: kind.to_string(),
         text,
-        detail: Some(StrUtils::truncate_text(detail, detail_limit)),
+        detail: Some(StrUtils::ellipsis_text(detail, detail_limit)),
     }
 }
 
@@ -82,7 +82,7 @@ pub(crate) fn parsed_tool_arguments(function: &Value) -> Value {
 
 fn compact_trace_json(value: &Value) -> String {
     serde_json::to_string(value)
-        .map(|text| StrUtils::truncate_text(text, 280))
+        .map(|text| StrUtils::ellipsis_text(text, 280))
         .unwrap_or_else(|_| "<unreadable arguments>".to_string())
 }
 
@@ -107,12 +107,12 @@ pub(crate) fn tool_call_trace_step(tool_call: &Value) -> ChatTraceStep {
         match max_files {
             Some(max_files) => format!(
                 "codegraph_explore query=\"{}\" maxFiles={}",
-                StrUtils::truncate_text(query.to_string(), 180),
+                StrUtils::ellipsis_text(query.to_string(), 180),
                 max_files
             ),
             None => format!(
                 "codegraph_explore query=\"{}\"",
-                StrUtils::truncate_text(query.to_string(), 200)
+                StrUtils::ellipsis_text(query.to_string(), 200)
             ),
         }
     } else {
@@ -162,7 +162,7 @@ pub(crate) fn tool_result_trace_step(tool_call: &Value, tool_message: &Value) ->
             name,
             content.chars().count(),
             route,
-            StrUtils::truncate_text(first_line.to_string(), 160)
+            StrUtils::ellipsis_text(first_line.to_string(), 160)
         )
     };
 
@@ -220,6 +220,7 @@ pub(crate) fn execute_code_tool_call(
             "delete_path" => delete_workspace_path_tool(workspace, &arguments),
             "move_path" => move_workspace_path_tool(workspace, &arguments),
             "apply_patch" => crate::tools::patch::apply_patch_tool(workspace, &arguments),
+            "web_search" => crate::tools::web_search::web_search_tool(workspace, &arguments),
             "run_command" => crate::tools::command::run_workspace_command_tool(
                 workspace,
                 &arguments,
@@ -618,13 +619,24 @@ pub(crate) fn read_workspace_file_tool(
         .collect::<Vec<_>>()
         .join("\n");
 
+    // The file itself stays on disk, so instead of a silent hard cut we clip
+    // the window and tell the model how to page further.
+    let body = if numbered.chars().count() > 18_000 {
+        let clipped: String = numbered.chars().take(18_000).collect();
+        format!(
+            "{clipped}\n\n[Output clipped at 18000 chars; request fewer lines with maxLines or a later startLine to see the rest of this window.]"
+        )
+    } else {
+        numbered
+    };
+
     Ok(format!(
         "{} lines {}-{} of {}:\n{}",
         workspace_relative_display(workspace, &path),
         start_line,
         end_index,
         lines.len(),
-        StrUtils::truncate_text(numbered, 18_000)
+        body
     ))
 }
 
@@ -659,6 +671,8 @@ fn rg_exclude_args() -> Vec<String> {
         "!target".to_string(),
         "--glob".to_string(),
         "!.git".to_string(),
+        "--glob".to_string(),
+        "!.matrix-cache".to_string(),
     ]
 }
 
@@ -709,7 +723,7 @@ fn search_workspace_files_tool(workspace: &Path, arguments: &Value) -> Result<St
         "Matches for `{}` (showing up to {}):\n{}",
         query,
         max_results,
-        StrUtils::truncate_text(lines.join("\n"), 18_000)
+        crate::utils::spill::spill_tool_output(workspace, "search-files", lines.join("\n"), 18_000)
     ))
 }
 

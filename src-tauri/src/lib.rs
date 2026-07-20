@@ -26,7 +26,7 @@ use tools::{
     tool_result_trace_step, validate_workspace,
 };
 use utils::agent_turn_utils::{AgentReflectionDecision, AgentTurnPhase, AgentTurnState};
-use utils::tool_call_utils::ToolCallUtils;
+use utils::tool_call_utils::{NoProgressGuard, ToolCallUtils};
 use validation::{
     ValidationOps, ValidationRun, ValidationState, VALIDATION_FAILURE_RECOVERY_INSTRUCTION,
     VALIDATION_REQUIRED_INSTRUCTION, VALIDATION_UNAVAILABLE_INSTRUCTION,
@@ -203,6 +203,7 @@ const CONTINUE_OUTPUT_INSTRUCTION: &str =
     "Continue exactly from where you left off. Do not restart, repeat, or summarize prior text. Finish the same answer.";
 const EDIT_FAILURE_RECOVERY_INSTRUCTION: &str = "The previous edit tool call failed. Do not stop or provide a final answer solely because an edit did not apply. Recover using the error and the current workspace state: re-read the target when the context may be stale, then retry with a corrected smaller patch or a different available edit tool. Do not repeat the identical failing call. Continue until the requested change is complete or no available tool can resolve a genuine blocker.";
 const MAX_TOOL_ONLY_ROUNDS: usize = 6;
+const MAX_UNPRODUCTIVE_TURNS: usize = 3;
 const MAX_TOTAL_TOOL_CALLS_PER_AUTONOMOUS_ROUND: usize = 24;
 const MAX_DEEPSEEK_TOOL_CALLS_PER_TURN: usize = 1;
 const TOOL_CALL_CHECKPOINT_INTERVAL: usize = 8;
@@ -527,6 +528,145 @@ fn load_ccswitch_openai_config() -> Result<CcSwitchOpenAiConfig, String> {
     ))
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProbeModelProviderRequest {
+    base_url: String,
+    api_key: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProbeModelProviderResponse {
+    ok: bool,
+    latency_ms: u128,
+    model_ids: Vec<String>,
+    error: Option<String>,
+}
+
+fn models_endpoint(base_url: &str) -> String {
+    let normalized = normalize_imported_base_url(base_url);
+    format!("{}/models", normalized.trim_end_matches('/'))
+}
+
+#[tauri::command(rename_all = "camelCase")]
+async fn probe_model_provider(request: ProbeModelProviderRequest) -> ProbeModelProviderResponse {
+    let started = std::time::Instant::now();
+    let base_url = request.base_url.trim();
+
+    if base_url.is_empty() {
+        return ProbeModelProviderResponse {
+            ok: false,
+            latency_ms: 0,
+            model_ids: Vec::new(),
+            error: Some("Base URL is empty.".to_string()),
+        };
+    }
+
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            return ProbeModelProviderResponse {
+                ok: false,
+                latency_ms: 0,
+                model_ids: Vec::new(),
+                error: Some(format!("Failed to build HTTP client: {error}")),
+            };
+        }
+    };
+
+    let mut http = client.get(models_endpoint(base_url));
+
+    if !request.api_key.trim().is_empty() {
+        http = http.bearer_auth(request.api_key.trim());
+    }
+
+    let response = match http.send().await {
+        Ok(response) => response,
+        Err(error) => {
+            return ProbeModelProviderResponse {
+                ok: false,
+                latency_ms: started.elapsed().as_millis(),
+                model_ids: Vec::new(),
+                error: Some(error.to_string()),
+            };
+        }
+    };
+
+    let latency_ms = started.elapsed().as_millis();
+    let status = response.status();
+
+    if !status.is_success() {
+        return ProbeModelProviderResponse {
+            ok: false,
+            latency_ms,
+            model_ids: Vec::new(),
+            error: Some(format!("HTTP {status}")),
+        };
+    }
+
+    let body = match response.text().await {
+        Ok(body) => body,
+        Err(error) => {
+            return ProbeModelProviderResponse {
+                ok: false,
+                latency_ms,
+                model_ids: Vec::new(),
+                error: Some(format!("Failed to read response: {error}")),
+            };
+        }
+    };
+
+    ProbeModelProviderResponse {
+        ok: true,
+        latency_ms,
+        model_ids: parse_model_ids(&body),
+        error: None,
+    }
+}
+
+fn parse_model_ids(body: &str) -> Vec<String> {
+    let Ok(json) = serde_json::from_str::<Value>(body) else {
+        return Vec::new();
+    };
+
+    let mut ids = json
+        .get("data")
+        .and_then(Value::as_array)
+        .map(|data| {
+            data.iter()
+                .filter_map(|item| item.get("id").and_then(Value::as_str))
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::parse_model_ids;
+
+    #[test]
+    fn parse_model_ids_reads_openai_models_shape() {
+        let body = r#"{"object":"list","data":[{"id":"gpt-4.1-mini"},{"id":"deepseek-v4-flash"},{"id":"gpt-4.1-mini"},{"id":" "},{}]}"#;
+
+        assert_eq!(
+            parse_model_ids(body),
+            vec!["deepseek-v4-flash".to_string(), "gpt-4.1-mini".to_string()]
+        );
+        assert!(parse_model_ids("not json").is_empty());
+    }
+}
+
 fn chat_completions_endpoint(base_url: &str) -> String {
     let normalized = normalize_imported_base_url(base_url);
     let lower = normalized.to_ascii_lowercase();
@@ -809,9 +949,11 @@ async fn chat_completion(
         .map(|cancellation_id| cancellation_state.token(cancellation_id));
 
     let mut messages: Vec<Value> = Vec::new();
+    let mut system_prompt_for_trace: Option<String> = None;
     if let Some(system_prompt) = request.system_prompt.as_deref() {
         let trimmed = system_prompt.trim();
         if !trimmed.is_empty() {
+            system_prompt_for_trace = Some(trimmed.to_string());
             messages.push(json!({
                 "role": "system",
                 "content": trimmed,
@@ -842,9 +984,14 @@ async fn chat_completion(
     let client = reqwest::Client::new();
     let deepseek_reasoning_requested =
         is_deepseek && reasoning_enabled(request.reasoning_effort.as_deref());
-    let deepseek_tool_workflow = is_deepseek
-        && (request.code_tools_enabled.unwrap_or(false)
-            || request.orchestration_tools_enabled.unwrap_or(false));
+    // The reflection/action ping-pong workflow was retired: weak models ramble
+    // through the FINAL/CONTINUE protocol instead of acting, so every phase
+    // transition became another chance to stall. The plain loop below (tools
+    // offered every turn; whatever the model says once it stops calling tools
+    // is the answer) combined with the no-progress guard and the hard stall
+    // termination is strictly more robust. AgentTurnState keeps the workflow
+    // machinery for its phase/tool_choice helpers.
+    let deepseek_tool_workflow = false;
     let mut agent_turn_state = AgentTurnState::new(
         is_deepseek,
         deepseek_reasoning_requested,
@@ -862,15 +1009,18 @@ async fn chat_completion(
     let mut edit_recovery_rounds = 0usize;
     let mut final_answer_requested = false;
     let mut tool_only_rounds: usize = 0;
+    let mut unproductive_turns: usize = 0;
     let mut tool_calls_since_checkpoint = 0usize;
     let mut total_tool_calls_executed = 0usize;
     let mut dispatched_tasks: Option<Vec<TaskDispatchedEntry>> = None;
     let mut tool_checkpoint_pending = false;
     let mut tool_budget_reset_pending = false;
     let mut validation = ValidationState::default();
+    let mut no_progress_guard = NoProgressGuard::default();
     let mut last_finish_reason: Option<String> = None;
     let mut last_usage: Option<ChatCompletionUsage> = None;
     let mut trace_steps: Vec<ChatTraceStep> = Vec::new();
+    let mut last_payload_instruction: Option<&'static str> = None;
     let mut accumulated_display_content = String::new();
     let stream_id = request
         .stream_id
@@ -878,6 +1028,10 @@ async fn chat_completion(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_string);
+
+    if let Some(prompt) = system_prompt_for_trace.as_deref() {
+        emit_instruction_step(&app, stream_id.as_deref(), &mut trace_steps, "system-prompt", prompt);
+    }
 
     for turn_index in 0..max_chat_completion_turns {
         let validation_tool_required = validation.requires_tool(edit_recovery_required);
@@ -903,12 +1057,38 @@ async fn chat_completion(
             }
             _ => None,
         };
+        // DeepSeek thinking mode requires every assistant message that made
+        // tool calls to carry reasoning_content in all subsequent requests
+        // (HTTP 400 otherwise); streamed turns with empty reasoning miss the
+        // field, so backfill a placeholder at the payload boundary.
+        if is_deepseek && deepseek_reasoning_requested {
+            backfill_deepseek_reasoning(&mut messages);
+        }
         let payload_messages = chat_payload_messages(
             &messages,
             final_answer_requested && !validation_tool_required && !repair_required,
             validation_tool_required,
             phase_instruction,
         );
+        let payload_instruction = if validation_tool_required {
+            Some(("validation-required", VALIDATION_REQUIRED_INSTRUCTION))
+        } else if let Some(instruction) = phase_instruction {
+            Some(("turn-phase", instruction))
+        } else if final_answer_requested && !validation_tool_required && !repair_required {
+            Some(("final-answer", FINAL_ANSWER_INSTRUCTION))
+        } else {
+            None
+        };
+        // Surface each newly injected instruction, skipping consecutive repeats
+        // so a deepseek action phase does not flood the trace.
+        if let Some((label, instruction)) = payload_instruction {
+            if last_payload_instruction != Some(instruction) {
+                emit_instruction_step(&app, stream_id.as_deref(), &mut trace_steps, label, instruction);
+                last_payload_instruction = Some(instruction);
+            }
+        } else {
+            last_payload_instruction = None;
+        }
         let suppress_content_stream = is_deepseek
             && deepseek_tool_workflow
             && !matches!(
@@ -952,14 +1132,21 @@ async fn chat_completion(
                     tools.extend(orchestration_tools);
                 }
             }
-            payload["tools"] = Value::Array(tools);
-            if let Some(tool_choice) = agent_turn_state.tool_choice(
-                turn_phase,
-                validation_tool_required,
-                repair_required,
-                orchestration_required,
-            ) {
-                payload["tool_choice"] = tool_choice;
+            // No-progress escalation: remove read/explore tools so the model
+            // must edit, run a command, or answer instead of stalling.
+            if no_progress_guard.read_tools_blocked() {
+                retain_non_read_tools(&mut tools);
+            }
+            if !tools.is_empty() {
+                payload["tools"] = Value::Array(tools);
+                if let Some(tool_choice) = agent_turn_state.tool_choice(
+                    turn_phase,
+                    validation_tool_required,
+                    repair_required,
+                    orchestration_required,
+                ) {
+                    payload["tool_choice"] = tool_choice;
+                }
             }
         }
 
@@ -989,17 +1176,27 @@ async fn chat_completion(
                         fallback_tools.extend(orchestration_tools);
                     }
                 }
-                payload["tools"] = Value::Array(fallback_tools);
-                if let Some(tool_choice) = agent_turn_state.tool_choice(
-                    turn_phase,
-                    validation_tool_required,
-                    repair_required,
-                    orchestration_required,
-                ) {
-                    payload["tool_choice"] = tool_choice;
-                } else {
+                if no_progress_guard.read_tools_blocked() {
+                    retain_non_read_tools(&mut fallback_tools);
+                }
+                if fallback_tools.is_empty() {
                     if let Some(object) = payload.as_object_mut() {
+                        object.remove("tools");
                         object.remove("tool_choice");
+                    }
+                } else {
+                    payload["tools"] = Value::Array(fallback_tools);
+                    if let Some(tool_choice) = agent_turn_state.tool_choice(
+                        turn_phase,
+                        validation_tool_required,
+                        repair_required,
+                        orchestration_required,
+                    ) {
+                        payload["tool_choice"] = tool_choice;
+                    } else {
+                        if let Some(object) = payload.as_object_mut() {
+                            object.remove("tool_choice");
+                        }
                     }
                 }
                 send_chat_completion_request_maybe_stream(
@@ -1073,6 +1270,7 @@ async fn chat_completion(
                     ));
                     let mut failed_edit = false;
                     let mut successful_edit = false;
+                    let mut read_loop_nudge: Option<String> = None;
                     let mut validation_run = ValidationRun::default();
                     for tool_call in executable_tool_calls {
                         let call_step = tool_call_trace_step(tool_call);
@@ -1094,6 +1292,9 @@ async fn chat_completion(
                             )
                         };
                         validation_run.observe_tool_result(tool_call, &tool_result);
+                        if let Some(nudge) = no_progress_guard.record_tool_call(tool_call) {
+                            read_loop_nudge = Some(nudge);
+                        }
                         if dispatched_tasks.is_none() {
                             if let Some(entries) = extract_dispatched_tasks(tool_call, &tool_result) {
                                 dispatched_tasks = Some(entries);
@@ -1120,9 +1321,17 @@ async fn chat_completion(
                             successful_edit,
                         );
                     if failed_edit && edit_recovery_required {
+                        emit_instruction_step(&app, stream_id.as_deref(), &mut trace_steps, "edit-recovery", EDIT_FAILURE_RECOVERY_INSTRUCTION);
                         messages.push(json!({
                             "role": "user",
                             "content": EDIT_FAILURE_RECOVERY_INSTRUCTION,
+                        }));
+                    }
+                    if let Some(nudge) = read_loop_nudge {
+                        emit_instruction_step(&app, stream_id.as_deref(), &mut trace_steps, "no-progress-nudge", &nudge);
+                        messages.push(json!({
+                            "role": "user",
+                            "content": nudge,
                         }));
                     }
                     let validation_failed = if successful_edit {
@@ -1132,6 +1341,7 @@ async fn chat_completion(
                         validation.record_run(validation_run)
                     };
                     if validation_failed {
+                        emit_instruction_step(&app, stream_id.as_deref(), &mut trace_steps, "validation-failure", VALIDATION_FAILURE_RECOVERY_INSTRUCTION);
                         messages.push(json!({
                             "role": "user",
                             "content": VALIDATION_FAILURE_RECOVERY_INSTRUCTION,
@@ -1157,6 +1367,7 @@ async fn chat_completion(
                         final_answer_requested = false;
                     }
                     code_tool_called = true;
+                    unproductive_turns = 0;
                     agent_turn_state.mark_tools_executed();
                     total_tool_calls_executed += tool_execution_plan.executable_count;
                     ToolCallUtils::schedule_checkpoint(
@@ -1389,6 +1600,34 @@ async fn chat_completion(
                 continue;
             }
 
+            // Hard stall termination: a turn with no tool calls and no usable
+            // content must not return an empty answer, and must not loop
+            // forever either. Force a couple of retries, then end the
+            // generation with whatever was accumulated plus a note.
+            if content.trim().is_empty() {
+                unproductive_turns += 1;
+                if unproductive_turns < MAX_UNPRODUCTIVE_TURNS {
+                    messages.push(ToolCallUtils::trim_chat_tool_calls(&message, 0));
+                    final_answer_requested = true;
+                    continue;
+                }
+
+                let stalled_content = if accumulated_display_content.trim().is_empty() {
+                    "Generation stalled: the model produced no usable content after several retries. Please try again or rephrase the request.".to_string()
+                } else {
+                    format!(
+                        "{}\n\n(Generation ended early: the model stalled without further output.)",
+                        accumulated_display_content.trim_end()
+                    )
+                };
+                return Ok(ChatCompletionResponse {
+                    content: stalled_content,
+                    trace_steps,
+                    usage: last_usage,
+                    dispatched_tasks: dispatched_tasks.take(),
+                });
+            }
+
             return Ok(ChatCompletionResponse {
                 content: combined_output_text(&accumulated_display_content, &content),
                 trace_steps,
@@ -1532,10 +1771,12 @@ async fn openai_responses_completion(
     let mut tool_checkpoint_pending = false;
     let mut tool_budget_reset_pending = false;
     let mut validation = ValidationState::default();
+    let mut no_progress_guard = NoProgressGuard::default();
     let mut previous_response_id: Option<String> = None;
     let mut pending_input: Vec<Value> = Vec::new();
     let mut last_usage: Option<ChatCompletionUsage> = None;
     let mut trace_steps: Vec<ChatTraceStep> = Vec::new();
+    let mut last_turn_instruction: Option<&'static str> = None;
     let mut accumulated_display_content = String::new();
     let stream_id = request
         .stream_id
@@ -1572,6 +1813,25 @@ async fn openai_responses_completion(
             } else if final_answer_requested && !repair_required {
                 input.push(responses_user_message(FINAL_ANSWER_INSTRUCTION));
             }
+        }
+
+        let turn_instruction = if validation_tool_required {
+            Some(("validation-required", VALIDATION_REQUIRED_INSTRUCTION))
+        } else if checkpoint_required {
+            Some(("checkpoint", TOOL_CALL_CHECKPOINT_INSTRUCTION))
+        } else if final_answer_requested && !validation_tool_required && !repair_required {
+            Some(("final-answer", FINAL_ANSWER_INSTRUCTION))
+        } else {
+            None
+        };
+        // Surface each newly injected instruction, skipping consecutive repeats.
+        if let Some((label, instruction)) = turn_instruction {
+            if last_turn_instruction != Some(instruction) {
+                emit_instruction_step(&app, stream_id.as_deref(), &mut trace_steps, label, instruction);
+                last_turn_instruction = Some(instruction);
+            }
+        } else {
+            last_turn_instruction = None;
         }
 
         let code_tools_allowed = !checkpoint_required
@@ -1620,9 +1880,16 @@ async fn openai_responses_completion(
                     tools.extend(orchestration_tools);
                 }
             }
-            payload["tools"] = Value::Array(tools);
-            if repair_required || orchestration_required {
-                payload["tool_choice"] = json!("required");
+            // No-progress escalation: remove read/explore tools so the model
+            // must edit, run a command, or answer instead of stalling.
+            if no_progress_guard.read_tools_blocked() {
+                retain_non_read_tools(&mut tools);
+            }
+            if !tools.is_empty() {
+                payload["tools"] = Value::Array(tools);
+                if repair_required || orchestration_required {
+                    payload["tool_choice"] = json!("required");
+                }
             }
         }
 
@@ -1682,6 +1949,7 @@ async fn openai_responses_completion(
                     );
                     let mut failed_edit = false;
                     let mut successful_edit = false;
+                    let mut read_loop_nudge: Option<String> = None;
                     let mut validation_run = ValidationRun::default();
                     for response_tool_call in &executable_tool_calls {
                         let tool_call =
@@ -1707,6 +1975,9 @@ async fn openai_responses_completion(
                         };
 
                         validation_run.observe_tool_result(&tool_call, &tool_result);
+                        if let Some(nudge) = no_progress_guard.record_tool_call(&tool_call) {
+                            read_loop_nudge = Some(nudge);
+                        }
                         if ValidationOps::result_succeeded(&tool_result)
                             && ValidationOps::is_edit_call(&tool_call)
                         {
@@ -1730,8 +2001,13 @@ async fn openai_responses_completion(
                             successful_edit,
                         );
                     if failed_edit && edit_recovery_required {
+                        emit_instruction_step(&app, stream_id.as_deref(), &mut trace_steps, "edit-recovery", EDIT_FAILURE_RECOVERY_INSTRUCTION);
                         pending_input
                             .push(responses_user_message(EDIT_FAILURE_RECOVERY_INSTRUCTION));
+                    }
+                    if let Some(nudge) = read_loop_nudge {
+                        emit_instruction_step(&app, stream_id.as_deref(), &mut trace_steps, "no-progress-nudge", &nudge);
+                        pending_input.push(responses_user_message(nudge.as_str()));
                     }
                     let validation_failed = if successful_edit {
                         validation.mark_successful_edit();
@@ -1740,6 +2016,7 @@ async fn openai_responses_completion(
                         validation.record_run(validation_run)
                     };
                     if validation_failed {
+                        emit_instruction_step(&app, stream_id.as_deref(), &mut trace_steps, "validation-failure", VALIDATION_FAILURE_RECOVERY_INSTRUCTION);
                         pending_input.push(responses_user_message(
                             VALIDATION_FAILURE_RECOVERY_INSTRUCTION,
                         ));
@@ -1784,6 +2061,7 @@ async fn openai_responses_completion(
                                 tool_budget_reset_pending = true;
                                 final_answer_requested = false;
                             } else {
+                                emit_instruction_step(&app, stream_id.as_deref(), &mut trace_steps, "final-answer-forced", FINAL_ANSWER_INSTRUCTION);
                                 pending_input
                                     .push(responses_user_message(FINAL_ANSWER_INSTRUCTION));
                                 final_answer_requested = true;
@@ -1803,6 +2081,7 @@ async fn openai_responses_completion(
                             );
 
                         if validation_outputs.is_empty() {
+                            emit_instruction_step(&app, stream_id.as_deref(), &mut trace_steps, "validation-unavailable", VALIDATION_UNAVAILABLE_INSTRUCTION);
                             mark_validation_unavailable_for_responses(&mut pending_input);
                             validation.mark_validator_discovery_required();
                             final_answer_requested = false;
@@ -1866,6 +2145,7 @@ async fn openai_responses_completion(
                     }
                 }
 
+                emit_instruction_step(&app, stream_id.as_deref(), &mut trace_steps, "validation-unavailable", VALIDATION_UNAVAILABLE_INSTRUCTION);
                 mark_validation_unavailable_for_responses(&mut pending_input);
                 validation.mark_validator_discovery_required();
                 final_answer_requested = false;
@@ -1874,6 +2154,7 @@ async fn openai_responses_completion(
 
             if responses_output_is_incomplete(&parsed) {
                 append_continued_output(&mut accumulated_display_content, &content);
+                emit_instruction_step(&app, stream_id.as_deref(), &mut trace_steps, "continue-output", CONTINUE_OUTPUT_INSTRUCTION);
                 pending_input.push(responses_user_message(CONTINUE_OUTPUT_INSTRUCTION));
                 final_answer_requested = true;
                 continue;
@@ -1935,6 +2216,39 @@ fn apply_reasoning_payload(payload: &mut Value, is_deepseek: bool, reasoning_eff
 
     if reasoning_enabled {
         payload["reasoning_effort"] = json!(trimmed);
+    }
+}
+
+/// DeepSeek thinking mode requires every assistant message that made tool
+/// calls to carry reasoning_content in all subsequent requests — otherwise
+/// the API answers HTTP 400 "The `reasoning_content` in the thinking mode
+/// must be passed back to the API". Streamed turns with genuinely empty
+/// reasoning miss the field, so backfill a placeholder at the payload
+/// boundary instead of letting one lossy turn poison the rest of the loop.
+fn backfill_deepseek_reasoning(messages: &mut [Value]) {
+    for message in messages.iter_mut() {
+        if message.get("role").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+
+        let has_tool_calls = message
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .is_some_and(|tool_calls| !tool_calls.is_empty());
+
+        if !has_tool_calls {
+            continue;
+        }
+
+        let has_reasoning = message
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .is_some_and(|reasoning| !reasoning.trim().is_empty());
+
+        if !has_reasoning {
+            message["reasoning_content"] =
+                json!("(reasoning content was not retained for this turn)");
+        }
     }
 }
 
@@ -2019,6 +2333,22 @@ fn responses_reasoning_payload(reasoning_effort: Option<&str>) -> Option<Value> 
         "effort": reasoning_effort.unwrap_or("").trim(),
         "summary": "auto",
     }))
+}
+
+/// Drops read/explore tools from a tools payload while the no-progress guard
+/// is escalated, so the model cannot keep exploring and must edit, run a
+/// command, or answer. Handles both tool shapes: chat-completions entries
+/// (`function.name`) and flattened responses entries (top-level `name`).
+fn retain_non_read_tools(tools: &mut Vec<Value>) {
+    tools.retain(|tool| {
+        let name = tool
+            .get("function")
+            .and_then(|function| function.get("name"))
+            .and_then(Value::as_str)
+            .or_else(|| tool.get("name").and_then(Value::as_str))
+            .unwrap_or_default();
+        !NoProgressGuard::BLOCKABLE_READ_TOOLS.contains(&name)
+    });
 }
 
 fn responses_tools_schema(allow_writes: bool) -> Value {
@@ -2648,6 +2978,25 @@ fn emit_trace_step(app: &AppHandle, stream_id: Option<&str>, step: &ChatTraceSte
         step.detail.clone(),
         None,
     );
+}
+
+/// Surfaces an internal instruction that the loop injects into the model
+/// messages (system prompt, phase/validation/recovery/nudge instructions) as a
+/// trace step, so the user can watch exactly what the agent was told.
+fn emit_instruction_step(
+    app: &AppHandle,
+    stream_id: Option<&str>,
+    trace_steps: &mut Vec<ChatTraceStep>,
+    label: &str,
+    instruction: &str,
+) {
+    let step = ChatTraceStep {
+        kind: "instruction".to_string(),
+        text: format!("Internal instruction injected: {label}"),
+        detail: Some(instruction.to_string()),
+    };
+    emit_trace_step(app, stream_id, &step);
+    TraceCtx::append_steps(trace_steps, vec![step]);
 }
 
 fn emit_tool_chunk(app: &AppHandle, stream_id: Option<&str>, step: &ChatTraceStep) {
@@ -3518,6 +3867,41 @@ mod tests {
     }
 
     #[test]
+    fn backfills_missing_reasoning_content_on_tool_call_messages() {
+        let mut messages = vec![
+            json!({ "role": "user", "content": "hi" }),
+            json!({
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    { "id": "call_1", "type": "function", "function": { "name": "read_file", "arguments": "{}" } }
+                ],
+            }),
+            json!({
+                "role": "assistant",
+                "content": "",
+                "reasoning_content": "kept",
+                "tool_calls": [
+                    { "id": "call_2", "type": "function", "function": { "name": "write_file", "arguments": "{}" } }
+                ],
+            }),
+            json!({ "role": "tool", "tool_call_id": "call_1", "content": "ok" }),
+        ];
+
+        backfill_deepseek_reasoning(&mut messages);
+
+        // A tool-calling assistant message without reasoning gets a placeholder…
+        assert!(messages[1]["reasoning_content"]
+            .as_str()
+            .is_some_and(|value| !value.is_empty()));
+        // …existing reasoning is preserved…
+        assert_eq!(messages[2]["reasoning_content"], json!("kept"));
+        // …and non-assistant messages stay untouched.
+        assert!(messages[0].get("reasoning_content").is_none());
+        assert!(messages[3].get("reasoning_content").is_none());
+    }
+
+    #[test]
     fn failed_edit_tool_result_requests_recovery() {
         let tool_call = json!({
             "function": {
@@ -4307,6 +4691,7 @@ pub fn run() {
             save_app_cache,
             copy_avatar_to_cache,
             load_ccswitch_openai_config,
+            probe_model_provider,
             chat_completion,
             cancel_chat_completion,
             finish_chat_completion,

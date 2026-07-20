@@ -32,11 +32,16 @@ pub(crate) struct AgentTurnState {
     reflection_pending: bool,
     tools_executed: bool,
     unresolved_reflections: usize,
+    total_undecided_reflections: usize,
 }
 
 impl AgentTurnState {
     pub(crate) const DEEPSEEK_REFLECTION_MAX_TOKENS: usize = 768;
     pub(crate) const MAX_UNRESOLVED_REFLECTIONS: usize = 2;
+    /// Backstop across the whole generation: tool executions reset the
+    /// consecutive counter, so a model that alternates tool calls with
+    /// undecided reflections would otherwise never be forced to wrap up.
+    pub(crate) const MAX_TOTAL_UNRESOLVED_REFLECTIONS: usize = 4;
     const REFLECTION_CONTROL_SCAN_LINES: usize = 8;
     pub(crate) const DEEPSEEK_REFLECTION_INSTRUCTION: &'static str = "Reflection step after a tool result. Do not call tools on this turn. Decide whether the user's task is complete. Start the reply with exactly one control line, then concise content: `FINAL` then the user-facing final answer when the task is complete and validated, or `CONTINUE` then the single best next tool action when more work is needed. Do not write patches or tool arguments in this reflection.";
 
@@ -52,6 +57,7 @@ impl AgentTurnState {
             reflection_pending: false,
             tools_executed: false,
             unresolved_reflections: 0,
+            total_undecided_reflections: 0,
         }
     }
 
@@ -109,11 +115,16 @@ impl AgentTurnState {
     }
 
     /// Counts a reflection that ended without a FINAL decision. Returns true
-    /// once the unresolved streak hits the limit, so the caller can ask for a
-    /// direct final answer instead of letting the action/reflection loop spin.
+    /// once the consecutive streak hits the limit OR the generation-wide
+    /// total hits the backstop, so the caller can ask for a direct final
+    /// answer instead of letting the action/reflection loop spin. The total
+    /// is not reset by tool executions: a model that alternates pointless
+    /// tool calls with undecided reflections is still forced to wrap up.
     pub(crate) fn record_unresolved_reflection(&mut self) -> bool {
         self.unresolved_reflections += 1;
+        self.total_undecided_reflections += 1;
         self.unresolved_reflections >= Self::MAX_UNRESOLVED_REFLECTIONS
+            || self.total_undecided_reflections >= Self::MAX_TOTAL_UNRESOLVED_REFLECTIONS
     }
 
     pub(crate) fn thinking_enabled(&self, _phase: AgentTurnPhase) -> bool {
@@ -144,12 +155,12 @@ impl AgentTurnState {
         repair_required: bool,
         orchestration_required: bool,
     ) -> Option<Value> {
-        // DeepSeek thinking mode rejects tool_choice: "required" under any condition.
-        // Return None so no tool_choice is sent; the model defaults to whatever it
-        // prefers (including DSML tool calls in content). The phase instruction
-        // (DEEPSEEK_TOOL_ACTION_INSTRUCTION / VALIDATION_REQUIRED_INSTRUCTION /
-        // EDIT_FAILURE_RECOVERY_INSTRUCTION) guides the model to call the appropriate tool.
-        if self.is_deepseek && self.deepseek_tool_workflow && self.thinking_enabled(phase) {
+        // DeepSeek thinking mode rejects tool_choice "required" outright, and
+        // "auto" is the API default anyway — omit the field entirely whenever
+        // thinking is enabled, regardless of the retired reflection/action
+        // workflow. The injected phase/validation/recovery instructions guide
+        // the model to the right tool instead of the API-level constraint.
+        if self.is_deepseek && self.thinking_enabled(phase) {
             return None;
         }
 
@@ -307,6 +318,21 @@ mod tests {
 
         state.mark_tools_executed();
         assert!(!state.record_unresolved_reflection());
+    }
+
+    #[test]
+    fn total_undecided_reflections_backstop_survives_tool_resets() {
+        let mut state = AgentTurnState::new(true, true, true);
+
+        // Each tool execution resets the consecutive counter, so alternating
+        // tool calls with undecided reflections never hits the streak limit…
+        for _ in 0..3 {
+            assert!(!state.record_unresolved_reflection());
+            state.mark_tools_executed();
+        }
+
+        // …but the generation-wide backstop still forces a wrap-up.
+        assert!(state.record_unresolved_reflection());
     }
 
     #[test]

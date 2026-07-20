@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Pencil, Plus, Trash2 } from "@lucide/vue";
+import { computed, nextTick, ref, watch } from "vue";
+import { Pencil, Plus, Trash2, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import { chooseLocalAvatar, getAvatarSrc } from "../utils/avatar";
 import { getReadableTextColor } from "../utils/colorContrast";
@@ -31,11 +31,6 @@ const activeMemberCardId = ref("");
 const editingMemberCardId = ref("");
 const memberNameDrafts = ref<Record<string, string>>({});
 const { t } = useI18n();
-let memberCardCloseTimer: number | undefined;
-let memberCardWatchTimer: number | undefined;
-let lastPointerPosition: { x: number; y: number } | null = null;
-const memberCardHideDelayMs = 140;
-const memberCardWatchIntervalMs = 360;
 
 const deepSeekProviderIdSet = computed(
   () => new Set(props.deepSeekProviderIds ?? ["deepseek"]),
@@ -56,23 +51,12 @@ function getInitial(name: string) {
 }
 
 function showMemberCard(memberId: string) {
-  if (memberCardCloseTimer) {
-    window.clearTimeout(memberCardCloseTimer);
-    memberCardCloseTimer = undefined;
-  }
-
   activeMemberCardId.value = memberId;
-  startMemberCardWatchdog();
 }
 
 function hideMemberCard(memberId = activeMemberCardId.value, force = false) {
   if (!memberId || (!force && editingMemberCardId.value === memberId)) {
     return;
-  }
-
-  if (memberCardCloseTimer) {
-    window.clearTimeout(memberCardCloseTimer);
-    memberCardCloseTimer = undefined;
   }
 
   if (activeMemberCardId.value === memberId) {
@@ -82,90 +66,6 @@ function hideMemberCard(memberId = activeMemberCardId.value, force = false) {
   if (editingMemberCardId.value === memberId) {
     editingMemberCardId.value = "";
   }
-
-  hideActiveMemberCardIfPointerAway();
-}
-
-function isInsideActiveMemberCardTarget(target: EventTarget | null) {
-  const activeId = activeMemberCardId.value;
-
-  if (!activeId || !(target instanceof Element)) {
-    return false;
-  }
-
-  const card = target.closest<HTMLElement>("[data-member-card-id]");
-  const popover = target.closest<HTMLElement>("[data-member-popover-id]");
-
-  return card?.dataset.memberCardId === activeId || popover?.dataset.memberPopoverId === activeId;
-}
-
-function isPointerInsideActiveMemberCard() {
-  if (!lastPointerPosition) {
-    return false;
-  }
-
-  return isInsideActiveMemberCardTarget(
-    document.elementFromPoint(lastPointerPosition.x, lastPointerPosition.y),
-  );
-}
-
-function hideActiveMemberCardIfPointerAway() {
-  const activeId = activeMemberCardId.value;
-
-  if (
-    !activeId ||
-    editingMemberCardId.value === activeId ||
-    isPointerInsideActiveMemberCard() ||
-    isInsideActiveMemberCardTarget(document.activeElement)
-  ) {
-    return;
-  }
-
-  scheduleHideMemberCard(activeId);
-}
-
-function startMemberCardWatchdog() {
-  if (memberCardWatchTimer) {
-    return;
-  }
-
-  memberCardWatchTimer = window.setInterval(
-    hideActiveMemberCardIfPointerAway,
-    memberCardWatchIntervalMs,
-  );
-}
-
-function stopMemberCardWatchdog() {
-  if (memberCardWatchTimer) {
-    window.clearInterval(memberCardWatchTimer);
-    memberCardWatchTimer = undefined;
-  }
-}
-
-function scheduleHideMemberCard(memberId: string) {
-  if (editingMemberCardId.value === memberId) {
-    return;
-  }
-
-  // Never postpone a pending hide: while messages stream, scroll events and
-  // the watchdog re-arm this timer many times per second, starving it and
-  // pinning the card open for the whole stream.
-  if (memberCardCloseTimer) {
-    return;
-  }
-
-  memberCardCloseTimer = window.setTimeout(() => {
-    memberCardCloseTimer = undefined;
-
-    if (
-      activeMemberCardId.value === memberId &&
-      editingMemberCardId.value !== memberId &&
-      !isPointerInsideActiveMemberCard() &&
-      !isInsideActiveMemberCardTarget(document.activeElement)
-    ) {
-      hideMemberCard(memberId);
-    }
-  }, memberCardHideDelayMs);
 }
 
 function startMemberCardEdit(memberId: string) {
@@ -262,29 +162,6 @@ async function assignOwnerAvatar() {
   }
 }
 
-function handleGlobalPointerMove(event: PointerEvent) {
-  lastPointerPosition = {
-    x: event.clientX,
-    y: event.clientY,
-  };
-
-  if (activeMemberCardId.value && !isInsideActiveMemberCardTarget(event.target)) {
-    hideActiveMemberCardIfPointerAway();
-  }
-}
-
-function handleGlobalPointerLeave() {
-  if (!isInsideActiveMemberCardTarget(document.activeElement)) {
-    hideMemberCard(activeMemberCardId.value, true);
-  }
-}
-
-function handleGlobalVisibilityChange() {
-  if (document.hidden) {
-    hideMemberCard(activeMemberCardId.value, true);
-  }
-}
-
 watch(
   () => props.members.map((member) => member.id).join("|"),
   () => {
@@ -294,36 +171,6 @@ watch(
   },
 );
 
-watch(activeMemberCardId, (memberId) => {
-  if (memberId) {
-    startMemberCardWatchdog();
-    return;
-  }
-
-  stopMemberCardWatchdog();
-});
-
-onMounted(() => {
-  window.addEventListener("pointermove", handleGlobalPointerMove, true);
-  window.addEventListener("pointerleave", handleGlobalPointerLeave);
-  window.addEventListener("blur", handleGlobalPointerLeave);
-  window.addEventListener("scroll", hideActiveMemberCardIfPointerAway, true);
-  document.addEventListener("visibilitychange", handleGlobalVisibilityChange);
-});
-
-onBeforeUnmount(() => {
-  if (memberCardCloseTimer) {
-    window.clearTimeout(memberCardCloseTimer);
-    memberCardCloseTimer = undefined;
-  }
-
-  stopMemberCardWatchdog();
-  window.removeEventListener("pointermove", handleGlobalPointerMove, true);
-  window.removeEventListener("pointerleave", handleGlobalPointerLeave);
-  window.removeEventListener("blur", handleGlobalPointerLeave);
-  window.removeEventListener("scroll", hideActiveMemberCardIfPointerAway, true);
-  document.removeEventListener("visibilitychange", handleGlobalVisibilityChange);
-});
 </script>
 
 <template>
@@ -429,12 +276,9 @@ onBeforeUnmount(() => {
             :aria-expanded="activeMemberCardId === member.id"
             :aria-label="t('members.openProfile', { name: member.name })"
             @click="showMemberCard(member.id)"
-            @focus="showMemberCard(member.id)"
             @keydown.enter.prevent="openMemberCardFromKeyboard(member.id)"
             @keydown.space.prevent="openMemberCardFromKeyboard(member.id)"
             @keydown.esc.stop="hideMemberCard(member.id, true)"
-            @mouseenter="showMemberCard(member.id)"
-            @mouseleave="scheduleHideMemberCard(member.id)"
           >
             <span class="member-avatar-shell">
               <span
@@ -467,9 +311,16 @@ onBeforeUnmount(() => {
           role="dialog"
           :aria-label="t('members.profileTitle', { name: member.name })"
           @keydown.esc.stop.prevent="closeMemberCardAndRestoreFocus(member.id)"
-          @mouseenter="showMemberCard(member.id)"
-          @mouseleave="scheduleHideMemberCard(member.id)"
         >
+          <button
+            class="member-card-close"
+            type="button"
+            :title="t('members.closeCard')"
+            :aria-label="t('members.closeCard')"
+            @click.stop="closeMemberCardAndRestoreFocus(member.id)"
+          >
+            <X aria-hidden="true" />
+          </button>
           <div class="profile-head">
             <span
               class="profile-avatar"
@@ -962,6 +813,7 @@ onBeforeUnmount(() => {
 }
 
 .member-profile-card {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -972,6 +824,57 @@ onBeforeUnmount(() => {
   overscroll-behavior: contain;
   padding: 14px;
   scrollbar-gutter: stable;
+}
+
+.member-card-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  color: #ffffff;
+  background: var(--danger);
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    transform 0.15s ease;
+}
+
+.member-card-close:hover {
+  background: color-mix(in srgb, var(--danger) 85%, #000000);
+  transform: scale(1.08);
+}
+
+.member-card-close:active {
+  transform: scale(0.96);
+}
+
+.member-card-close:focus-visible {
+  outline: 2px solid var(--danger);
+  outline-offset: 2px;
+}
+
+.member-card-close svg {
+  width: 12px;
+  height: 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .member-card-close {
+    transition: none;
+  }
+
+  .member-card-close:hover,
+  .member-card-close:active {
+    transform: none;
+  }
 }
 
 .profile-head {

@@ -206,7 +206,9 @@ pub(crate) fn run_codegraph_explore(
             None
         };
 
-    Ok(StrUtils::truncate_text(
+    Ok(crate::utils::spill::spill_tool_output(
+        workspace,
+        "codegraph-explore",
         format_codegraph_explore_output(&stdout, status_output.as_deref()),
         18_000,
     ))
@@ -403,7 +405,9 @@ pub(crate) fn execute_codegraph_command_tool(
         ));
     }
 
-    Ok(StrUtils::truncate_text(
+    Ok(crate::utils::spill::spill_tool_output(
+        workspace,
+        "codegraph-command",
         format!("CodeGraph {} result:\n{}", command, detail),
         20_000,
     ))
@@ -500,12 +504,17 @@ pub(crate) fn read_local_code_context(workspace: &Path, query: &str) -> Result<S
             sections.push(format!(
                 "\n--- {} ---\n{}",
                 file,
-                StrUtils::truncate_text(content, 4_000)
+                StrUtils::ellipsis_text(content, 4_000)
             ));
         }
     }
 
-    Ok(StrUtils::truncate_text(sections.join("\n"), 18_000))
+    Ok(crate::utils::spill::spill_tool_output(
+        workspace,
+        "codegraph-context",
+        sections.join("\n"),
+        18_000,
+    ))
 }
 
 #[tauri::command]

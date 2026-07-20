@@ -10,6 +10,7 @@ import {
   FolderOpen as FolderOpened,
   MessagesSquare,
   RotateCcw as RefreshLeft,
+  ScrollText,
   Send as Promotion,
   Wifi,
   Wrench as Tools,
@@ -112,7 +113,7 @@ const failedMentionAvatars = ref<Set<string>>(new Set());
 const mentionActiveIndex = ref(0);
 const mentionDismissed = ref(false);
 const stickToBottom = ref(true);
-const planPanelOpen = ref(true);
+const planPanelOpen = ref(false);
 const latestPlan = computed(() => props.plans[props.plans.length - 1]);
 const latestPlanStatusTagType = computed(() => {
   switch (latestPlan.value?.status) {
@@ -485,6 +486,8 @@ watch(
 );
 
 onMounted(() => {
+  window.addEventListener("pointerdown", handlePlanDockPointerDown, true);
+
   if (typeof ResizeObserver === "undefined") {
     return;
   }
@@ -503,6 +506,8 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  window.removeEventListener("pointerdown", handlePlanDockPointerDown, true);
+
   if (pendingScrollFrame) {
     window.cancelAnimationFrame(pendingScrollFrame);
     pendingScrollFrame = 0;
@@ -511,6 +516,18 @@ onBeforeUnmount(() => {
   layoutResizeObserver?.disconnect();
   layoutResizeObserver = null;
 });
+
+function handlePlanDockPointerDown(event: PointerEvent) {
+  if (!planPanelOpen.value) {
+    return;
+  }
+
+  const target = event.target;
+
+  if (target instanceof Element && !target.closest(".plan-dock")) {
+    planPanelOpen.value = false;
+  }
+}
 
 async function chooseWorkspacePath() {
   const selected = await open({
@@ -974,6 +991,10 @@ function getExecutionIcon(item: ChatMessageExecutionItem) {
     return Wifi;
   }
 
+  if (item.kind === "instruction") {
+    return ScrollText;
+  }
+
   return item.kind === "tool" ? Tools : RefreshLeft;
 }
 
@@ -1244,8 +1265,6 @@ function formatExecutionItemForCopy(item: ChatMessageExecutionItem, index: numbe
 
 function getMessageCopyText(message: ChatMessage) {
   const sections = [`# ${message.modelName}`];
-  const visibleContent =
-    message.role === "assistant" ? sanitizeAssistantMessageContent(message.content) : message.content.trim();
   const meta = [
     props.statusText[message.status],
     getMessageApiModel(message),
@@ -1256,18 +1275,30 @@ function getMessageCopyText(message: ChatMessage) {
     sections.push(meta.join(" · "));
   }
 
-  if (visibleContent) {
-    sections.push(`## ${t("chat.copy.generatedText")}\n${visibleContent}`);
-  }
+  // Emit the record in chronological order: content output and thinking/tool
+  // blocks interleaved exactly as they happened, instead of one big
+  // generated-text block followed by one big execution dump.
+  let executionIndex = 0;
 
-  const executionItems = getExecutionItems(message);
+  for (const entry of getMessageTimeline(message)) {
+    if (entry.content) {
+      const text = entry.content.text.trim();
 
-  if (executionItems.length > 0) {
-    sections.push(
-      `## ${t("chat.execution.title")}\n${executionItems
-        .map((item, index) => formatExecutionItemForCopy(item, index))
-        .join("\n\n")}`,
-    );
+      if (text) {
+        sections.push(`## ${t("chat.copy.generatedText")}\n${text}`);
+      }
+      continue;
+    }
+
+    if (entry.execution) {
+      const items = entry.execution.items
+        .map((item) => formatExecutionItemForCopy(item, executionIndex++))
+        .join("\n\n");
+
+      if (items) {
+        sections.push(`## ${t("chat.execution.title")}\n${items}`);
+      }
+    }
   }
 
   return sections.join("\n\n");

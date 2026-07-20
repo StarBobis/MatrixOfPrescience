@@ -11,7 +11,6 @@ use crate::tools::execution::{
     resolve_workspace_relative_path, tool_arg_bool, validate_relative_file, validate_workspace,
     ApplyPatchRequest, ApplyPatchResponse,
 };
-use crate::utils::string_utils::StrUtils;
 
 fn write_temp_patch(patch_text: &str) -> Result<PathBuf, String> {
     let stamp = SystemTime::now()
@@ -495,7 +494,7 @@ pub(crate) fn apply_patch_tool(workspace: &Path, arguments: &Value) -> Result<St
         if output.is_empty() {
             "git apply produced no output.".to_string()
         } else {
-            StrUtils::truncate_text(output, 8_000)
+            crate::utils::spill::spill_tool_output(workspace, "apply-patch", output, 8_000)
         }
     ))
 }
