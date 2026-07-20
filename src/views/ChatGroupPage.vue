@@ -2439,6 +2439,15 @@ async function voteOnAnswer(
     });
 
     const vote = parseMemberVote(response.content);
+
+    if (vote === "agree") {
+      // Agree votes are lightweight: they surface as voter chips under the
+      // target message instead of a standalone timeline message.
+      releasePendingMessage(pendingId, startedAt);
+      settingsStore.removeMessage(pendingId);
+      return vote;
+    }
+
     const finalContent = getVoteFinalContent(vote, answer.member.name);
     const savedReasoning = streamingReasoning.get(pendingId)?.trim();
     settingsStore.updateMessage(pendingId, {

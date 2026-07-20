@@ -183,6 +183,7 @@
   },
   "chat": {
     "agree": "Agree {count}",
+    "agreeVoterTitle": "{name} agreed with this message",
     "chooseWorkspaceTitle": "Choose workspace folder",
     "composerLabel": "Message",
     "composerPlaceholder": "Type a message. Enter to send, Shift + Enter for a new line",

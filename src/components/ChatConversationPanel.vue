@@ -660,6 +660,16 @@ function getAgreeLabel(message: ChatMessage) {
   return t("chat.agree", { count: (message.agreeMemberIds ?? []).length });
 }
 
+function getAgreeVoters(message: ChatMessage): AgentModel[] {
+  const members = props.activeGroup?.members ?? props.activeMembers;
+  const seen = new Set<string>();
+
+  return (message.agreeMemberIds ?? [])
+    .filter((id) => !seen.has(id) && seen.add(id))
+    .map((id) => members.find((member) => member.id === id))
+    .filter((member): member is AgentModel => Boolean(member));
+}
+
 function getExecutionItems(message: ChatMessage): ChatMessageExecutionItem[] {
   const executionItems = message.executionItems ?? [];
 
@@ -1687,6 +1697,27 @@ defineExpose({
             </span>
             <span v-if="formatDuration(message.durationMs)" class="message-duration-badge">
               {{ t("chat.messageMeta.duration", { duration: formatDuration(message.durationMs) }) }}
+            </span>
+          </div>
+
+          <div v-if="getAgreeVoters(message).length > 0" class="reaction-voters">
+            <span
+              v-for="voter in getAgreeVoters(message)"
+              :key="voter.id"
+              class="reaction-voter"
+              :title="t('chat.agreeVoterTitle', { name: voter.name })"
+            >
+              <span
+                class="reaction-voter-avatar"
+                :style="{
+                  background: voter.color,
+                  color: getReadableTextColor(voter.color),
+                }"
+              >
+                <img v-if="voter.avatar" :src="getAvatarSrc(voter.avatar)" alt="" />
+                <span v-else>{{ getInitial(voter.name) }}</span>
+              </span>
+              <span class="reaction-voter-name">{{ voter.name }}</span>
             </span>
           </div>
         </article>

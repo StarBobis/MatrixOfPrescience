@@ -183,6 +183,7 @@
   },
   "chat": {
     "agree": "同意 {count}",
+    "agreeVoterTitle": "{name} 同意了这条发言",
     "chooseWorkspaceTitle": "选择工作文件夹",
     "composerLabel": "消息",
     "composerPlaceholder": "输入消息，Enter 发送，Shift + Enter 换行",

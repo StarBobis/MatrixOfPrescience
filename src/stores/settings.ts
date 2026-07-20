@@ -1333,6 +1333,12 @@ export const useSettingsStore = defineStore("settings", {
       }
     },
 
+    removeMessage(messageId: string) {
+      const group = this.activeGroup;
+      group.messages = group.messages.filter((item) => item.id !== messageId);
+      group.updatedAt = new Date().toISOString();
+    },
+
     clearActiveGroupMessages() {
       this.activeGroup.messages = [];
       this.activeGroup.updatedAt = new Date().toISOString();
