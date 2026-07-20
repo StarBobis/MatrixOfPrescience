@@ -202,6 +202,7 @@ const FINAL_ANSWER_INSTRUCTION: &str =
 const CONTINUE_OUTPUT_INSTRUCTION: &str =
     "Continue exactly from where you left off. Do not restart, repeat, or summarize prior text. Finish the same answer.";
 const EDIT_FAILURE_RECOVERY_INSTRUCTION: &str = "The previous edit tool call failed. Do not stop or provide a final answer solely because an edit did not apply. Recover using the error and the current workspace state: re-read the target when the context may be stale, then retry with a corrected smaller patch or a different available edit tool. Do not repeat the identical failing call. Continue until the requested change is complete or no available tool can resolve a genuine blocker.";
+const FOLLOW_THROUGH_INSTRUCTION: &str = "Your last reply announced more work (\"let me …\", \"让我…\", \"待确认…\") but no tool was called. Follow through now: call the tools needed to finish the work, or — if the task is genuinely complete or blocked — state that plainly without promising further action.";
 const MAX_TOOL_ONLY_ROUNDS: usize = 6;
 const MAX_UNPRODUCTIVE_TURNS: usize = 3;
 const MAX_TOTAL_TOOL_CALLS_PER_AUTONOMOUS_ROUND: usize = 24;
@@ -1628,6 +1629,30 @@ async fn chat_completion(
                 });
             }
 
+            // The model announced more work ("让我继续…", "Let me …", "待确认: …")
+            // but called no tools. Accepting that as the final answer cuts the
+            // task off mid-intent: push it to follow through (bounded by the
+            // same stall counter, so it cannot loop forever).
+            if content_signals_continuation_intent(&content)
+                && unproductive_turns + 1 < MAX_UNPRODUCTIVE_TURNS
+            {
+                unproductive_turns += 1;
+                emit_instruction_step(
+                    &app,
+                    stream_id.as_deref(),
+                    &mut trace_steps,
+                    "follow-through",
+                    FOLLOW_THROUGH_INSTRUCTION,
+                );
+                messages.push(message.clone());
+                messages.push(json!({
+                    "role": "user",
+                    "content": FOLLOW_THROUGH_INSTRUCTION,
+                }));
+                final_answer_requested = true;
+                continue;
+            }
+
             return Ok(ChatCompletionResponse {
                 content: combined_output_text(&accumulated_display_content, &content),
                 trace_steps,
@@ -2190,6 +2215,68 @@ async fn openai_responses_completion(
         "{} returned no displayable content from Responses API.",
         request.provider_name
     ))
+}
+
+/// Detects replies that end by announcing more work ("让我把分析讲完…",
+/// "Let me check…", "待确认: …") instead of doing it. Accepting those as the
+/// final answer cuts the task off mid-intent, so the loop treats them as
+/// unfinished and pushes the model to follow through.
+fn content_signals_continuation_intent(content: &str) -> bool {
+    let tail: String = content
+        .trim_end()
+        .chars()
+        .rev()
+        .take(240)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+
+    const ZH_PENDING_MARKERS: &[&str] = &["待确认", "待办", "待完成", "待处理"];
+    if ZH_PENDING_MARKERS
+        .iter()
+        .any(|marker| tail.contains(marker))
+    {
+        return true;
+    }
+
+    let Some(last_sentence) = tail
+        .split(|ch| matches!(ch, '。' | '！' | '？' | '.' | '!' | '?' | '\n'))
+        .map(str::trim)
+        .filter(|sentence| !sentence.is_empty())
+        .last()
+    else {
+        return false;
+    };
+
+    const ZH_INTENT_MARKERS: &[&str] = &[
+        "让我", "我先", "我继续", "我接下来", "接下来我", "下面我", "我现在", "我马上", "我这就",
+    ];
+    const EN_INTENT_MARKERS: &[&str] = &[
+        "let me ",
+        "i'll ",
+        "i will ",
+        "now i'll",
+        "next i'll",
+        "next i will",
+    ];
+
+    last_sentence
+        .split(|ch| matches!(ch, '，' | '—' | ',' | ';' | '；' | '：' | ':'))
+        .map(|clause| {
+            clause
+                .trim()
+                .trim_start_matches(['"', '“', '「', '*', '`', '#', '>', '-', ' '])
+        })
+        .filter(|clause| !clause.is_empty())
+        .any(|clause| {
+            ZH_INTENT_MARKERS
+                .iter()
+                .any(|marker| clause.starts_with(marker))
+                || EN_INTENT_MARKERS
+                    .iter()
+                    .any(|marker| clause.to_ascii_lowercase().starts_with(marker))
+        })
 }
 
 fn is_deepseek_provider(provider_name: &str, base_url: &str) -> bool {
@@ -3899,6 +3986,28 @@ mod tests {
         // …and non-assistant messages stay untouched.
         assert!(messages[0].get("reasoning_content").is_none());
         assert!(messages[3].get("reasoning_content").is_none());
+    }
+
+    #[test]
+    fn detects_continuation_intent_in_final_replies() {
+        // Announced intent at the end counts as unfinished…
+        assert!(content_signals_continuation_intent(
+            "对，日志确实不可用。但我看了源码后发现了关键差异——让我把完整分析讲完，然后给出可执行的计划。"
+        ));
+        assert!(content_signals_continuation_intent(
+            "Let me quickly check the files."
+        ));
+        assert!(content_signals_continuation_intent(
+            "## 最终结论\n分析如上。\n\n**待确认**：\n1. 添加 slot index 日志\n2. 对比参数"
+        ));
+        // …plain conclusions and mid-sentence mentions do not.
+        assert!(!content_signals_continuation_intent(
+            "已完成全部修复，所有测试通过。"
+        ));
+        assert!(!content_signals_continuation_intent(
+            "任务已完成：他让我帮忙的部分也做完了。"
+        ));
+        assert!(!content_signals_continuation_intent(""));
     }
 
     #[test]

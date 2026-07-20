@@ -1355,6 +1355,17 @@ function createActivityItem(
   };
 }
 
+// Monotonic insertion order for message activity (content segments and
+// execution items). The timeline sorts by this, never by Date.now(): items
+// flushed within the same millisecond would otherwise tie and scramble the
+// chronological order back into "content first, reasoning after".
+let activitySeq = 0;
+
+function nextActivitySeq() {
+  activitySeq += 1;
+  return activitySeq;
+}
+
 function createExecutionItem(
   kind: ChatMessageExecutionKind,
   text: string,
@@ -1370,6 +1381,7 @@ function createExecutionItem(
     text: limitRuntimeText(text, MAX_TRACE_TEXT_CHARS),
     detail: detail.trim() ? limitRuntimeText(detail.trim(), traceDetailLimit(text)) : undefined,
     createdAt: Date.now(),
+    seq: nextActivitySeq(),
   };
 }
 
@@ -1449,6 +1461,7 @@ function appendContentSegment(
     text: chunk,
     createdAt: timestamp,
     updatedAt: timestamp,
+    seq: nextActivitySeq(),
   });
   return nextSegments;
 }
@@ -1477,6 +1490,7 @@ function getFinalContentSegments(messageId: string, content: string) {
       text: content,
       createdAt: timestamp,
       updatedAt: timestamp,
+      seq: nextActivitySeq(),
     },
   ];
 }

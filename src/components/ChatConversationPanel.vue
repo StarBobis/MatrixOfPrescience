@@ -64,12 +64,16 @@ interface ExecutionRenderSegment {
   blocks: ExecutionRenderBlock[];
   startedAt?: number;
   endedAt?: number;
+  /** Insertion order of the segment's first item, when known. */
+  startedSeq?: number;
 }
 
 interface MessageTimelineEntry {
   id: string;
   order: number;
   timestamp?: number;
+  /** Monotonic insertion order; preferred over timestamp when present. */
+  seq?: number;
   content?: ChatMessageContentSegment;
   execution?: ExecutionRenderSegment;
 }
@@ -866,6 +870,9 @@ function getExecutionSegments(message: ChatMessage): ExecutionRenderSegment[] {
         blocks: buildExecutionBlocks(draft.items),
         startedAt: timestamps[0],
         endedAt: timestamps[timestamps.length - 1],
+        startedSeq: draft.items
+          .map((item) => item.seq)
+          .find((seq): seq is number => typeof seq === "number"),
       };
     })
     .filter((segment) => segment.blocks.length > 0);
@@ -905,16 +912,33 @@ function getMessageTimeline(message: ChatMessage): MessageTimelineEntry[] {
     id: content.id,
     order: index * 2,
     timestamp: content.createdAt,
+    seq: content.seq,
     content,
   }));
   const executionEntries: MessageTimelineEntry[] = getExecutionSegments(message).map((execution, index) => ({
     id: execution.id,
     order: index * 2 + 1,
     timestamp: execution.startedAt,
+    seq: execution.startedSeq,
     execution,
   }));
 
   return [...contentEntries, ...executionEntries].sort((left, right) => {
+    // Monotonic insertion order is the source of truth: timestamp ties (items
+    // flushed within the same millisecond) used to scramble the record back
+    // into "content first, reasoning after".
+    if (left.seq !== undefined && right.seq !== undefined && left.seq !== right.seq) {
+      return left.seq - right.seq;
+    }
+
+    if (left.seq !== undefined && right.seq === undefined) {
+      return -1;
+    }
+
+    if (left.seq === undefined && right.seq !== undefined) {
+      return 1;
+    }
+
     if (left.timestamp !== undefined && right.timestamp !== undefined && left.timestamp !== right.timestamp) {
       return left.timestamp - right.timestamp;
     }

@@ -75,6 +75,8 @@ export interface ChatMessageContentSegment {
   text: string;
   createdAt?: number;
   updatedAt?: number;
+  /** Monotonic insertion order across content segments and execution items. */
+  seq?: number;
 }
 
 export interface ChatMessageExecutionItem {
@@ -85,6 +87,8 @@ export interface ChatMessageExecutionItem {
   text: string;
   detail?: string;
   createdAt?: number;
+  /** Monotonic insertion order across content segments and execution items. */
+  seq?: number;
 }
 
 export interface ChatMessage {
