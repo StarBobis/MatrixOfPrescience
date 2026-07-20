@@ -378,6 +378,26 @@
     "secretPath": "补丁可能触及敏感文件或密钥：{file}",
     "strictBlocks": "Strict 安全模型要求中高风险补丁先阻止自动批准。"
   },
+  "plan": {
+    "convergenceLimit": "方案修订达到上限，已保留最新版本，请人工确认后再执行。",
+    "defaultTitle": "讨论方案",
+    "done": "已完成 · {name}",
+    "execute": "执行",
+    "executing": "正在执行：{name}",
+    "noWritableMembers": "暂无拥有写权限的群友",
+    "proposedMessage": "{name} 提出了方案《{title}》，开始全员投票。",
+    "status": {
+      "approved": "已批准",
+      "done": "已完成",
+      "executing": "执行中",
+      "voting": "投票中"
+    },
+    "voterAgree": "{name} 同意该方案",
+    "voterAuthor": "{name} 是本版作者",
+    "voterPending": "等待 {name} 投票",
+    "voterRevise": "{name} 要求修改",
+    "votesCaption": "本轮投票"
+  },
   "agentPrompt": {
     "collaborationRule": "群聊协作规则：你能看到用户和其它群友已经发出的消息。不要只各说各话；需要回应、补充、质疑或修正其它群友观点时，请明确指出。若你的专业分工暂时不该发言，可以等待其它群友先说。",
     "codeContextGuide": "你可以基于以下工具输出讨论代码。优先用 CodeGraph 理解结构和调用链；需要定向图查询或维护索引时使用 codegraph_command，缺少精确局部细节时再用 read_file、search_files、list_files 或 glob_files 补充。代码编辑和 CodeGraph 索引更新只能在当前工作区内且安全模式允许时执行。若结果来自 LocalCommands，需要说明这是降级读取。CodeGraph 输出中的 `Found N symbols across M files` 只表示本次查询命中的相关源码范围，不是索引总文件数。",
@@ -452,6 +472,12 @@
     "markdownCodeFenceRule": "当你的最终 Markdown 包含围栏代码块时，必须在开头围栏后写语言类型，例如 ```cpp、```ts、```vue、```rust、```python、```json 或 ```bash。不要输出裸的 ``` 代码围栏。",
     "observerRule": "你刚才处于观望状态。现在被提到的群友已经回答，请判断是否需要补充、反驳或帮助收束共识。",
     "pendingContent": "正在生成回复...",
+    "planExecuteRule": "请执行以下已批准的方案，完成任务并汇报执行结果：\n\n方案《{title}》：\n{content}",
+    "planReviseNoNote": "（未填写具体修改意见）",
+    "planRevisePendingContent": "正在修订方案...",
+    "planReviseRule": "你要求修改群聊方案。\n\n当前方案《{title}》：\n{content}\n\n你的修改意见：{note}\n\n请输出完整的修订版方案，并包在 ```plan 代码围栏中。不要输出方案以外的内容。",
+    "planVotePendingContent": "正在对方案投票...",
+    "planVoteRule": "群聊正在对以下方案投票。\n\n方案《{title}》：\n{content}\n\n如果同意该方案，只回复：AGREE\n如果需要修改，回复一行：REVISE: 你的修改意见（简要说明要改什么）\n不要回复其他内容。",
     "voteAgreeContent": "同意 {name} 的发言。",
     "voteDisagreeContent": "不同意 {name} 的发言。",
     "votePendingContent": "正在判断是否同意 {name} 的发言...",

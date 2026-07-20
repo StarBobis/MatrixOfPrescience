@@ -108,6 +108,31 @@ export interface ChatMessage {
   thoughtSteps?: string[];
   activityItems?: ChatMessageActivityItem[];
   executionItems?: ChatMessageExecutionItem[];
+  /** Protocol noise (vote/decision turns) — visible to the user, hidden from model context. */
+  modelContextHidden?: boolean;
+}
+
+export type GroupPlanStatus = "voting" | "approved" | "executing" | "done";
+
+export interface GroupPlanVersion {
+  id: string;
+  authorId: string;
+  authorName: string;
+  content: string;
+  agreeMemberIds: string[];
+  reviseMemberIds: string[];
+  createdAt: string;
+}
+
+export interface GroupPlan {
+  id: string;
+  title: string;
+  status: GroupPlanStatus;
+  versions: GroupPlanVersion[];
+  executorId?: string;
+  executorName?: string;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface ChatGroup {
@@ -119,6 +144,7 @@ export interface ChatGroup {
   workspacePath: string;
   agentConfig: AgentCollaborationConfig;
   patchProposals: AgentPatchProposal[];
+  plans: GroupPlan[];
   members: AgentModel[];
   messages: ChatMessage[];
   updatedAt: string;
@@ -183,6 +209,9 @@ const COMPACT_MESSAGE_CONTENT_LIMIT = 4000;
 const NORMAL_PATCH_LIMIT = 8;
 const NORMAL_PATCH_TEXT_LIMIT = 20000;
 const COMPACT_PATCH_LIMIT = 3;
+const MAX_PERSISTED_PLANS = 6;
+const MAX_PLAN_VERSIONS = 8;
+const PLAN_CONTENT_LIMIT = 8000;
 const THOUGHT_STEP_LIMIT = 96;
 const THOUGHT_STEP_TEXT_LIMIT = 1200;
 const ACTIVITY_ITEM_LIMIT = 36;
@@ -365,6 +394,7 @@ function normalizeGroup(group: ChatGroup): ChatGroup {
         warnings: [t("patchSafety.legacyWarning")],
       },
     })),
+    plans: (group.plans ?? []).map(normalizeGroupPlan),
     members,
     messages: group.messages.map((message) => ({
       ...message,
@@ -394,6 +424,21 @@ function normalizeGroup(group: ChatGroup): ChatGroup {
       activityItems: message.activityItems ?? [],
       executionItems: message.executionItems ?? [],
       contentSegments: message.contentSegments ?? [],
+    })),
+  };
+}
+
+function normalizeGroupPlan(plan: GroupPlan): GroupPlan {
+  return {
+    ...plan,
+    status:
+      plan.status === "approved" || plan.status === "executing" || plan.status === "done"
+        ? plan.status
+        : "voting",
+    versions: (plan.versions ?? []).map((version) => ({
+      ...version,
+      agreeMemberIds: version.agreeMemberIds ?? [],
+      reviseMemberIds: version.reviseMemberIds ?? [],
     })),
   };
 }
@@ -615,6 +660,16 @@ function toPersistedPatchProposal(
   };
 }
 
+function toPersistedGroupPlan(plan: GroupPlan): GroupPlan {
+  return {
+    ...plan,
+    versions: plan.versions.slice(-MAX_PLAN_VERSIONS).map((version) => ({
+      ...version,
+      content: truncateText(version.content, PLAN_CONTENT_LIMIT),
+    })),
+  };
+}
+
 function createDefaultMembers(): AgentModel[] {
   return [
     createMember(
@@ -642,6 +697,7 @@ function createDefaultGroup(): ChatGroup {
     workspacePath: "",
     agentConfig: structuredClone(defaultAgentConfig),
     patchProposals: [],
+    plans: [],
     members: createDefaultMembers(),
     messages: [
       createSystemMessage(
@@ -784,6 +840,10 @@ export const useSettingsStore = defineStore("settings", {
               : group.patchProposals
                   .slice(0, patchLimit)
                   .map((proposal) => toPersistedPatchProposal(proposal, mode)),
+          plans:
+            mode === "minimal"
+              ? []
+              : (group.plans ?? []).slice(0, MAX_PERSISTED_PLANS).map(toPersistedGroupPlan),
           members: group.members.map((member) => toPlainMember(member)),
           messages:
             mode === "minimal"
@@ -1150,6 +1210,7 @@ export const useSettingsStore = defineStore("settings", {
         workspacePath: "",
         agentConfig: structuredClone(defaultAgentConfig),
         patchProposals: [],
+        plans: [],
         members: uniqueMembers,
         messages: [
           createSystemMessage(
@@ -1337,6 +1398,91 @@ export const useSettingsStore = defineStore("settings", {
       const group = this.activeGroup;
       group.messages = group.messages.filter((item) => item.id !== messageId);
       group.updatedAt = new Date().toISOString();
+    },
+
+    addGroupPlan(
+      title: string,
+      version: { authorId: string; authorName: string; content: string },
+    ): GroupPlan {
+      const group = this.activeGroup;
+      const now = new Date().toISOString();
+      const plan: GroupPlan = {
+        id: crypto.randomUUID(),
+        title: title.trim() || t("plan.defaultTitle"),
+        status: "voting",
+        versions: [
+          {
+            id: crypto.randomUUID(),
+            authorId: version.authorId,
+            authorName: version.authorName,
+            content: version.content,
+            agreeMemberIds: [],
+            reviseMemberIds: [],
+            createdAt: now,
+          },
+        ],
+        createdAt: now,
+        updatedAt: now,
+      };
+
+      group.plans.push(plan);
+      group.updatedAt = now;
+      return plan;
+    },
+
+    addGroupPlanVersion(
+      planId: string,
+      version: { authorId: string; authorName: string; content: string },
+    ) {
+      const plan = this.activeGroup.plans.find((item) => item.id === planId);
+
+      if (!plan) {
+        return null;
+      }
+
+      const planVersion: GroupPlanVersion = {
+        id: crypto.randomUUID(),
+        authorId: version.authorId,
+        authorName: version.authorName,
+        content: version.content,
+        agreeMemberIds: [],
+        reviseMemberIds: [],
+        createdAt: new Date().toISOString(),
+      };
+
+      plan.versions.push(planVersion);
+      plan.updatedAt = planVersion.createdAt;
+      this.activeGroup.updatedAt = plan.updatedAt;
+      return planVersion;
+    },
+
+    updateGroupPlanVersionVotes(
+      planId: string,
+      versionId: string,
+      agreeMemberIds: string[],
+      reviseMemberIds: string[],
+    ) {
+      const plan = this.activeGroup.plans.find((item) => item.id === planId);
+      const version = plan?.versions.find((item) => item.id === versionId);
+
+      if (!plan || !version) {
+        return;
+      }
+
+      version.agreeMemberIds = agreeMemberIds;
+      version.reviseMemberIds = reviseMemberIds;
+      plan.updatedAt = new Date().toISOString();
+      this.activeGroup.updatedAt = plan.updatedAt;
+    },
+
+    updateGroupPlan(planId: string, patch: Partial<GroupPlan>) {
+      const plan = this.activeGroup.plans.find((item) => item.id === planId);
+
+      if (plan) {
+        Object.assign(plan, patch);
+        plan.updatedAt = new Date().toISOString();
+        this.activeGroup.updatedAt = plan.updatedAt;
+      }
     },
 
     clearActiveGroupMessages() {

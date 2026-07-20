@@ -14,6 +14,7 @@ import {
 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import PatchApprovalPanel from "./PatchApprovalPanel.vue";
+import GroupPlanCard from "./GroupPlanCard.vue";
 import { getAvatarSrc } from "../utils/avatar";
 import { getReadableTextColor } from "../utils/colorContrast";
 import { sanitizeAssistantMessageContent } from "../utils/messageTransport";
@@ -77,6 +78,7 @@ const props = defineProps<{
   speakerQueue: SpeakerQueueItem[];
   messages: ChatMessage[];
   patchProposals: ChatGroup["patchProposals"];
+  plans: ChatGroup["plans"];
   composer: string;
   approvalMode: AgentApprovalMode;
   workspacePath: string;
@@ -92,6 +94,7 @@ const emit = defineEmits<{
   "update:workspacePath": [value: string];
   updatePatchStatus: [proposalId: string, status: PatchApprovalStatus];
   removePatchProposal: [proposalId: string];
+  executePlan: [planId: string, memberId: string];
   sendMessage: [];
   stopGeneration: [];
   resetSession: [];
@@ -1427,6 +1430,15 @@ defineExpose({
       :patch-proposals="actionablePatchProposals"
       @update-patch-status="(proposalId, status) => emit('updatePatchStatus', proposalId, status)"
       @remove-patch-proposal="(proposalId) => emit('removePatchProposal', proposalId)"
+    />
+
+    <GroupPlanCard
+      v-for="plan in plans"
+      :key="plan.id"
+      :plan="plan"
+      :members="activeMembers"
+      :render-markdown="renderMarkdown"
+      @execute="(planId, memberId) => emit('executePlan', planId, memberId)"
     />
 
     <section

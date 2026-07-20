@@ -378,6 +378,26 @@
     "secretPath": "Patch may touch sensitive files or secrets: {file}",
     "strictBlocks": "Strict safety model blocks medium and high risk patches before automatic approval."
   },
+  "plan": {
+    "convergenceLimit": "Plan revision limit reached. The latest version is kept — please review it manually before executing.",
+    "defaultTitle": "Group plan",
+    "done": "Done · {name}",
+    "execute": "Execute",
+    "executing": "Executing: {name}",
+    "noWritableMembers": "No member has write permission",
+    "proposedMessage": "{name} proposed the plan \"{title}\". All members are voting now.",
+    "status": {
+      "approved": "Approved",
+      "done": "Done",
+      "executing": "Executing",
+      "voting": "Voting"
+    },
+    "voterAgree": "{name} agreed with this plan",
+    "voterAuthor": "{name} authored this version",
+    "voterPending": "Waiting for {name} to vote",
+    "voterRevise": "{name} requested changes",
+    "votesCaption": "Votes"
+  },
   "agentPrompt": {
     "collaborationRule": "Group collaboration rules: you can see messages from the user and other members. Do not speak in isolation. When you need to respond to, supplement, challenge, or correct another member's view, say so explicitly. If your specialty should not speak yet, you may wait for other members first.",
     "codeContextGuide": "You can discuss code based on the following tool output. Prefer CodeGraph for structure and call paths, then use codegraph_command for focused graph queries or index maintenance and read_file, search_files, list_files, or glob_files when exact local details are needed. For edits or CodeGraph index updates, act only inside the workspace and only when the current safety mode allows it. If the result came from LocalCommands, mention that it is a fallback read. CodeGraph's `Found N symbols across M files` line only describes the relevant source returned for that query; it is not the total indexed file count.",
@@ -452,6 +472,12 @@
     "markdownCodeFenceRule": "When your final Markdown contains a fenced code block, always write the language after the opening fence, for example ```cpp, ```ts, ```vue, ```rust, ```python, ```json, or ```bash. Never output a bare ``` fence for code.",
     "observerRule": "You were observing. The mentioned member has now replied. Decide whether to supplement, challenge, or help close consensus.",
     "pendingContent": "Generating reply...",
+    "planExecuteRule": "Execute the following approved plan, complete the work, and report the result:\n\nPlan \"{title}\":\n{content}",
+    "planReviseNoNote": "(no specific change requested)",
+    "planRevisePendingContent": "Revising the plan...",
+    "planReviseRule": "You requested changes to the group plan.\n\nCurrent plan \"{title}\":\n{content}\n\nYour change request: {note}\n\nOutput the complete revised plan wrapped in a ```plan fenced block. Do not output anything else.",
+    "planVotePendingContent": "Voting on the plan...",
+    "planVoteRule": "The group is voting on the following plan.\n\nPlan \"{title}\":\n{content}\n\nIf you agree, reply with only: AGREE\nIf you need changes, reply with one line: REVISE: your change request (brief)\nDo not reply with anything else.",
     "voteAgreeContent": "Agree with {name}'s reply.",
     "voteDisagreeContent": "Disagree with {name}'s reply.",
     "votePendingContent": "Deciding whether to agree with {name}'s reply...",

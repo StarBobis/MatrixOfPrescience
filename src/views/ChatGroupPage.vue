@@ -19,6 +19,8 @@ import {
   type ChatMessageExecutionItem,
   type ChatMessageExecutionKind,
   type ChatMessageExecutionStatus,
+  type GroupPlan,
+  type GroupPlanVersion,
   type OwnerProfile,
   type PatchApprovalStatus,
   type PatchRiskLevel,
@@ -50,6 +52,12 @@ import {
   isDeepSeekProvider,
 } from "../utils/modelCatalog";
 import { evaluatePatchSafety } from "../utils/patchSafety";
+import {
+  extractPlanFromContent,
+  extractRevisedPlanContent,
+  parsePlanVote,
+  type PlanVoteValue,
+} from "../utils/groupPlan";
 
 type ChatRole = "user" | "assistant";
 type MessageStatus = "done" | "thinking" | "error" | "interrupted";
@@ -654,7 +662,10 @@ function formatMessageForModel(message: ChatMessage) {
   ) || "(empty message)";
   const sections = [`${speaker} [status=${message.status}]: ${content}`];
 
-  if (message.role === "assistant") {
+  // Tool/execution traces are coordination context in task groups, but pure
+  // noise in discussion groups — members should see each other's final output
+  // only, never each other's process.
+  if (message.role === "assistant" && activeGroup.value?.mode === "task") {
     const executionHistory = formatExecutionHistoryForModel(message);
 
     if (executionHistory) {
@@ -730,6 +741,7 @@ function buildConversation(excludeMessageIds: string[] = []): ApiChatMessage[] {
   const visibleMessages = activeMessages.value.filter(
     (message) =>
       !excludedIds.has(message.id) &&
+      !message.modelContextHidden &&
       message.modelName !== t("common.systemName") &&
       message.modelName !== legacySystemModelName,
   );
@@ -748,11 +760,11 @@ function buildConversation(excludeMessageIds: string[] = []): ApiChatMessage[] {
             ),
         ];
 
+  // Only final spoken content is shared — never another member's reasoning.
   return cacheFriendlyMessages
     .map<ApiChatMessage>((message) => ({
       role: message.role,
       content: formatMessageForModel(message),
-      reasoningContent: message.reasoningContent ?? undefined,
     }));
 }
 
@@ -2030,7 +2042,9 @@ async function decideMemberResponse(
     phase === "first"
       ? t("chatRuntime.phaseFirst")
       : t("chatRuntime.phaseAfterPeers");
-  const conversation = buildConversation();
+  // Exclude in-flight protocol messages so peers never observe each other's
+  // decision/vote turns.
+  const conversation = buildConversation(pendingMessageIds.value);
   const codeToolsEnabled = shouldInspectWorkspace(phaseRule);
   const systemPrompt = buildSystemPrompt(
     member,
@@ -2118,6 +2132,7 @@ async function decideMemberResponse(
       settingsStore.updateMessage(pendingId, {
         status: "done",
         content: t("chatRuntime.decisionWaitContent"),
+        modelContextHidden: true,
       });
       applyCompletionUsage(pendingId, response.usage);
       addActivityItem(pendingId, "status", t("chatRuntime.stepDecisionWait"), "done");
@@ -2357,7 +2372,9 @@ async function voteOnAnswer(
     t("chatRuntime.voteSupplementRule"),
     t("chatRuntime.voteDisagreeRule"),
   ].join("\n");
-  const conversation = buildConversation();
+  // Exclude in-flight protocol messages so peers never observe each other's
+  // vote turns.
+  const conversation = buildConversation(pendingMessageIds.value);
   const codeToolsEnabled = workspaceToolsAllowed();
   const systemPrompt = buildSystemPrompt(
     voter,
@@ -2455,6 +2472,7 @@ async function voteOnAnswer(
       content: finalContent,
       reasoningContent: savedReasoning || undefined,
       contentSegments: getFinalContentSegments(pendingId, finalContent),
+      modelContextHidden: true,
     });
     applyCompletionUsage(pendingId, response.usage);
     addActivityItem(pendingId, "status", getVoteCompletionStep(vote), "done");
@@ -2581,6 +2599,10 @@ async function resolveConsensus(initialAnswer: MemberAnswer | null, runId: strin
         undefined, // orchestrationRequired
         true,      // forceCodeTools — let members verify claims with code tools
       );
+
+      if (await maybeProposeGroupPlan(currentAnswer, runId)) {
+        return;
+      }
     }
   }
 
@@ -2592,6 +2614,363 @@ async function resolveConsensus(initialAnswer: MemberAnswer | null, runId: strin
       color: "#c45656",
       content: t("chatRuntime.consensusLimit"),
     });
+  }
+}
+
+const MAX_PLAN_VERSION_ROUNDS = 4;
+
+function getActiveVotingPlan() {
+  return activeGroup.value?.plans.find((plan) => plan.status === "voting") ?? null;
+}
+
+async function maybeProposeGroupPlan(answer: MemberAnswer | null, runId: string) {
+  if (!answer || activeGroup.value?.mode !== "discussion" || getActiveVotingPlan()) {
+    return false;
+  }
+
+  const extracted = extractPlanFromContent(answer.content);
+
+  if (!extracted) {
+    return false;
+  }
+
+  const plan = settingsStore.addGroupPlan(extracted.title, {
+    authorId: answer.member.id,
+    authorName: answer.member.name,
+    content: extracted.content,
+  });
+  appendMessage({
+    role: "assistant",
+    modelName: t("common.systemName"),
+    status: "done",
+    color: "#6c6f75",
+    content: t("plan.proposedMessage", { name: answer.member.name, title: plan.title }),
+  });
+  await convergeGroupPlan(plan.id, runId);
+  return true;
+}
+
+async function convergeGroupPlan(planId: string, runId: string) {
+  for (let round = 0; round < MAX_PLAN_VERSION_ROUNDS; round += 1) {
+    if (isRunInterrupted(runId)) {
+      return;
+    }
+
+    const plan = activeGroup.value?.plans.find((item) => item.id === planId);
+    const version = plan?.versions[plan.versions.length - 1];
+
+    if (!plan || !version) {
+      return;
+    }
+
+    const { agreeMemberIds, reviseEntries } = await voteOnPlanVersion(plan, version, runId);
+    settingsStore.updateGroupPlanVersionVotes(
+      planId,
+      version.id,
+      agreeMemberIds,
+      reviseEntries.map((entry) => entry.member.id),
+    );
+
+    if (reviseEntries.length === 0) {
+      settingsStore.updateGroupPlan(planId, { status: "approved" });
+      return;
+    }
+
+    const reviser = reviseEntries[0];
+    const revisedContent = await reviseGroupPlanVersion(
+      plan,
+      version,
+      reviser.member,
+      reviser.note,
+      runId,
+    );
+
+    if (!revisedContent) {
+      settingsStore.updateGroupPlan(planId, { status: "approved" });
+      return;
+    }
+
+    settingsStore.addGroupPlanVersion(planId, {
+      authorId: reviser.member.id,
+      authorName: reviser.member.name,
+      content: revisedContent,
+    });
+  }
+
+  appendMessage({
+    role: "assistant",
+    modelName: t("common.systemName"),
+    status: "error",
+    color: "#c45656",
+    content: t("plan.convergenceLimit"),
+  });
+}
+
+async function voteOnPlanVersion(plan: GroupPlan, version: GroupPlanVersion, runId: string) {
+  const voters = orderedActiveMembers.value.filter((member) => member.id !== version.authorId);
+
+  if (voters.length === 0) {
+    return {
+      agreeMemberIds: [] as string[],
+      reviseEntries: [] as Array<{ member: AgentModel; note: string }>,
+    };
+  }
+
+  setSpeakerQueue(voters, "voting");
+  const results = await Promise.all(
+    voters.map(async (voter) => {
+      if (isRunInterrupted(runId)) {
+        return { voter, vote: "agree" as PlanVoteValue, note: "" };
+      }
+
+      upsertSpeakerQueueMember(voter, "voting");
+      const result = await askPlanVote(plan, version, voter, runId);
+      upsertSpeakerQueueMember(voter, result.vote === "revise" ? "followup" : "voted");
+      return result;
+    }),
+  );
+  speakerQueue.value = [];
+
+  return {
+    agreeMemberIds: results
+      .filter((result) => result.vote === "agree")
+      .map((result) => result.voter.id),
+    reviseEntries: results
+      .filter((result) => result.vote === "revise")
+      .map((result) => ({ member: result.voter, note: result.note })),
+  };
+}
+
+async function askPlanVote(
+  plan: GroupPlan,
+  version: GroupPlanVersion,
+  voter: AgentModel,
+  runId: string,
+): Promise<{ voter: AgentModel; vote: PlanVoteValue; note: string }> {
+  const provider = getProvider(voter);
+  const pendingId = crypto.randomUUID();
+  const startedAt = Date.now();
+  const voteRule = t("chatRuntime.planVoteRule", {
+    title: plan.title,
+    content: version.content,
+  });
+  const conversation = buildConversation(pendingMessageIds.value);
+  const systemPrompt = buildSystemPrompt(
+    voter,
+    activeGroup.value,
+    voteRule,
+    "",
+    buildDurableConversationContext(),
+  );
+
+  settingsStore.appendPendingMessage({
+    id: pendingId,
+    role: "assistant",
+    modelName: voter.name,
+    providerName: getProviderLabel(voter.provider),
+    avatar: voter.avatar,
+    apiModel: voter.model,
+    reasoningEffort: voter.reasoningEffort,
+    startedAt,
+    durationMs: 0,
+    status: "thinking",
+    content: t("chatRuntime.planVotePendingContent"),
+    color: voter.color,
+    thoughtSteps: [],
+    activityItems: [
+      createActivityItem("status", t("chatRuntime.stepCheckingVote"), "running"),
+    ],
+    executionItems: [
+      createExecutionItem(
+        "status",
+        t("chatRuntime.stepCheckingVote"),
+        "running",
+        "",
+        ensureExecutionSegmentId(pendingId),
+      ),
+    ],
+  });
+  startSpeakingTimer(pendingId, startedAt);
+  pendingMessageIds.value = [...pendingMessageIds.value, pendingId];
+  await scrollToBottom();
+
+  try {
+    const { response } = await invokeStreamingCompletion(
+      pendingId,
+      runId,
+      {
+        providerName: provider.name,
+        baseUrl: provider.baseUrl,
+        apiKey: provider.apiKey,
+        model: voter.model,
+        wireApi: provider.wireApi,
+        reasoningEffort: voter.reasoningEffort,
+        temperature: 0,
+        workspacePath: activeGroup.value?.workspacePath ?? "",
+        codeToolsEnabled: false,
+        systemPrompt,
+        messages: conversation,
+      },
+      { showContent: false },
+    );
+
+    releasePendingMessage(pendingId, startedAt);
+    settingsStore.removeMessage(pendingId);
+
+    if (isRunInterrupted(runId)) {
+      return { voter, vote: "agree", note: "" };
+    }
+
+    const parsed = parsePlanVote(response.content);
+    return { voter, vote: parsed.vote, note: parsed.note };
+  } catch {
+    releasePendingMessage(pendingId, startedAt);
+    settingsStore.removeMessage(pendingId);
+    return { voter, vote: "agree", note: "" };
+  }
+}
+
+async function reviseGroupPlanVersion(
+  plan: GroupPlan,
+  version: GroupPlanVersion,
+  reviser: AgentModel,
+  note: string,
+  runId: string,
+): Promise<string> {
+  const provider = getProvider(reviser);
+  const pendingId = crypto.randomUUID();
+  const startedAt = Date.now();
+  const reviseRule = t("chatRuntime.planReviseRule", {
+    title: plan.title,
+    content: version.content,
+    note: note.trim() || t("chatRuntime.planReviseNoNote"),
+  });
+  const conversation = buildConversation(pendingMessageIds.value);
+  const systemPrompt = buildSystemPrompt(
+    reviser,
+    activeGroup.value,
+    reviseRule,
+    "",
+    buildDurableConversationContext(),
+  );
+
+  settingsStore.appendPendingMessage({
+    id: pendingId,
+    role: "assistant",
+    modelName: reviser.name,
+    providerName: getProviderLabel(reviser.provider),
+    avatar: reviser.avatar,
+    apiModel: reviser.model,
+    reasoningEffort: reviser.reasoningEffort,
+    startedAt,
+    durationMs: 0,
+    status: "thinking",
+    content: t("chatRuntime.planRevisePendingContent"),
+    color: reviser.color,
+    thoughtSteps: [],
+    activityItems: [
+      createActivityItem("status", t("chatRuntime.planRevisePendingContent"), "running"),
+    ],
+    executionItems: [
+      createExecutionItem(
+        "status",
+        t("chatRuntime.planRevisePendingContent"),
+        "running",
+        "",
+        ensureExecutionSegmentId(pendingId),
+      ),
+    ],
+  });
+  startSpeakingTimer(pendingId, startedAt);
+  pendingMessageIds.value = [...pendingMessageIds.value, pendingId];
+  await scrollToBottom();
+
+  try {
+    const { response } = await invokeStreamingCompletion(
+      pendingId,
+      runId,
+      {
+        providerName: provider.name,
+        baseUrl: provider.baseUrl,
+        apiKey: provider.apiKey,
+        model: reviser.model,
+        wireApi: provider.wireApi,
+        reasoningEffort: reviser.reasoningEffort,
+        temperature: reviser.temperature,
+        workspacePath: activeGroup.value?.workspacePath ?? "",
+        codeToolsEnabled: false,
+        systemPrompt,
+        messages: conversation,
+      },
+      { showContent: false },
+    );
+
+    releasePendingMessage(pendingId, startedAt);
+    settingsStore.removeMessage(pendingId);
+
+    if (isRunInterrupted(runId)) {
+      return "";
+    }
+
+    return extractRevisedPlanContent(response.content);
+  } catch {
+    releasePendingMessage(pendingId, startedAt);
+    settingsStore.removeMessage(pendingId);
+    return "";
+  }
+}
+
+async function executeGroupPlan(planId: string, memberId: string) {
+  const plan = activeGroup.value?.plans.find((item) => item.id === planId);
+  const member = activeGroup.value?.members.find(
+    (item) => item.id === memberId && item.canWrite,
+  );
+
+  if (!plan || plan.status !== "approved" || !member || sending.value) {
+    return;
+  }
+
+  const latestVersion = plan.versions[plan.versions.length - 1];
+
+  if (!latestVersion) {
+    return;
+  }
+
+  sending.value = true;
+  const runId = crypto.randomUUID();
+  activeRunId.value = runId;
+  pendingMessageIds.value = [];
+  settingsStore.updateGroupPlan(planId, {
+    status: "executing",
+    executorId: member.id,
+    executorName: member.name,
+  });
+
+  try {
+    await askMember(
+      member,
+      t("chatRuntime.planExecuteRule", {
+        title: plan.title,
+        content: latestVersion.content,
+      }),
+      runId,
+      undefined,
+      getOwnerDisplayName(),
+      true,
+      undefined,
+      undefined,
+      undefined,
+      true,
+    );
+    settingsStore.updateGroupPlan(planId, { status: "done" });
+  } finally {
+    await invoke("finish_chat_completion", { cancellationId: runId }).catch(() => undefined);
+    if (activeRunId.value === runId) {
+      activeRunId.value = "";
+      sending.value = false;
+      pendingMessageIds.value = [];
+      speakerQueue.value = [];
+    }
   }
 }
 
@@ -3068,7 +3447,9 @@ async function sendMessage() {
           ownerName,
         );
         latestAnswer = answer ?? latestAnswer;
-        await resolveConsensus(answer, runId);
+        if (!(await maybeProposeGroupPlan(answer, runId))) {
+          await resolveConsensus(answer, runId);
+        }
       }
 
       if (!latestAnswer) {
@@ -3096,7 +3477,9 @@ async function sendMessage() {
             latestAnswer?.member.name ?? ownerName,
           );
           latestAnswer = answer ?? latestAnswer;
-          await resolveConsensus(answer, runId);
+          if (!(await maybeProposeGroupPlan(answer, runId))) {
+            await resolveConsensus(answer, runId);
+          }
         }
       }
 
@@ -3117,7 +3500,9 @@ async function sendMessage() {
       undefined,
       ownerName,
     );
-    await resolveConsensus(latestAnswer, runId);
+    if (!(await maybeProposeGroupPlan(latestAnswer, runId))) {
+      await resolveConsensus(latestAnswer, runId);
+    }
   } finally {
     await invoke("finish_chat_completion", { cancellationId: runId }).catch(() => undefined);
     if (activeRunId.value === runId) {
@@ -3154,6 +3539,7 @@ async function sendMessage() {
           :speaker-queue="speakerQueue"
           :messages="activeMessages"
           :patch-proposals="activeGroup?.patchProposals ?? []"
+          :plans="activeGroup?.plans ?? []"
           v-model:workspace-path="activeGroupWorkspacePath"
           :sending="sending"
           :can-send="canSend"
@@ -3161,6 +3547,7 @@ async function sendMessage() {
           :render-markdown="renderMarkdown"
           @update-patch-status="updatePatchProposalStatus"
           @remove-patch-proposal="settingsStore.removePatchProposal"
+          @execute-plan="executeGroupPlan"
           @send-message="sendMessage"
           @stop-generation="stopGeneration"
           @reset-session="resetCurrentSession"
