@@ -450,6 +450,13 @@ pub(crate) fn apply_patch_tool(workspace: &Path, arguments: &Value) -> Result<St
         files: Vec::new(),
     };
     let applied_files = collect_patch_files(&request)?;
+
+    // Every patch target must prove a fresh read before it may be edited.
+    for file in &applied_files {
+        let path = resolve_workspace_relative_path(workspace, file)?;
+        crate::tools::read_guard::check_before_edit(&path, file)?;
+    }
+
     let (patch_file, normalized) = prepare_checked_patch(workspace, patch_text)?;
 
     if check_only {
@@ -463,6 +470,14 @@ pub(crate) fn apply_patch_tool(workspace: &Path, arguments: &Value) -> Result<St
     let apply_result = run_git_apply(workspace, &patch_file, false);
     let _ = fs::remove_file(&patch_file);
     let (stdout, stderr) = apply_result?;
+
+    for file in &applied_files {
+        if let Ok(path) = resolve_workspace_relative_path(workspace, file) {
+            if let Ok(content) = fs::read_to_string(&path) {
+                crate::tools::read_guard::record_write(&path, &content);
+            }
+        }
+    }
     let output = [stdout.trim(), stderr.trim()]
         .into_iter()
         .filter(|part| !part.is_empty())

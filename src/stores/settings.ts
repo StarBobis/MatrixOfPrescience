@@ -36,6 +36,8 @@ export interface ProviderConfig {
   wireApi?: string;
   models: string[];
   color: string;
+  /** Optional per-provider context window override; heuristics apply when unset. */
+  contextLimit?: number;
 }
 
 export interface AgentModel {
@@ -283,6 +285,10 @@ function normalizeProviderConfig(
     wireApi: value.wireApi?.trim() || preset?.wireApi || undefined,
     models,
     color: value.color?.trim() || preset?.color || fallbackProviderColor(id),
+    contextLimit:
+      Number.isFinite(value.contextLimit) && (value.contextLimit ?? 0) > 0
+        ? value.contextLimit
+        : undefined,
   };
 }
 
@@ -332,18 +338,15 @@ const defaultAgentConfig: AgentCollaborationConfig = {
 function normalizeAgentConfig(
   config?: Partial<AgentCollaborationConfig>,
 ): AgentCollaborationConfig {
-  const merged = {
+  // Only approvalMode is user-configurable today; the remaining collaboration
+  // fields are pinned to the current runtime behavior instead of pretending to merge.
+  return {
     ...structuredClone(defaultAgentConfig),
-    ...config,
+    approvalMode:
+      config?.approvalMode === "confirm-risky" || config?.approvalMode === "auto"
+        ? config.approvalMode
+        : "manual",
   };
-
-  merged.agentMode = "local-agent";
-  merged.workflowMode = "code";
-  merged.safetyModel = "balanced";
-  merged.editBeforeAsk = false;
-  merged.yoloMode = false;
-
-  return merged;
 }
 
 function enforceTaskAdmin(members: AgentModel[], preferredMemberId = "") {

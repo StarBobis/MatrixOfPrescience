@@ -21,6 +21,7 @@ export function buildSystemPrompt(
         ].join("\n")
       : "",
     t("agentPrompt.collaborationRule"),
+    group?.mode === "discussion" ? t("agentPrompt.planProposalGuide") : "",
     workspacePath
       ? t("agentPrompt.workspaceSet", { path: workspacePath })
       : t("agentPrompt.workspaceMissing"),

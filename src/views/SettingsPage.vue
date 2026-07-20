@@ -17,7 +17,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { useSettingsStore, type ProviderConfig } from "../stores/settings";
 import { chooseLocalAvatar, getAvatarSrc } from "../utils/avatar";
 import { getReadableTextColor } from "../utils/colorContrast";
-import { providerPresets } from "../utils/modelCatalog";
+import { DEFAULT_CONTEXT_LIMIT, providerPresets } from "../utils/modelCatalog";
 import { useI18n } from "vue-i18n";
 import type { AppLocale } from "../i18n/locales";
 
@@ -373,6 +373,17 @@ async function syncOpenAIFromCcSwitch() {
                   />
                 </el-select>
               </el-form-item>
+              <el-form-item :label="t('settings.providers.contextLimit')">
+                <el-input-number
+                  v-model="provider.contextLimit"
+                  :min="1000"
+                  :step="10000"
+                  :controls="false"
+                  :placeholder="String(DEFAULT_CONTEXT_LIMIT)"
+                  :aria-label="`${provider.name} ${t('settings.providers.contextLimit')}`"
+                />
+                <p class="settings-help">{{ t("settings.providers.contextLimitHelp") }}</p>
+              </el-form-item>
             </el-form>
           </section>
         </div>
@@ -389,7 +400,16 @@ async function syncOpenAIFromCcSwitch() {
   min-width: 0;
   min-height: 0;
   overflow: auto;
-  padding: 16px;
+  padding: 0;
+  background: var(--app-bg);
+  scrollbar-gutter: stable;
+}
+
+.settings-content {
+  width: min(1120px, 100%);
+  min-width: 0;
+  margin: 0 auto;
+  padding: 28px 30px 40px;
 }
 
 .settings-hero {
@@ -397,12 +417,13 @@ async function syncOpenAIFromCcSwitch() {
   align-items: center;
   gap: 12px;
   min-width: 0;
-  margin-bottom: 16px;
-  padding: 18px;
-  border: 1px solid #d9ded8;
-  border-radius: 8px;
-  background: #fbfcfb;
-  box-shadow: 0 14px 34px rgba(31, 43, 36, 0.08);
+  margin: 0 0 24px;
+  padding: 0 0 20px;
+  border: 0;
+  border-bottom: 1px solid var(--separator);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .settings-hero > div {
@@ -411,28 +432,36 @@ async function syncOpenAIFromCcSwitch() {
 
 .settings-hero-icon {
   display: grid;
-  width: 44px;
-  height: 44px;
+  width: 38px;
+  height: 38px;
   place-items: center;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
   border-radius: 8px;
-  color: #ffffff;
-  background: #2e6f5b;
+  color: var(--accent-text);
+  background: var(--accent-soft);
+}
+
+.settings-hero-icon svg {
+  width: 20px;
+  height: 20px;
+  stroke-width: 1.8;
 }
 
 .settings-eyebrow,
 .owner-preview span {
   margin: 0;
-  color: #778279;
+  color: var(--text-secondary);
   font-size: 12px;
   font-weight: 700;
   letter-spacing: 0;
-  text-transform: uppercase;
+  text-transform: none;
 }
 
 h1 {
   margin: 0;
-  color: #18221d;
-  font-size: 22px;
+  color: var(--text-primary);
+  font-size: 20px;
+  font-weight: 700;
   line-height: 1.2;
 }
 
@@ -440,24 +469,29 @@ h1 {
   display: grid;
   width: 100%;
   min-width: 0;
-  grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
-  gap: 16px;
+  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  gap: 30px;
   align-items: start;
 }
 
 .settings-panel,
 .provider-card {
-  border: 1px solid #e0e5df;
-  border-radius: 8px;
-  background: #ffffff;
+  border-radius: 0;
 }
 
 .settings-panel {
   display: grid;
   align-content: start;
-  gap: 14px;
   min-width: 0;
-  padding: 16px;
+  gap: 16px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.settings-panel:first-child {
+  padding-right: 30px;
+  border-right: 1px solid var(--separator);
 }
 
 .settings-panel-head,
@@ -473,48 +507,26 @@ h1 {
   justify-content: space-between;
 }
 
-.owner-preview {
+.settings-panel-head {
+  min-height: 28px;
+}
+
+.settings-panel-head h2,
+.provider-card-head h3 {
   min-width: 0;
-  padding: 12px;
-  border: 1px solid #e0e5df;
-  border-radius: 8px;
-  background: #f7faf7;
-}
-
-.owner-avatar {
-  display: grid;
-  width: 48px;
-  height: 48px;
-  flex: 0 0 auto;
-  place-items: center;
+  margin: 0;
   overflow: hidden;
-  border-radius: 50%;
-  color: #ffffff;
-  font-size: 22px;
-}
-
-.owner-avatar img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.owner-preview strong,
-.owner-preview span {
-  display: block;
-  min-width: 0;
-  overflow: hidden;
+  color: var(--text-primary);
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.owner-preview strong {
-  color: #202b25;
-  font-size: 15px;
+.settings-panel-head h2 {
+  font-size: 14px;
 }
 
-.owner-preview span {
-  margin-top: 4px;
-  text-transform: none;
+.provider-card-head h3 {
+  font-size: 13px;
 }
 
 .provider-head-actions {
@@ -530,27 +542,81 @@ h1 {
   margin-left: 4px;
 }
 
-.provider-stack {
-  display: grid;
+.owner-preview {
+  border-color: var(--separator);
+  background: var(--surface-secondary);
+}
+
+.owner-preview strong,
+.owner-preview span {
+  display: block;
   min-width: 0;
-  gap: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.owner-preview strong {
+  color: var(--text-primary);
+  font-size: 15px;
+}
+
+.owner-preview span {
+  margin-top: 4px;
+}
+
+.owner-avatar {
+  display: grid;
+  width: 48px;
+  height: 48px;
+  flex: 0 0 auto;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 50%;
+  color: #ffffff;
+  font-size: 22px;
+}
+
+.owner-avatar svg {
+  width: 22px;
+  height: 22px;
+}
+
+.owner-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 
 .settings-help {
   margin: 6px 0 0;
   overflow-wrap: anywhere;
-  color: #7b857e;
+  color: var(--text-secondary);
   font-size: 12px;
   line-height: 1.45;
 }
 
+.provider-stack {
+  display: grid;
+  min-width: 0;
+  gap: 10px;
+}
+
 .provider-card {
   min-width: 0;
-  padding: 14px;
+  padding: 14px 16px;
+  border: 1px solid var(--separator);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.provider-card + .provider-card {
+  margin-top: 0;
 }
 
 .provider-card-head {
   min-width: 0;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--separator);
 }
 
 .provider-card-actions {
@@ -583,147 +649,6 @@ h1 {
 :deep(.el-input__inner) {
   min-width: 0;
   text-overflow: ellipsis;
-}
-
-@media (max-width: 900px) {
-  .settings-layout {
-    grid-template-columns: 1fr;
-  }
-}
-</style>
-
-<style scoped>
-.settings-page {
-  padding: 0;
-  background: var(--app-bg);
-  scrollbar-gutter: stable;
-}
-
-.settings-content {
-  width: min(1120px, 100%);
-  min-width: 0;
-  margin: 0 auto;
-  padding: 28px 30px 40px;
-}
-
-.settings-hero {
-  margin: 0 0 24px;
-  padding: 0 0 20px;
-  border: 0;
-  border-bottom: 1px solid var(--separator);
-  border-radius: 0;
-  background: transparent;
-  box-shadow: none;
-}
-
-.settings-hero-icon {
-  width: 38px;
-  height: 38px;
-  border: 1px solid color-mix(in srgb, var(--accent) 28%, transparent);
-  border-radius: 8px;
-  color: var(--accent-text);
-  background: var(--accent-soft);
-}
-
-.settings-hero-icon svg {
-  width: 20px;
-  height: 20px;
-  stroke-width: 1.8;
-}
-
-.settings-eyebrow,
-.owner-preview span {
-  color: var(--text-secondary);
-  font-size: 12px;
-  text-transform: none;
-}
-
-h1 {
-  color: var(--text-primary);
-  font-size: 20px;
-  font-weight: 700;
-}
-
-.settings-layout {
-  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
-  gap: 30px;
-}
-
-.settings-panel,
-.provider-card {
-  border-radius: 0;
-}
-
-.settings-panel {
-  gap: 16px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-}
-
-.settings-panel:first-child {
-  padding-right: 30px;
-  border-right: 1px solid var(--separator);
-}
-
-.settings-panel-head {
-  min-height: 28px;
-}
-
-.settings-panel-head h2,
-.provider-card-head h3 {
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  color: var(--text-primary);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.settings-panel-head h2 {
-  font-size: 14px;
-}
-
-.provider-card-head h3 {
-  font-size: 13px;
-}
-
-.owner-preview {
-  border-color: var(--separator);
-  background: var(--surface-secondary);
-}
-
-.owner-preview strong {
-  color: var(--text-primary);
-}
-
-.owner-avatar svg {
-  width: 22px;
-  height: 22px;
-}
-
-.settings-help {
-  color: var(--text-secondary);
-}
-
-.provider-stack {
-  gap: 10px;
-}
-
-.provider-card {
-  padding: 14px 16px;
-  border-color: var(--separator);
-  border-radius: 8px;
-  background: var(--surface);
-}
-
-.provider-card + .provider-card {
-  margin-top: 0;
-}
-
-.provider-card-head {
-  padding-bottom: 12px;
-  border-bottom: 1px solid var(--separator);
 }
 
 .provider-card :deep(.el-form) {

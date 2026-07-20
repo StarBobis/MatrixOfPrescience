@@ -3,7 +3,9 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { open } from "@tauri-apps/plugin-dialog";
 import { ElMessage } from "element-plus";
 import {
+  ChevronDown,
   CircleStop as CircleClose,
+  ClipboardList,
   Copy as CopyDocument,
   FolderOpen as FolderOpened,
   MessagesSquare,
@@ -110,6 +112,20 @@ const failedMentionAvatars = ref<Set<string>>(new Set());
 const mentionActiveIndex = ref(0);
 const mentionDismissed = ref(false);
 const stickToBottom = ref(true);
+const planPanelOpen = ref(true);
+const latestPlan = computed(() => props.plans[props.plans.length - 1]);
+const latestPlanStatusTagType = computed(() => {
+  switch (latestPlan.value?.status) {
+    case "approved":
+      return "success";
+    case "executing":
+      return "primary";
+    case "done":
+      return "info";
+    default:
+      return "warning";
+  }
+});
 const { t } = useI18n();
 const previousMessageStatuses = new Map<string, ChatMessage["status"]>();
 let pendingScrollFrame = 0;
@@ -1432,14 +1448,33 @@ defineExpose({
       @remove-patch-proposal="(proposalId) => emit('removePatchProposal', proposalId)"
     />
 
-    <GroupPlanCard
-      v-for="plan in plans"
-      :key="plan.id"
-      :plan="plan"
-      :members="activeMembers"
-      :render-markdown="renderMarkdown"
-      @execute="(planId, memberId) => emit('executePlan', planId, memberId)"
-    />
+    <div v-if="plans.length > 0" class="plan-dock">
+      <button
+        type="button"
+        class="plan-dock-bar"
+        :aria-expanded="planPanelOpen"
+        :aria-label="t('plan.dockToggle')"
+        @click="planPanelOpen = !planPanelOpen"
+      >
+        <ClipboardList class="plan-dock-icon" aria-hidden="true" />
+        <span class="plan-dock-title">{{ latestPlan?.title }}</span>
+        <el-tag size="small" :type="latestPlanStatusTagType">
+          {{ t(`plan.status.${latestPlan?.status}`) }}
+        </el-tag>
+        <span class="plan-dock-count">{{ t("plan.dockCount", { count: plans.length }) }}</span>
+        <ChevronDown class="plan-dock-chevron" :class="{ open: planPanelOpen }" aria-hidden="true" />
+      </button>
+      <div v-show="planPanelOpen" class="plan-dock-body">
+        <GroupPlanCard
+          v-for="plan in plans"
+          :key="plan.id"
+          :plan="plan"
+          :members="activeMembers"
+          :render-markdown="renderMarkdown"
+          @execute="(planId, memberId) => emit('executePlan', planId, memberId)"
+        />
+      </div>
+    </div>
 
     <section
       ref="messagesPanel"
@@ -2132,31 +2167,31 @@ defineExpose({
   content: "";
   filter: blur(4px);
   opacity: 0.72;
-  animation: wifi-gradient-orbit 2s linear infinite;
+  animation: wifi-gradient-orbit 3s linear infinite;
 }
 
 .activity-chip.status.running {
-  border-color: #efd7ad;
-  color: #9a650c;
-  background: #fff8ea;
+  border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+  color: var(--warning);
+  background: var(--warning-soft);
 }
 
 .activity-chip.done {
-  border-color: #cfe3d7;
-  color: #2b7359;
-  background: #f0faf4;
+  border-color: color-mix(in srgb, var(--success) 30%, transparent);
+  color: var(--success);
+  background: var(--success-soft);
 }
 
 .activity-chip.error {
-  border-color: #f0c7c7;
-  color: #a33d3d;
-  background: #fff0f0;
+  border-color: color-mix(in srgb, var(--danger) 30%, transparent);
+  color: var(--danger);
+  background: var(--danger-soft);
 }
 
 .activity-chip.interrupted {
-  border-color: #efd7ad;
-  color: #9a650c;
-  background: #fff8ea;
+  border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+  color: var(--warning);
+  background: var(--warning-soft);
 }
 
 .activity-detail {
@@ -2398,7 +2433,7 @@ defineExpose({
   content: "";
   filter: blur(5px);
   opacity: 0.78;
-  animation: wifi-gradient-orbit 2s linear infinite;
+  animation: wifi-gradient-orbit 3s linear infinite;
 }
 
 @keyframes wifi-gradient-orbit {
@@ -2448,9 +2483,9 @@ defineExpose({
 
 .execution-line.interrupted .execution-icon,
 .execution-segment.interrupted .execution-icon {
-  border-color: #efd7ad;
-  color: #9a650c;
-  background: #fff8ea;
+  border-color: color-mix(in srgb, var(--warning) 35%, transparent);
+  color: var(--warning);
+  background: var(--warning-soft);
 }
 
 .execution-kind {
@@ -2736,13 +2771,13 @@ defineExpose({
 }
 
 .identity-badge.admin {
-  color: #2f7a61;
-  background: #eef8f2;
+  color: var(--success);
+  background: var(--success-soft);
 }
 
 .identity-badge.owner {
-  color: #9a6a13;
-  background: #fff6dc;
+  color: var(--warning);
+  background: var(--warning-soft);
 }
 
 .message-title .identity-badge {

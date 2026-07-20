@@ -776,8 +776,8 @@ onBeforeUnmount(() => {
 
 /* ===== 群主卡片 ===== */
 .owner-card {
-  border-color: #d8b75f;
-  background: linear-gradient(135deg, #fffaf0, #fff2c8);
+  border-color: color-mix(in srgb, var(--warning) 45%, transparent);
+  background: var(--warning-soft);
 }
 
 /* ===== 成员卡片 ===== */
@@ -936,13 +936,13 @@ onBeforeUnmount(() => {
 }
 
 .identity-badge.admin {
-  color: #2f7a61;
-  background: #eef8f2;
+  color: var(--success);
+  background: var(--success-soft);
 }
 
 .identity-badge.owner {
-  color: #9a6a13;
-  background: #fff6dc;
+  color: var(--warning);
+  background: var(--warning-soft);
 }
 
 .member-card-copy .member-sub {

@@ -1177,26 +1177,51 @@ async function scrollToBottom() {
 }
 
 function parseMemberDecision(content: string): MemberDecision {
-  const normalized = content.trim().toUpperCase();
+  // The prompt asks for a single control word on the first line; only honor
+  // WAIT when it leads the reply, never when it is merely mentioned in prose.
+  const firstLine = (content.trim().split("\n")[0] ?? "").trim().toUpperCase();
 
-  if (normalized.includes("WAIT") || normalized.includes("等待")) {
+  if (firstLine.startsWith("WAIT") || firstLine.startsWith("等待")) {
     return "wait";
   }
 
   return "speak";
 }
 
-function parseMemberVote(content: string): MemberVote {
-  const normalized = content.trim().toUpperCase();
+const VOTE_NEGATION_PATTERN =
+  /不需要修改|无需修改|不用修改|不必修改|不需要补充|无需补充|不用补充|不必补充/g;
 
-  if (normalized.includes("DISAGREE") || normalized.includes("不同意") || normalized.includes("反对")) {
+function parseMemberVote(content: string): MemberVote {
+  // Control words are expected on the first line; negated phrases
+  // ("不需要修改") are stripped, and whole-content matching is only a
+  // fallback so stray keyword mentions cannot flip the vote.
+  const cleaned = content.replace(VOTE_NEGATION_PATTERN, "").trim().toUpperCase();
+  const firstLine = cleaned.split("\n")[0] ?? "";
+
+  if (firstLine.includes("DISAGREE") || firstLine.includes("不同意") || firstLine.includes("反对")) {
     return "disagree";
   }
 
   if (
-    normalized.includes("SUPPLEMENT") ||
-    normalized.includes("补充") ||
-    normalized.includes("需要补")
+    firstLine.includes("SUPPLEMENT") ||
+    firstLine.includes("补充") ||
+    firstLine.includes("需要补")
+  ) {
+    return "supplement";
+  }
+
+  if (firstLine.includes("AGREE") || firstLine.includes("同意")) {
+    return "agree";
+  }
+
+  if (cleaned.includes("DISAGREE") || cleaned.includes("不同意") || cleaned.includes("反对")) {
+    return "disagree";
+  }
+
+  if (
+    cleaned.includes("SUPPLEMENT") ||
+    cleaned.includes("补充") ||
+    cleaned.includes("需要补")
   ) {
     return "supplement";
   }

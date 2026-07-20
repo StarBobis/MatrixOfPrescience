@@ -2,6 +2,7 @@ pub mod codegraph;
 pub mod command;
 pub mod execution;
 pub mod patch;
+pub mod read_guard;
 pub mod schema;
 
 // Re-exports used by crate-level code

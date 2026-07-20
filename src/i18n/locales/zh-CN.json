@@ -60,6 +60,8 @@
         "responses": "当前 Codex provider 是 OpenAI Responses 格式。本应用发送 OpenAI Chat Completions，请启用 CC Switch 本地代理或选择 OpenAI Chat 格式。"
       },
       "color": "标识颜色",
+      "contextLimit": "上下文窗口",
+      "contextLimitHelp": "留空则按模型自动推断",
       "confirmRemove": {
         "message": "确定删除供应商「{name}」吗？此操作不可撤销。",
         "title": "删除供应商"
@@ -381,6 +383,8 @@
   "plan": {
     "convergenceLimit": "方案修订达到上限，已保留最新版本，请人工确认后再执行。",
     "defaultTitle": "讨论方案",
+    "dockCount": "共 {count} 个方案",
+    "dockToggle": "展开或收起方案框",
     "done": "已完成 · {name}",
     "execute": "执行",
     "executing": "正在执行：{name}",
@@ -400,6 +404,7 @@
   },
   "agentPrompt": {
     "collaborationRule": "群聊协作规则：你能看到用户和其它群友已经发出的消息。不要只各说各话；需要回应、补充、质疑或修正其它群友观点时，请明确指出。若你的专业分工暂时不该发言，可以等待其它群友先说。",
+    "planProposalGuide": "当讨论需要形成可执行的结论时，你可以把完整方案包在 ```plan 代码围栏中提出。方案会进入独立的方案框：其他群友直接在方案框中修订出新版本，每次修订后全员投票，全员同意后即可由群主指派群友执行。提出方案后不要再单独发起投票。",
     "codeContextGuide": "你可以基于以下工具输出讨论代码。优先用 CodeGraph 理解结构和调用链；需要定向图查询或维护索引时使用 codegraph_command，缺少精确局部细节时再用 read_file、search_files、list_files 或 glob_files 补充。代码编辑和 CodeGraph 索引更新只能在当前工作区内且安全模式允许时执行。若结果来自 LocalCommands，需要说明这是降级读取。CodeGraph 输出中的 `Found N symbols across M files` 只表示本次查询命中的相关源码范围，不是索引总文件数。",
     "codeContextTitle": "代码阅读工具结果：",
     "codeToolGuide": "你可以使用当前工作区的代码工具：codegraph_explore 用于结构和调用链；codegraph_command 可调用 status、query、node、files、callers、callees、impact、affected、init、index、sync 和 unlock；read_file、search_files、list_files、glob_files 用于本地读取；write_file、apply_patch、create_directory、move_path、delete_path、run_command 用于工作区变更。使用 apply_patch 前，必须先读取要修改位置的最新内容，用精确旧行和稳定上下文构造 hunk，不要依赖记忆中的行号或手写猜测的行号；非平凡补丁先用 checkOnly 校验再应用。已有索引时，源码变化后用 sync 增量更新；需要完全重建时用 index；没有索引时用 init。CodeGraph 维护命令和其它写工具都需要写权限。run_command 会切换到返回结果中的 cwd 并继承 Matrix 应用进程环境，但不会自动加载 shell profile 或临时会话环境。架构问题先用 CodeGraph，缺少细节时继续调用文件/搜索工具。CodeGraph 输出中的 `Found N symbols across M files` 只表示本次查询命中的相关源码范围，不是索引总文件数。",

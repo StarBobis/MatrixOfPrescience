@@ -60,6 +60,8 @@
         "responses": "The active Codex provider is configured for OpenAI Responses. This app sends OpenAI Chat Completions, so use CC Switch local proxy routing or choose OpenAI Chat format."
       },
       "color": "Accent color",
+      "contextLimit": "Context window",
+      "contextLimitHelp": "Leave empty to auto-detect from the model",
       "confirmRemove": {
         "message": "Remove provider \"{name}\"? This cannot be undone.",
         "title": "Remove provider"
@@ -381,6 +383,8 @@
   "plan": {
     "convergenceLimit": "Plan revision limit reached. The latest version is kept — please review it manually before executing.",
     "defaultTitle": "Group plan",
+    "dockCount": "{count} plans",
+    "dockToggle": "Expand or collapse the plan box",
     "done": "Done · {name}",
     "execute": "Execute",
     "executing": "Executing: {name}",
@@ -400,6 +404,7 @@
   },
   "agentPrompt": {
     "collaborationRule": "Group collaboration rules: you can see messages from the user and other members. Do not speak in isolation. When you need to respond to, supplement, challenge, or correct another member's view, say so explicitly. If your specialty should not speak yet, you may wait for other members first.",
+    "planProposalGuide": "When the discussion needs an actionable conclusion, you may propose a complete plan wrapped in a ```plan fenced block. The plan moves into a dedicated plan box: other members revise it into new versions, everyone votes after each revision, and once all agree, the owner assigns a member to execute it. Do not start a separate vote after proposing a plan.",
     "codeContextGuide": "You can discuss code based on the following tool output. Prefer CodeGraph for structure and call paths, then use codegraph_command for focused graph queries or index maintenance and read_file, search_files, list_files, or glob_files when exact local details are needed. For edits or CodeGraph index updates, act only inside the workspace and only when the current safety mode allows it. If the result came from LocalCommands, mention that it is a fallback read. CodeGraph's `Found N symbols across M files` line only describes the relevant source returned for that query; it is not the total indexed file count.",
     "codeContextTitle": "Code reading tool result:",
     "codeToolGuide": "You can use workspace code tools: codegraph_explore for structure/call paths; codegraph_command for status, query, node, files, callers, callees, impact, affected, init, index, sync, and unlock; read_file/search_files/list_files/glob_files for local reads; and write_file/apply_patch/create_directory/move_path/delete_path/run_command for workspace changes. Before apply_patch, read the exact current target location and build hunks from exact old lines plus stable nearby context; do not rely on remembered or hand-guessed line numbers. For non-trivial patches, validate with checkOnly before applying. Use codegraph_command with sync after source changes when an index exists; use index for a full rebuild and init when no index exists. CodeGraph maintenance commands and other write tools require write permission. run_command switches to the returned cwd and inherits the Matrix app process environment, but does not automatically load a shell profile or temporary session environment. Start with CodeGraph for architecture questions, then use file/search tools whenever details are missing. CodeGraph's `Found N symbols across M files` line describes only that query's returned source, not the total indexed file count.",

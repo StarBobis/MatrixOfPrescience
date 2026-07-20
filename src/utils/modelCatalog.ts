@@ -82,10 +82,20 @@ export function isDeepSeekProvider(provider?: { id?: string; baseUrl?: string } 
 }
 
 export function getProviderModelContextLimit(
-  provider: string | { id?: string; baseUrl?: string } | undefined,
+  provider: string | { id?: string; baseUrl?: string; contextLimit?: number } | undefined,
   modelName: string,
   options: { deepSeekLike?: boolean; deepSeekLongContext?: boolean } = {},
 ) {
+  // An explicit per-provider override always wins over the heuristics.
+  if (
+    typeof provider === "object" &&
+    provider !== null &&
+    Number.isFinite(provider.contextLimit) &&
+    (provider.contextLimit ?? 0) > 0
+  ) {
+    return provider.contextLimit as number;
+  }
+
   const deepSeekLike =
     options.deepSeekLike ??
     (typeof provider === "string"

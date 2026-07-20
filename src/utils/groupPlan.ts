@@ -37,18 +37,24 @@ export function extractRevisedPlanContent(content: string): string {
   return extractPlanFromContent(content)?.content ?? content.trim();
 }
 
+const VOTE_NEGATION_PATTERN =
+  /不需要修改|无需修改|不用修改|不必修改|不需要补充|无需补充|不用补充|不必补充|no changes needed/gi;
+
 export function parsePlanVote(content: string): ParsedPlanVote {
-  const normalized = content.toUpperCase();
+  // Negated phrases ("不需要修改" / "no changes needed") must not flip an
+  // agree into a revise.
+  const cleaned = content.replace(VOTE_NEGATION_PATTERN, "").trim();
+  const normalized = cleaned.toUpperCase();
 
   if (
     normalized.includes("REVISE") ||
     normalized.includes("修改") ||
     normalized.includes("补充")
   ) {
-    const keywordMatch = REVISE_KEYWORD_PATTERN.exec(content);
+    const keywordMatch = REVISE_KEYWORD_PATTERN.exec(cleaned);
     const note = keywordMatch
-      ? content.slice(keywordMatch.index + keywordMatch[0].length).trim()
-      : content.trim();
+      ? cleaned.slice(keywordMatch.index + keywordMatch[0].length).trim()
+      : cleaned;
 
     return { vote: "revise", note };
   }

@@ -597,6 +597,7 @@ pub(crate) fn read_workspace_file_tool(
     let max_lines = tool_arg_usize(arguments, "maxLines", 240, 1, 1000);
     let content =
         fs::read_to_string(&path).map_err(|error| format!("Failed to read {}: {}", file, error))?;
+    crate::tools::read_guard::record_read(&path, &content);
     let lines: Vec<&str> = content.lines().collect();
 
     if start_line > lines.len().max(1) {
@@ -795,6 +796,11 @@ pub(crate) fn write_workspace_file_tool(
     ensure_parent_directory(&path, create_parents)?;
     ensure_target_stays_in_workspace(workspace, &path)?;
 
+    // "create" has its own existence check; every other write must prove a fresh read.
+    if mode != "create" {
+        crate::tools::read_guard::check_before_edit(&path, file)?;
+    }
+
     match mode {
         "" | "overwrite" => {
             fs::write(&path, content)
@@ -819,6 +825,10 @@ pub(crate) fn write_workspace_file_tool(
                 .map_err(|error| format!("Failed to append {}: {}", file, error))?;
         }
         other => return Err(format!("Unsupported write_file mode: {}", other)),
+    }
+
+    if let Ok(written) = fs::read_to_string(&path) {
+        crate::tools::read_guard::record_write(&path, &written);
     }
 
     Ok(format!(
