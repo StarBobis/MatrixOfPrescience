@@ -1,14 +1,23 @@
 <script setup lang="ts">
 import { computed, ref } from "vue";
 import { storeToRefs } from "pinia";
-import { ElMessage } from "element-plus";
-import { FolderOpen, Image, RefreshCcw, Settings as SettingsIcon, UserRound } from "@lucide/vue";
+import { ElMessage, ElMessageBox } from "element-plus";
+import {
+  ChevronDown,
+  FolderOpen,
+  Image,
+  Plus,
+  RefreshCcw,
+  Settings as SettingsIcon,
+  Trash2,
+  UserRound,
+} from "@lucide/vue";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useSettingsStore } from "../stores/settings";
+import { useSettingsStore, type ProviderConfig } from "../stores/settings";
 import { chooseLocalAvatar, getAvatarSrc } from "../utils/avatar";
 import { getReadableTextColor } from "../utils/colorContrast";
-import { modelPresets } from "../utils/modelCatalog";
+import { providerPresets } from "../utils/modelCatalog";
 import { useI18n } from "vue-i18n";
 import type { AppLocale } from "../i18n/locales";
 
@@ -34,16 +43,48 @@ const languageOptions = computed<Array<{ label: string; value: AppLocale }>>(() 
   { label: t("settings.languageOptions.zhCN"), value: "zh-CN" },
 ]);
 
-const providerOptions = [
-  {
-    label: "ChatGPT / OpenAI",
-    value: "openai",
-  },
-  {
-    label: "DeepSeek",
-    value: "deepseek",
-  },
-];
+const providerList = computed<ProviderConfig[]>(() => Object.values(providers.value));
+
+const wireApiOptions = computed(() => [
+  { label: t("settings.providers.wireApiAuto"), value: "" },
+  { label: t("settings.providers.wireApiChat"), value: "chat" },
+  { label: t("settings.providers.wireApiResponses"), value: "responses" },
+]);
+
+function addProviderFromMenu(command: string | number | object) {
+  settingsStore.addProvider(command === "custom" ? undefined : String(command));
+}
+
+function ensureDefaultModelListed(provider: ProviderConfig) {
+  const model = provider.defaultModel.trim();
+
+  if (model && !provider.models.includes(model)) {
+    provider.models.push(model);
+  }
+}
+
+async function confirmRemoveProvider(provider: ProviderConfig) {
+  try {
+    await ElMessageBox.confirm(
+      t("settings.providers.confirmRemove.message", { name: provider.name || provider.id }),
+      t("settings.providers.confirmRemove.title"),
+      {
+        confirmButtonText: t("settings.providers.remove"),
+        cancelButtonText: t("common.cancel"),
+        confirmButtonClass: "el-button--danger",
+        type: "warning",
+      },
+    );
+  } catch {
+    return;
+  }
+
+  const result = settingsStore.removeProvider(provider.id);
+
+  if (result !== true) {
+    ElMessage.warning(t(`settings.providers.removeBlocked.${result}`));
+  }
+}
 
 async function chooseOwnerAvatar() {
   const avatar = await chooseLocalAvatar();
@@ -71,6 +112,11 @@ async function syncOpenAIFromCcSwitch() {
   try {
     const config = await invoke<CcSwitchOpenAIConfig>("load_ccswitch_openai_config");
     const provider = providers.value.openai;
+
+    if (!provider) {
+      ElMessage.warning(t("settings.providers.ccswitchNoOpenAI"));
+      return;
+    }
 
     provider.baseUrl = config.baseUrl;
     provider.apiKey = config.apiKey;
@@ -192,18 +238,40 @@ async function syncOpenAIFromCcSwitch() {
       <section class="settings-panel providers-panel" aria-labelledby="provider-settings-heading">
         <div class="settings-panel-head">
           <h2 id="provider-settings-heading">{{ t("settings.providers.title") }}</h2>
-          <el-tag size="small">{{ providerOptions.length }}</el-tag>
+          <div class="provider-head-actions">
+            <el-tag size="small">{{ providerList.length }}</el-tag>
+            <el-dropdown trigger="click" @command="addProviderFromMenu">
+              <el-button size="small" type="primary" :icon="Plus">
+                {{ t("settings.providers.add") }}
+                <ChevronDown class="dropdown-chevron" aria-hidden="true" />
+              </el-button>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item
+                    v-for="preset in providerPresets"
+                    :key="preset.id"
+                    :command="preset.id"
+                  >
+                    {{ preset.name }}
+                  </el-dropdown-item>
+                  <el-dropdown-item divided command="custom">
+                    {{ t("settings.providers.addCustom") }}
+                  </el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </div>
         </div>
 
         <div class="provider-stack">
           <section
-            v-for="provider in providers"
+            v-for="provider in providerList"
             :key="provider.id"
             class="provider-card"
             :aria-labelledby="`provider-${provider.id}-heading`"
           >
             <div class="provider-card-head">
-              <h3 :id="`provider-${provider.id}-heading`">{{ provider.name }}</h3>
+              <h3 :id="`provider-${provider.id}-heading`">{{ provider.name || provider.id }}</h3>
               <div class="provider-card-actions">
                 <el-button
                   v-if="provider.id === 'openai' && canSyncCcSwitch"
@@ -216,11 +284,31 @@ async function syncOpenAIFromCcSwitch() {
                 >
                   {{ t("settings.providers.ccswitchSync") }}
                 </el-button>
+                <el-color-picker
+                  v-model="provider.color"
+                  size="small"
+                  :aria-label="`${provider.name} ${t('settings.providers.color')}`"
+                />
                 <el-tag size="small">{{ provider.id }}</el-tag>
+                <el-button
+                  size="small"
+                  type="danger"
+                  plain
+                  :icon="Trash2"
+                  :aria-label="t('settings.providers.remove')"
+                  @click="confirmRemoveProvider(provider)"
+                />
               </div>
             </div>
 
             <el-form label-position="top">
+              <el-form-item :label="t('settings.providers.name')">
+                <el-input
+                  v-model="provider.name"
+                  :placeholder="provider.id"
+                  :aria-label="`${provider.id} ${t('settings.providers.name')}`"
+                />
+              </el-form-item>
               <el-form-item :label="t('common.apiKey')">
                 <el-input
                   v-model="provider.apiKey"
@@ -233,8 +321,40 @@ async function syncOpenAIFromCcSwitch() {
               <el-form-item :label="t('common.baseUrl')">
                 <el-input
                   v-model="provider.baseUrl"
+                  placeholder="https://api.example.com/v1"
                   :aria-label="`${provider.name} ${t('common.baseUrl')}`"
                 />
+              </el-form-item>
+              <el-form-item :label="t('settings.providers.wireApi')">
+                <el-select
+                  v-model="provider.wireApi"
+                  :aria-label="`${provider.name} ${t('settings.providers.wireApi')}`"
+                >
+                  <el-option
+                    v-for="option in wireApiOptions"
+                    :key="option.value"
+                    :label="option.label"
+                    :value="option.value"
+                  />
+                </el-select>
+              </el-form-item>
+              <el-form-item :label="t('settings.providers.models')">
+                <el-select
+                  v-model="provider.models"
+                  multiple
+                  filterable
+                  allow-create
+                  default-first-option
+                  :placeholder="t('settings.providers.modelsPlaceholder')"
+                  :aria-label="`${provider.name} ${t('settings.providers.models')}`"
+                >
+                  <el-option
+                    v-for="model in provider.models"
+                    :key="model"
+                    :label="model"
+                    :value="model"
+                  />
+                </el-select>
               </el-form-item>
               <el-form-item :label="t('settings.providers.defaultModel')">
                 <el-select
@@ -243,12 +363,13 @@ async function syncOpenAIFromCcSwitch() {
                   allow-create
                   default-first-option
                   :aria-label="`${provider.name} ${t('settings.providers.defaultModel')}`"
+                  @change="ensureDefaultModelListed(provider)"
                 >
                   <el-option
-                    v-for="preset in modelPresets[provider.id]"
-                    :key="preset"
-                    :label="preset"
-                    :value="preset"
+                    v-for="model in provider.models"
+                    :key="model"
+                    :label="model"
+                    :value="model"
                   />
                 </el-select>
               </el-form-item>
@@ -394,6 +515,19 @@ h1 {
 .owner-preview span {
   margin-top: 4px;
   text-transform: none;
+}
+
+.provider-head-actions {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.dropdown-chevron {
+  width: 14px;
+  height: 14px;
+  margin-left: 4px;
 }
 
 .provider-stack {

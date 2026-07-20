@@ -2,8 +2,15 @@ import { defineStore } from "pinia";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { getI18nLocale, translate as t } from "../i18n";
 import { defaultLocale, normalizeLocale, type AppLocale } from "../i18n/locales";
+import {
+  fallbackProviderColor,
+  getProviderPreset,
+  isDeepSeekProvider,
+  providerPresets,
+  type ProviderPreset,
+} from "../utils/modelCatalog";
 
-export type ProviderId = "openai" | "deepseek";
+export type ProviderId = string;
 export type ChatGroupMode = "discussion" | "task";
 export type ChatRole = "user" | "assistant";
 export type MessageStatus = "done" | "thinking" | "error" | "interrupted";
@@ -27,6 +34,8 @@ export interface ProviderConfig {
   apiKey: string;
   defaultModel: string;
   wireApi?: string;
+  models: string[];
+  color: string;
 }
 
 export interface AgentModel {
@@ -157,7 +166,7 @@ export interface PatchSafetyCheck {
 interface PersistedSettings {
   locale?: unknown;
   cacheDirectory?: string;
-  providers?: Partial<Record<ProviderId, ProviderConfig>>;
+  providers?: Record<string, Partial<ProviderConfig>>;
   agentModels?: AgentModel[];
   memberLibrary?: AgentModel[];
   groups?: ChatGroup[];
@@ -195,22 +204,80 @@ interface AppCacheState {
   memberLibrary?: AgentModel[];
 }
 
-const providerDefaults: Record<ProviderId, ProviderConfig> = {
-  openai: {
-    id: "openai",
-    name: "ChatGPT",
-    baseUrl: "https://api.openai.com/v1",
+function createProviderFromPreset(preset: ProviderPreset): ProviderConfig {
+  return {
+    id: preset.id,
+    name: preset.name,
+    baseUrl: preset.baseUrl,
     apiKey: "",
-    defaultModel: "gpt-4.1-mini",
-  },
-  deepseek: {
-    id: "deepseek",
-    name: "DeepSeek",
-    baseUrl: "https://api.deepseek.com",
-    apiKey: "",
-    defaultModel: "deepseek-v4-flash",
-  },
-};
+    defaultModel: preset.defaultModel,
+    wireApi: preset.wireApi,
+    models: [...preset.models],
+    color: preset.color,
+  };
+}
+
+function normalizeProviderConfig(
+  value: Partial<ProviderConfig>,
+  fallbackId = "",
+): ProviderConfig | null {
+  const id = (value.id ?? fallbackId).trim();
+
+  if (!id) {
+    return null;
+  }
+
+  const preset = getProviderPreset(id);
+  const models = Array.isArray(value.models)
+    ? [
+        ...new Set(
+          value.models
+            .filter((model): model is string => typeof model === "string")
+            .map((model) => model.trim())
+            .filter(Boolean),
+        ),
+      ]
+    : [...(preset?.models ?? [])];
+  const defaultModel =
+    (value.defaultModel ?? "").trim() || preset?.defaultModel || models[0] || "";
+
+  if (defaultModel && !models.includes(defaultModel)) {
+    models.unshift(defaultModel);
+  }
+
+  return {
+    id,
+    name: (value.name ?? "").trim() || preset?.name || id,
+    baseUrl: (value.baseUrl ?? "").trim() || preset?.baseUrl || "",
+    apiKey: value.apiKey ?? "",
+    defaultModel,
+    wireApi: value.wireApi?.trim() || preset?.wireApi || undefined,
+    models,
+    color: value.color?.trim() || preset?.color || fallbackProviderColor(id),
+  };
+}
+
+function normalizeProviders(
+  record?: Record<string, Partial<ProviderConfig>> | null,
+): Record<ProviderId, ProviderConfig> {
+  const normalized: Record<ProviderId, ProviderConfig> = {};
+
+  for (const [key, value] of Object.entries(record ?? {})) {
+    const provider = normalizeProviderConfig(value ?? {}, key);
+
+    if (provider) {
+      normalized[provider.id] = provider;
+    }
+  }
+
+  return Object.keys(normalized).length > 0
+    ? normalized
+    : structuredClone(providerDefaults);
+}
+
+const providerDefaults: Record<ProviderId, ProviderConfig> = Object.fromEntries(
+  providerPresets.map((preset) => [preset.id, createProviderFromPreset(preset)]),
+);
 
 function getDefaultAnnouncement() {
   return t("defaults.group.announcement");
@@ -349,7 +416,8 @@ function normalizeMember(member: AgentModel): AgentModel {
     temperature: Number.isFinite(member.temperature) ? member.temperature : 0.7,
     isAdmin: Boolean(member.isAdmin),
     canWrite: Boolean(member.canWrite),
-    deepSeekLongContext: member.provider === "deepseek" ? member.deepSeekLongContext ?? true : false,
+    deepSeekLongContext:
+      member.deepSeekLongContext ?? member.provider.toLowerCase().includes("deepseek"),
   };
 }
 
@@ -382,21 +450,20 @@ function createSystemMessage(content: string): ChatMessage {
   };
 }
 
-function getModelColor(provider: ProviderId) {
-  return provider === "openai" ? "#2f76b7" : "#2f7a61";
-}
-
 function createMember(
-  provider: ProviderId,
+  providerId: ProviderId,
   name: string,
   model: string,
   systemPrompt: string,
+  providers: Record<ProviderId, ProviderConfig> = providerDefaults,
 ): AgentModel {
+  const provider = providers[providerId];
+
   return {
     id: crypto.randomUUID(),
     libraryId: crypto.randomUUID(),
     name,
-    provider,
+    provider: provider?.id ?? providerId,
     model,
     reasoningEffort: "off",
     systemPrompt,
@@ -404,8 +471,8 @@ function createMember(
     enabled: true,
     isAdmin: false,
     canWrite: false,
-    deepSeekLongContext: provider === "deepseek",
-    color: getModelColor(provider),
+    deepSeekLongContext: isDeepSeekProvider(provider ?? { id: providerId }),
+    color: provider?.color ?? fallbackProviderColor(providerId),
   };
 }
 
@@ -620,10 +687,7 @@ export const useSettingsStore = defineStore("settings", {
       this.locale = normalizeLocale(parsed.locale);
 
       if (parsed.providers) {
-        this.providers = {
-          ...structuredClone(providerDefaults),
-          ...parsed.providers,
-        };
+        this.providers = normalizeProviders(parsed.providers);
       }
 
       if (parsed.ownerProfile) {
@@ -909,16 +973,78 @@ export const useSettingsStore = defineStore("settings", {
       }
     },
 
-    addFriend(provider: ProviderId = "openai") {
-      const providerConfig = this.providers[provider];
+    resolveProvider(providerId: ProviderId): ProviderConfig {
+      return (
+        this.providers[providerId] ??
+        Object.values(this.providers)[0] ??
+        structuredClone(providerDefaults.openai)
+      );
+    },
+
+    addProvider(presetId?: string): ProviderId {
+      const preset = presetId ? getProviderPreset(presetId) : undefined;
+      const baseId = preset?.id ?? "custom";
+      let id = baseId;
+      let suffix = 1;
+
+      while (this.providers[id]) {
+        suffix += 1;
+        id = `${baseId}-${suffix}`;
+      }
+
+      const provider: ProviderConfig = preset
+        ? {
+            ...createProviderFromPreset(preset),
+            id,
+            name: suffix > 1 ? `${preset.name} ${suffix}` : preset.name,
+          }
+        : {
+            id,
+            name: t("settings.providers.customName"),
+            baseUrl: "",
+            apiKey: "",
+            defaultModel: "",
+            models: [],
+            color: fallbackProviderColor(id),
+          };
+
+      this.providers[id] = provider;
+      return id;
+    },
+
+    isProviderInUse(providerId: ProviderId) {
+      return (
+        this.memberLibrary.some((member) => member.provider === providerId) ||
+        this.groups.some((group) =>
+          group.members.some((member) => member.provider === providerId),
+        )
+      );
+    },
+
+    removeProvider(providerId: ProviderId): true | "in-use" | "last" {
+      if (Object.keys(this.providers).length <= 1) {
+        return "last";
+      }
+
+      if (this.isProviderInUse(providerId)) {
+        return "in-use";
+      }
+
+      delete this.providers[providerId];
+      return true;
+    },
+
+    addFriend(provider: ProviderId = "") {
+      const providerConfig = this.resolveProvider(provider);
       const friend = createMember(
-        provider,
+        providerConfig.id,
         makeUniqueMemberName(
           t("defaults.member.draftName", { provider: providerConfig.name }),
           this.memberLibrary,
         ),
         providerConfig.defaultModel,
         t("defaults.member.defaultPrompt"),
+        this.providers,
       );
       const libraryFriend = this.rememberMember(friend);
       return libraryFriend;
@@ -951,9 +1077,11 @@ export const useSettingsStore = defineStore("settings", {
     },
 
     updateFriendProvider(friend: AgentModel) {
-      friend.model = this.providers[friend.provider].defaultModel;
-      friend.color = getModelColor(friend.provider);
-      friend.deepSeekLongContext = friend.provider === "deepseek";
+      const providerConfig = this.resolveProvider(friend.provider);
+      friend.provider = providerConfig.id;
+      friend.model = providerConfig.defaultModel;
+      friend.color = providerConfig.color;
+      friend.deepSeekLongContext = isDeepSeekProvider(providerConfig);
       this.updateFriendProfile(friend);
     },
 
@@ -1052,12 +1180,12 @@ export const useSettingsStore = defineStore("settings", {
       return true;
     },
 
-    addMember(provider: ProviderId = "openai") {
+    addMember(provider: ProviderId = "") {
       const group = this.activeGroup;
-      const providerConfig = this.providers[provider];
+      const providerConfig = this.resolveProvider(provider);
       const nextIndex = group.members.length + 1;
       const member = createMember(
-        provider,
+        providerConfig.id,
         makeUniqueMemberName(
           t("defaults.member.nameWithIndex", {
             provider: providerConfig.name,
@@ -1067,6 +1195,7 @@ export const useSettingsStore = defineStore("settings", {
         ),
         providerConfig.defaultModel,
         t("defaults.member.defaultPrompt"),
+        this.providers,
       );
 
       group.members.push(member);
@@ -1149,9 +1278,11 @@ export const useSettingsStore = defineStore("settings", {
     },
 
     updateMemberProvider(member: AgentModel) {
-      member.model = this.providers[member.provider].defaultModel;
-      member.color = getModelColor(member.provider);
-      member.deepSeekLongContext = member.provider === "deepseek";
+      const providerConfig = this.resolveProvider(member.provider);
+      member.provider = providerConfig.id;
+      member.model = providerConfig.defaultModel;
+      member.color = providerConfig.color;
+      member.deepSeekLongContext = isDeepSeekProvider(providerConfig);
       this.rememberMember(member);
       this.activeGroup.updatedAt = new Date().toISOString();
     },
@@ -1251,17 +1382,18 @@ export const useSettingsStore = defineStore("settings", {
       this.activeGroup.updatedAt = new Date().toISOString();
     },
 
-    createMemberDraft(provider: ProviderId = "openai") {
-      const providerConfig = this.providers[provider];
+    createMemberDraft(provider: ProviderId = "") {
+      const providerConfig = this.resolveProvider(provider);
 
       return createMember(
-        provider,
+        providerConfig.id,
         makeUniqueMemberName(
           t("defaults.member.draftName", { provider: providerConfig.name }),
           this.memberLibrary,
         ),
         providerConfig.defaultModel,
         t("defaults.member.defaultPrompt"),
+        this.providers,
       );
     },
 

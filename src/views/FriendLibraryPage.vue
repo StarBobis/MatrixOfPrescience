@@ -12,7 +12,7 @@ import {
 } from "../stores/settings";
 import { chooseLocalAvatar, getAvatarSrc } from "../utils/avatar";
 import { getReadableTextColor } from "../utils/colorContrast";
-import { modelPresets } from "../utils/modelCatalog";
+import { isDeepSeekProvider } from "../utils/modelCatalog";
 
 const settingsStore = useSettingsStore();
 const { friends, groups, providers } = storeToRefs(settingsStore);
@@ -80,7 +80,7 @@ function addFriend(provider: ProviderId) {
 }
 
 function addFriendFromMenu(command: unknown) {
-  if (command === "openai" || command === "deepseek") {
+  if (typeof command === "string" && providers.value[command]) {
     addFriend(command);
   }
 }
@@ -146,8 +146,13 @@ async function removeFriend(friend: AgentModel) {
           </el-button>
           <template #dropdown>
             <el-dropdown-menu>
-              <el-dropdown-item command="openai">{{ t("friends.addOpenAI") }}</el-dropdown-item>
-              <el-dropdown-item command="deepseek">{{ t("friends.addDeepSeek") }}</el-dropdown-item>
+              <el-dropdown-item
+                v-for="option in providerOptions"
+                :key="option.value"
+                :command="option.value"
+              >
+                {{ option.label }}
+              </el-dropdown-item>
             </el-dropdown-menu>
           </template>
         </el-dropdown>
@@ -237,7 +242,7 @@ async function removeFriend(friend: AgentModel) {
               @change="settingsStore.updateFriendProfile(friend)"
             >
               <el-option
-                v-for="preset in modelPresets[friend.provider]"
+                v-for="preset in providers[friend.provider]?.models ?? []"
                 :key="preset"
                 :label="preset"
                 :value="preset"
@@ -307,7 +312,7 @@ async function removeFriend(friend: AgentModel) {
               @change="settingsStore.updateFriendProfile(friend)"
             />
           </span>
-          <span v-if="friend.provider === 'deepseek'">
+          <span v-if="isDeepSeekProvider(providers[friend.provider])">
             {{ t("members.deepSeekLongContext") }}
             <el-switch
               v-model="friend.deepSeekLongContext"

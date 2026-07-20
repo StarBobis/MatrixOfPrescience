@@ -49,15 +49,36 @@
       "title": "My Profile"
     },
     "providers": {
+      "add": "Add provider",
+      "addCustom": "Custom provider",
       "ccswitchFailed": "Failed to sync CC Switch: {error}",
+      "ccswitchNoOpenAI": "No OpenAI provider found. Add one first.",
       "ccswitchSuccess": "Synced OpenAI settings from {source}",
       "ccswitchSync": "Sync from CC Switch",
       "ccswitchWarnings": {
         "codexOAuth": "The active CC Switch provider is Codex OAuth/ChatGPT. Use CC Switch local proxy or switch the provider to OpenAI Chat format.",
         "responses": "The active Codex provider is configured for OpenAI Responses. This app sends OpenAI Chat Completions, so use CC Switch local proxy routing or choose OpenAI Chat format."
       },
+      "color": "Accent color",
+      "confirmRemove": {
+        "message": "Remove provider \"{name}\"? This cannot be undone.",
+        "title": "Remove provider"
+      },
+      "customName": "Custom Provider",
       "defaultModel": "Default model",
-      "title": "Provider Keys"
+      "models": "Models",
+      "modelsPlaceholder": "Type a model ID and press Enter",
+      "name": "Name",
+      "remove": "Remove",
+      "removeBlocked": {
+        "in-use": "This provider is still used by friends or group members and cannot be removed.",
+        "last": "At least one provider must be kept."
+      },
+      "title": "Model Providers",
+      "wireApi": "Wire API",
+      "wireApiAuto": "Auto",
+      "wireApiChat": "Chat Completions",
+      "wireApiResponses": "Responses"
     },
     "languageOptions": {
       "en": "English",

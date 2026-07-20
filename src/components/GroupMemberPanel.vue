@@ -14,6 +14,7 @@ const props = defineProps<{
   providerOptions: Array<{ label: string; value: ProviderId }>;
   modelPresets: Record<ProviderId, string[]>;
   reasoningEffortOptions: Array<{ label: string; value: AgentReasoningEffort }>;
+  deepSeekProviderIds?: string[];
 }>();
 
 const emit = defineEmits<{
@@ -35,6 +36,10 @@ let memberCardWatchTimer: number | undefined;
 let lastPointerPosition: { x: number; y: number } | null = null;
 const memberCardHideDelayMs = 140;
 const memberCardWatchIntervalMs = 360;
+
+const deepSeekProviderIdSet = computed(
+  () => new Set(props.deepSeekProviderIds ?? ["deepseek"]),
+);
 
 const sortedMembers = computed(() =>
   props.members
@@ -558,7 +563,7 @@ onBeforeUnmount(() => {
               </el-select>
             </label>
 
-            <div v-if="member.provider === 'deepseek'" class="profile-switch-row">
+            <div v-if="deepSeekProviderIdSet.has(member.provider)" class="profile-switch-row">
               <span>{{ t("members.deepSeekLongContext") }}</span>
               <el-switch
                 v-model="member.deepSeekLongContext"

@@ -47,7 +47,7 @@ import {
 import {
   DEFAULT_CONTEXT_LIMIT,
   getProviderModelContextLimit,
-  modelPresets,
+  isDeepSeekProvider,
 } from "../utils/modelCatalog";
 import { evaluatePatchSafety } from "../utils/patchSafety";
 
@@ -155,16 +155,24 @@ const markdown = new MarkdownIt({
   typographer: true,
 });
 
-const providerOptions: Array<{ label: string; value: ProviderId }> = [
-  {
-    label: "ChatGPT / OpenAI",
-    value: "openai",
-  },
-  {
-    label: "DeepSeek",
-    value: "deepseek",
-  },
-];
+const providerOptions = computed<Array<{ label: string; value: ProviderId }>>(() =>
+  Object.values(providers.value).map((provider) => ({
+    label: provider.name,
+    value: provider.id,
+  })),
+);
+
+const modelPresets = computed<Record<ProviderId, string[]>>(() =>
+  Object.fromEntries(
+    Object.values(providers.value).map((provider) => [provider.id, provider.models]),
+  ),
+);
+
+const deepSeekProviderIds = computed(() =>
+  Object.values(providers.value)
+    .filter((provider) => isDeepSeekProvider(provider))
+    .map((provider) => provider.id),
+);
 
 const CACHE_PREFIX_MESSAGE_COUNT = 4;
 const RECENT_CONVERSATION_MESSAGE_COUNT = 14;
@@ -257,11 +265,11 @@ const emit = defineEmits<{
 }>();
 
 function getProvider(model: AgentModel) {
-  return providers.value[model.provider];
+  return providers.value[model.provider] ?? Object.values(providers.value)[0];
 }
 
 function getProviderLabel(provider: ProviderId) {
-  return providerOptions.find((option) => option.value === provider)?.label ?? provider;
+  return providers.value[provider]?.name ?? provider;
 }
 
 function renderMarkdown(source: string) {
@@ -289,7 +297,7 @@ function estimateConversationTokens(messages: ApiChatMessage[], systemPrompt = "
 }
 
 function getModelContextLimit(member: AgentModel) {
-  return getProviderModelContextLimit(member.provider, member.model, {
+  return getProviderModelContextLimit(getProvider(member), member.model, {
     deepSeekLongContext: member.deepSeekLongContext,
   });
 }
@@ -378,10 +386,9 @@ function openCreateGroupDialog() {
   newGroupDescription.value = t("defaults.newGroup.description");
   newGroupAnnouncement.value = t("defaults.newGroup.announcement");
   newGroupMode.value = "discussion";
-  newGroupMembers.value = [
-    settingsStore.createMemberDraft("openai"),
-    settingsStore.createMemberDraft("deepseek"),
-  ];
+  newGroupMembers.value = Object.keys(providers.value)
+    .slice(0, 2)
+    .map((providerId) => settingsStore.createMemberDraft(providerId));
   groupDialogOpen.value = true;
 }
 
@@ -402,7 +409,7 @@ function setDraftAdmin(memberId: string) {
   }
 }
 
-function addDraftMember(provider: ProviderId = "openai") {
+function addDraftMember(provider: ProviderId = "") {
   const member = settingsStore.createMemberDraft(provider);
   makeMemberNameUnique(member, newGroupMembers.value);
   newGroupMembers.value.push(member);
@@ -438,11 +445,12 @@ function removeDraftMember(memberId: string) {
 }
 
 function updateDraftMemberProvider(member: AgentModel) {
-  const provider = providers.value[member.provider];
+  const provider = getProvider(member);
 
+  member.provider = provider.id;
   member.model = provider.defaultModel;
-  member.color = member.provider === "openai" ? "#2f76b7" : "#2f7a61";
-  member.deepSeekLongContext = member.provider === "deepseek";
+  member.color = provider.color;
+  member.deepSeekLongContext = isDeepSeekProvider(provider);
 }
 
 function createGroup() {
@@ -501,7 +509,7 @@ function selectGroup(groupId: string) {
   scrollToBottom();
 }
 
-function addMember(provider: ProviderId = "openai") {
+function addMember(provider: ProviderId = "") {
   settingsStore.addMember(provider);
 }
 
@@ -3160,6 +3168,7 @@ async function sendMessage() {
           :get-provider-label="getProviderLabel"
           :provider-options="providerOptions"
           :model-presets="modelPresets"
+          :deep-seek-provider-ids="deepSeekProviderIds"
           @add-member="addMember"
           @add-friend-member="addFriendMember"
           @remove-member="removeMember"

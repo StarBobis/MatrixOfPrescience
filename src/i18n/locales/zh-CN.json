@@ -49,15 +49,36 @@
       "title": "我的资料"
     },
     "providers": {
+      "add": "添加供应商",
+      "addCustom": "自定义供应商",
       "ccswitchFailed": "同步 CC Switch 失败：{error}",
+      "ccswitchNoOpenAI": "未找到 OpenAI 供应商，请先添加",
       "ccswitchSuccess": "已从 {source} 同步 OpenAI 设置",
       "ccswitchSync": "从 CC Switch 同步",
       "ccswitchWarnings": {
         "codexOAuth": "当前 CC Switch provider 是 Codex OAuth/ChatGPT。请走 CC Switch 本地代理，或把 provider 切到 OpenAI Chat 格式。",
         "responses": "当前 Codex provider 是 OpenAI Responses 格式。本应用发送 OpenAI Chat Completions，请启用 CC Switch 本地代理或选择 OpenAI Chat 格式。"
       },
+      "color": "标识颜色",
+      "confirmRemove": {
+        "message": "确定删除供应商「{name}」吗？此操作不可撤销。",
+        "title": "删除供应商"
+      },
+      "customName": "自定义供应商",
       "defaultModel": "默认模型",
-      "title": "Provider Key"
+      "models": "模型列表",
+      "modelsPlaceholder": "输入模型 ID 后回车添加",
+      "name": "名称",
+      "remove": "删除",
+      "removeBlocked": {
+        "in-use": "该供应商仍被群友或群成员使用，无法删除",
+        "last": "至少需要保留一个供应商"
+      },
+      "title": "模型供应商",
+      "wireApi": "接口格式",
+      "wireApiAuto": "自动",
+      "wireApiChat": "Chat Completions",
+      "wireApiResponses": "Responses"
     },
     "languageOptions": {
       "en": "英文",

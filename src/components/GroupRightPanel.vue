@@ -32,6 +32,7 @@ defineProps<{
   getProviderLabel: (provider: ProviderId) => string;
   providerOptions: Array<{ label: string; value: ProviderId }>;
   modelPresets: Record<ProviderId, string[]>;
+  deepSeekProviderIds?: string[];
 }>();
 
 const emit = defineEmits<{
@@ -114,6 +115,7 @@ function finishAnnouncementEdit() {
       :provider-options="providerOptions"
       :model-presets="modelPresets"
       :reasoning-effort-options="reasoningEffortOptions"
+      :deep-seek-provider-ids="deepSeekProviderIds"
       @add-member="(provider) => emit('addMember', provider)"
       @add-friend-member="(friendId) => emit('addFriendMember', friendId)"
       @remove-member="(memberId) => emit('removeMember', memberId)"
