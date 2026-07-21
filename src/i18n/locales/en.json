@@ -192,11 +192,17 @@
   "chat": {
     "agree": "Agree {count}",
     "agreeVoterTitle": "{name} agreed with this message",
+    "voterTitle": {
+      "agree": "{name} agreed with this message",
+      "disagree": "{name} disagreed with this message",
+      "supplement": "{name} thinks this needs supplementing"
+    },
     "chooseWorkspaceTitle": "Choose workspace folder",
     "composerLabel": "Message",
     "composerPlaceholder": "Type a message. Enter to send, Shift + Enter for a new line",
     "disagree": "Disagree {count}",
     "allAgree": "All agree",
+    "usageSummary": "Tokens {tokens} · Turns {turns} · Cache hit {rate}",
     "context": {
       "cache": "Cache: {rate}% hit ({hit} hit / {miss} miss)",
       "cacheShort": "{rate}% cache",
@@ -294,6 +300,7 @@
       "message": "Discard \"{title}\"? This removes it from the approval queue.",
       "title": "Discard patch?"
     },
+    "filesChanged": "{count} files changed",
     "noFiles": "No specific files detected",
     "panelTitle": "Approval queue",
     "pendingCount": "{count} pending",

@@ -482,10 +482,14 @@ pub(crate) fn apply_patch_tool(workspace: &Path, arguments: &Value) -> Result<St
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("\n");
+    let (stat_added, stat_deleted) = patch_line_stats(patch_text);
 
     Ok(format!(
-        "Patch applied to files:\n{}\n{}{}",
+        "Patch applied to files:\n{}\n({} files changed, +{}, -{})\n{}{}",
         applied_files.join("\n"),
+        applied_files.len(),
+        stat_added,
+        stat_deleted,
         if normalized {
             "Patch format was normalized before applying (missing context markers and/or incorrect hunk counts were repaired).\n"
         } else {
@@ -556,4 +560,35 @@ pub(crate) async fn apply_patch_proposal(
 
     let _ = fs::remove_file(patch_file);
     result
+}
+
+/// Counts added and removed lines in a unified diff, so the apply result can
+/// report "+X, -Y" alongside the touched files.
+fn patch_line_stats(patch_text: &str) -> (usize, usize) {
+    let mut added = 0usize;
+    let mut deleted = 0usize;
+
+    for line in patch_text.lines() {
+        if line.starts_with("+++") || line.starts_with("---") {
+            continue;
+        }
+        if line.starts_with('+') {
+            added += 1;
+        } else if line.starts_with('-') {
+            deleted += 1;
+        }
+    }
+
+    (added, deleted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn patch_line_stats_counts_added_and_deleted_lines() {
+        let patch = "diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,3 @@\n-old\n+new\n+added\n context\n";
+        assert_eq!(patch_line_stats(patch), (2, 1));
+    }
 }

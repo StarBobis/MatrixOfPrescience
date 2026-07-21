@@ -2,7 +2,8 @@ use serde_json::{json, Value};
 use std::{fs, path::Path};
 use tauri::AppHandle;
 
-use crate::{emit_tool_chunk, emit_trace_step, tools, ChatTraceStep, StrUtils, TraceCtx};
+use crate::chat::{emit_tool_chunk, emit_trace_step};
+use crate::{tools, ChatTraceStep, StrUtils, TraceCtx};
 
 pub(crate) const VALIDATION_REQUIRED_INSTRUCTION: &str = "You changed files in the workspace, so validation must pass before the final visible answer. Call run_command with the most appropriate build, test, type-check, lint, or compile command. Prefer project scripts and manifests already present in the workspace. If validation fails, immediately diagnose the first actionable error, fix its root cause, and rerun validation until it passes. Once a validation command passes, do not rerun the same command merely to be safe; continue any remaining requested work, or answer if the task is done.";
 pub(crate) const VALIDATION_FAILURE_RECOVERY_INSTRUCTION: &str = "The previous build, test, type-check, lint, or compile command failed. Do not stop or summarize the failure as the final answer. Inspect the first actionable error and relevant source, fix the root cause with the available workspace tools, then rerun the appropriate validation command. Continue the repair-and-validate loop until validation passes. Once it passes, do not repeat the same validation command merely to be safe; continue remaining work or answer if done. Preserve unrelated user changes and do not hide errors by weakening or skipping validation.";

@@ -192,11 +192,17 @@
   "chat": {
     "agree": "同意 {count}",
     "agreeVoterTitle": "{name} 同意了这条发言",
+    "voterTitle": {
+      "agree": "{name} 同意了这条发言",
+      "disagree": "{name} 不同意这条发言",
+      "supplement": "{name} 认为需要补充"
+    },
     "chooseWorkspaceTitle": "选择工作文件夹",
     "composerLabel": "消息",
     "composerPlaceholder": "输入消息，Enter 发送，Shift + Enter 换行",
     "disagree": "不同意 {count}",
     "allAgree": "全部同意",
+    "usageSummary": "Tokens {tokens} · 回合 {turns} · 缓存命中 {rate}",
     "context": {
       "cache": "缓存：命中 {rate}%（命中 {hit} / 未命中 {miss}）",
       "cacheShort": "缓存 {rate}%",
@@ -294,6 +300,7 @@
       "message": "丢弃“{title}”？此操作会将它从审批队列中移除。",
       "title": "丢弃补丁？"
     },
+    "filesChanged": "{count} 个文件已更改",
     "noFiles": "未识别具体文件",
     "panelTitle": "审批提示",
     "pendingCount": "{count} 待处理",

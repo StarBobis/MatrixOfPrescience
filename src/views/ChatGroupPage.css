@@ -502,7 +502,6 @@
 }
 
 .status-pill,
-.reaction-pill,
 .message-duration-badge {
   display: inline-flex;
   min-height: 24px;
@@ -521,21 +520,18 @@
   flex: 0 0 auto;
 }
 
-.status-pill.done,
-.reaction-pill.agree {
+.status-pill.done {
   color: var(--success);
   background: var(--success-soft);
 }
 
 .status-pill.thinking,
-.status-pill.interrupted,
-.reaction-pill.supplement {
+.status-pill.interrupted {
   color: var(--warning);
   background: var(--warning-soft);
 }
 
-.status-pill.error,
-.reaction-pill.disagree {
+.status-pill.error {
   color: var(--danger);
   background: var(--danger-soft);
 }
@@ -545,6 +541,41 @@
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 6px;
+}
+
+.reaction-voter.agree {
+  border-color: color-mix(in srgb, var(--success) 38%, var(--separator));
+}
+
+.reaction-voter.supplement {
+  border-color: color-mix(in srgb, var(--warning) 42%, var(--separator));
+}
+
+.reaction-voter.disagree {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--separator));
+}
+
+.reaction-voter-status {
+  flex: 0 0 auto;
+  font-size: 12px;
+}
+
+.reaction-voter.agree .reaction-voter-status {
+  color: var(--success);
+}
+
+.reaction-voter.supplement .reaction-voter-status {
+  color: var(--warning);
+}
+
+.reaction-voter.disagree .reaction-voter-status {
+  color: var(--danger);
+}
+
+.reaction-voters.complete {
+  padding: 4px 6px;
+  border-radius: 10px;
+  background: var(--success-soft);
 }
 
 .plan-dock {
@@ -769,10 +800,6 @@
   margin-top: 12px;
   padding-top: 10px;
   border-top: 1px solid var(--separator);
-}
-
-.reaction-pill.agree.complete {
-  border-color: color-mix(in srgb, var(--success) 42%, transparent);
 }
 
 .message-duration-badge {

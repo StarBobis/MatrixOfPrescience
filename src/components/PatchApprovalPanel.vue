@@ -4,6 +4,7 @@ import { ElMessageBox } from "element-plus";
 import { Check, Trash2, X } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import type { AgentPatchProposal, PatchApprovalStatus } from "../stores/settings";
+import { parsePatchStats, type PatchStats } from "../utils/patchStats";
 
 const props = defineProps<{
   patchProposals: AgentPatchProposal[];
@@ -19,6 +20,20 @@ const { t } = useI18n();
 const pendingPatchCount = computed(
   () => props.patchProposals.filter((proposal) => proposal.status === "pending").length,
 );
+
+const patchStatsById = computed(() => {
+  const stats = new Map<string, PatchStats>();
+
+  for (const proposal of props.patchProposals) {
+    stats.set(proposal.id, parsePatchStats(proposal.patchText ?? ""));
+  }
+
+  return stats;
+});
+
+function getPatchStats(proposal: AgentPatchProposal) {
+  return patchStatsById.value.get(proposal.id) ?? { files: 0, added: 0, deleted: 0 };
+}
 
 const patchRiskType: Record<AgentPatchProposal["riskLevel"], "success" | "warning" | "danger"> = {
   low: "success",
@@ -117,6 +132,11 @@ async function confirmDiscard(proposal: AgentPatchProposal) {
           <div>
             <strong :id="`patch-title-${proposal.id}`">{{ proposal.title }}</strong>
             <span>{{ proposal.proposerName }} · {{ proposal.createdAt }}</span>
+            <span v-if="proposal.patchText" class="patch-stat">
+              {{ t("patch.filesChanged", { count: getPatchStats(proposal).files }) }}
+              <b class="patch-stat-added">+{{ getPatchStats(proposal).added }}</b>
+              <b class="patch-stat-deleted">−{{ getPatchStats(proposal).deleted }}</b>
+            </span>
           </div>
           <div class="patch-tags">
             <el-tag size="small" :type="patchRiskType[proposal.riskLevel]">
@@ -454,6 +474,28 @@ async function confirmDiscard(proposal: AgentPatchProposal) {
 .patch-card-head span,
 .patch-summary {
   color: var(--text-secondary);
+}
+
+.patch-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 2px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.patch-stat b {
+  font-weight: 700;
+}
+
+.patch-stat-added {
+  color: var(--success);
+}
+
+.patch-stat-deleted {
+  color: var(--danger);
 }
 
 .patch-safety {

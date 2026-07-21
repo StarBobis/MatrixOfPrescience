@@ -3,7 +3,9 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue"
 import { open } from "@tauri-apps/plugin-dialog";
 import { ElMessage } from "element-plus";
 import {
+  Check,
   ChevronDown,
+  CircleAlert,
   CircleStop as CircleClose,
   ClipboardList,
   Copy as CopyDocument,
@@ -14,6 +16,7 @@ import {
   Send as Promotion,
   Wifi,
   Wrench as Tools,
+  X,
 } from "@lucide/vue";
 import { useI18n } from "vue-i18n";
 import PatchApprovalPanel from "./PatchApprovalPanel.vue";
@@ -692,22 +695,35 @@ function allPeersAgreed(message: ChatMessage) {
   return supplementCount === 0 && disagreeCount === 0 && voters.every((member) => agreeMemberIds.has(member.id));
 }
 
-function getAgreeLabel(message: ChatMessage) {
-  if (allPeersAgreed(message)) {
-    return t("chat.allAgree");
-  }
+type VoteStatus = "agree" | "supplement" | "disagree";
 
-  return t("chat.agree", { count: (message.agreeMemberIds ?? []).length });
+interface MessageVoter {
+  member: AgentModel;
+  status: VoteStatus;
 }
 
-function getAgreeVoters(message: ChatMessage): AgentModel[] {
+function getMessageVoters(message: ChatMessage): MessageVoter[] {
   const members = props.activeGroup?.members ?? props.activeMembers;
   const seen = new Set<string>();
+  const voters: MessageVoter[] = [];
 
-  return (message.agreeMemberIds ?? [])
-    .filter((id) => !seen.has(id) && seen.add(id))
-    .map((id) => members.find((member) => member.id === id))
-    .filter((member): member is AgentModel => Boolean(member));
+  const push = (ids: string[] | undefined, status: VoteStatus) => {
+    for (const id of ids ?? []) {
+      if (seen.has(id)) {
+        continue;
+      }
+      seen.add(id);
+      const member = members.find((item) => item.id === id);
+      if (member) {
+        voters.push({ member, status });
+      }
+    }
+  };
+
+  push(message.agreeMemberIds, "agree");
+  push(message.supplementMemberIds, "supplement");
+  push(message.disagreeMemberIds, "disagree");
+  return voters;
 }
 
 function getExecutionItems(message: ChatMessage): ChatMessageExecutionItem[] {
@@ -1394,6 +1410,37 @@ function getCacheHitRate(message: ChatMessage) {
   return ((hit / total) * 100).toFixed(1);
 }
 
+// Kun-style cumulative usage at the composer bottom: total tokens, turns and
+// cache hit rate across the group's messages, not just per-message tooltips.
+const groupUsage = computed(() => {
+  let promptTokens = 0;
+  let completionTokens = 0;
+  let cacheHit = 0;
+  let cacheMiss = 0;
+  let turns = 0;
+
+  for (const message of props.messages) {
+    if (message.role !== "assistant") {
+      continue;
+    }
+    turns += 1;
+    promptTokens += message.contextPromptTokens ?? 0;
+    completionTokens += message.contextCompletionTokens ?? 0;
+    cacheHit += message.contextCacheHitTokens ?? 0;
+    cacheMiss += message.contextCacheMissTokens ?? 0;
+  }
+
+  const totalTokens = promptTokens + completionTokens;
+  const cacheTotal = cacheHit + cacheMiss;
+
+  return {
+    turns,
+    tokens: formatTokenCount(totalTokens),
+    cacheRate: cacheTotal > 0 ? `${Math.round((cacheHit / cacheTotal) * 100)}%` : "-",
+    hasUsage: totalTokens > 0 || cacheTotal > 0,
+  };
+});
+
 defineExpose({
   collapseExecutionPanel,
   scrollToBottom,
@@ -1788,38 +1835,39 @@ defineExpose({
           </div>
 
           <div class="message-reactions">
-            <span class="reaction-pill agree" :class="{ complete: allPeersAgreed(message) }">
-              {{ getAgreeLabel(message) }}
-            </span>
-            <span class="reaction-pill supplement">
-              {{ t("chat.supplement", { count: (message.supplementMemberIds ?? []).length }) }}
-            </span>
-            <span class="reaction-pill disagree">
-              {{ t("chat.disagree", { count: (message.disagreeMemberIds ?? []).length }) }}
-            </span>
             <span v-if="formatDuration(message.durationMs)" class="message-duration-badge">
               {{ t("chat.messageMeta.duration", { duration: formatDuration(message.durationMs) }) }}
             </span>
           </div>
 
-          <div v-if="getAgreeVoters(message).length > 0" class="reaction-voters">
+          <div
+            v-if="getMessageVoters(message).length > 0"
+            class="reaction-voters"
+            :class="{ complete: allPeersAgreed(message) }"
+          >
             <span
-              v-for="voter in getAgreeVoters(message)"
-              :key="voter.id"
+              v-for="entry in getMessageVoters(message)"
+              :key="entry.member.id"
               class="reaction-voter"
-              :title="t('chat.agreeVoterTitle', { name: voter.name })"
+              :class="entry.status"
+              :title="t(`chat.voterTitle.${entry.status}`, { name: entry.member.name })"
             >
               <span
                 class="reaction-voter-avatar"
                 :style="{
-                  background: voter.color,
-                  color: getReadableTextColor(voter.color),
+                  background: entry.member.color,
+                  color: getReadableTextColor(entry.member.color),
                 }"
               >
-                <img v-if="voter.avatar" :src="getAvatarSrc(voter.avatar)" alt="" />
-                <span v-else>{{ getInitial(voter.name) }}</span>
+                <img v-if="entry.member.avatar" :src="getAvatarSrc(entry.member.avatar)" alt="" />
+                <span v-else>{{ getInitial(entry.member.name) }}</span>
               </span>
-              <span class="reaction-voter-name">{{ voter.name }}</span>
+              <span class="reaction-voter-name">{{ entry.member.name }}</span>
+              <el-icon class="reaction-voter-status">
+                <Check v-if="entry.status === 'agree'" />
+                <CircleAlert v-else-if="entry.status === 'supplement'" />
+                <X v-else />
+              </el-icon>
             </span>
           </div>
         </article>
@@ -1913,6 +1961,16 @@ defineExpose({
             />
           </el-select>
         </div>
+
+        <span v-if="groupUsage.hasUsage" class="composer-usage">
+          {{
+            t("chat.usageSummary", {
+              tokens: groupUsage.tokens,
+              turns: groupUsage.turns,
+              rate: groupUsage.cacheRate,
+            })
+          }}
+        </span>
 
         <div class="composer-button-group">
           <el-button
@@ -2333,10 +2391,6 @@ defineExpose({
 .execution-panel {
   display: grid;
   gap: 8px;
-  border: 1px solid #dfe9e3;
-  border-radius: 8px;
-  background: #f7faf8;
-  padding: 10px;
 }
 
 .execution-segment {
@@ -2891,6 +2945,17 @@ defineExpose({
   min-width: 0;
 }
 
+.composer-usage {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .composer-approval-label {
   flex: 0 0 auto;
   color: #5a6760;
@@ -3163,11 +3228,6 @@ defineExpose({
 .context-tooltip,
 .context-tooltip strong {
   color: var(--text-primary);
-}
-
-.execution-panel {
-  border-color: var(--separator);
-  background: var(--surface-secondary);
 }
 
 .execution-segment,
